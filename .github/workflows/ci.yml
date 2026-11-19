@@ -1,0 +1,49 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest anthropic
+      - run: python -m compileall -q qgis_plugin/wwnet
+      - run: pytest -q qgis_plugin/tests
+
+  wheel:
+    # abi3 wheel for QGIS's bundled Python (Windows OSGeo4W first)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: PyO3/maturin-action@v1
+        with:
+          working-directory: crates/wwnet-py
+          command: build
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wwnet-wheel-windows
+          path: crates/wwnet-py/dist
