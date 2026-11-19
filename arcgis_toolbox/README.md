@@ -1,0 +1,105 @@
+# WWNet ArcGIS Pro toolbox
+
+Python toolbox (`WWNet.pyt`) for **ArcGIS Pro 3.3+** that fronts the WWNet wastewater design tool
+(Water Corporation WA, DS 50 gravity sewers). The design engine stays in the `wwnet` command-line tool;
+the toolbox creates and maps models, runs checks / design / traces, and hosts the optional
+Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the QGIS plugin.
+
+## Tools
+
+| Tool | What it does |
+|---|---|
+| New Model | Creates a GeoPackage from `schema.sql` (sqlite3) and adds the layers to the active map in a `WWNet` group layer |
+| Add Model To Map | Adds the `wwn_*` layers (`<file>.gpkg\main.<table>`) of an existing model and applies symbology: nodes by `node_type`, conduits by DN with an Arcade label `DN225 1:300`. Symbology failures only warn |
+| Check Model | `wwnet check --json`; messages via AddMessage/AddWarning/AddError; optional output issues table |
+| Run Design | `wwnet design --json`; pass/warn/fail summary, failing checks with DS 50 clauses; optionally adds / joins `wwn_results_conduits` and selects failed conduits |
+| Trace | Upstream / downstream from a node (value list filled from the Nodes layer); selects traced nodes and conduits |
+| Pipe Capacity | Colebrook-White calculator (DN, grade, ks, flow) + DS 50 checks; uses `wwnet_native` if importable, else the shared Python fallback |
+| Set Assistant API Key | Stores the Anthropic key (`GPEncryptedString`) with Windows DPAPI; default model / effort; optional CLI path |
+| Ask WWNet Assistant | DS 50 assistant with tools `list_layers`, `get_selected_features`, `query_features`, `get_feature`, `pipe_capacity`, `check_conduit`, `residential_gsdf`, `lookup_ds50`, `propose_edits` |
+
+## Install
+
+1. Extract `wwnet-arcgis-<ver>.zip` (build it with `python package.py`, or use the repo checkout directly)
+   to a folder you can write to, e.g. `C:\Tools\WWNet-ArcGIS`.
+2. In ArcGIS Pro: Catalog pane > Toolboxes > right-click > **Add Toolbox** > select `WWNet.pyt`.
+   After updating files, right-click the toolbox > Refresh (or restart Pro) because Pro caches Python modules.
+3. **CLI**: `wwnet.exe` is located in this order: path set in *Set Assistant API Key* > `PATH` >
+   `<toolbox>\bin\wwnet.exe`. Either copy `target\release\wwnet.exe` into `bin\` or build the zip with
+   `python package.py --cli path\to\wwnet.exe`.
+4. **Assistant only** (everything else works in the default environment): clone the Pro Python environment,
+   because `arcgispro-py3` is read-only:
+   - Pro > Settings > **Package Manager** > Environment Manager > *Clone Default*; activate the clone and restart Pro.
+   - Start *Python Command Prompt* from the ArcGIS start-menu folder and run `pip install anthropic`.
+   - Optional (faster hydraulics): `pip install wwnet_native-<ver>-cp3xx-abi3-win_amd64.whl`
+     (built from `crates/wwnet-py`; the toolbox falls back to pure Python without it).
+5. Run **Set Assistant API Key**. The key is encrypted with DPAPI (current Windows user) in
+   `%APPDATA%\WWNet\anthropic_key.bin`; model / effort / CLI path go in `%APPDATA%\WWNet\settings.json`.
+   Lookup order when running: `ANTHROPIC_API_KEY` environment variable, then the DPAPI file. The key is never printed.
+
+### Development (no packaging)
+Keep the toolbox inside the repository: `wwnet_arcgis/shared.py` then imports the shared modules straight from
+`../qgis_plugin/wwnet` (aliased as `wwnet_shared`). The packaged zip carries a copy under `wwnet_shared/`
+(`core/*` and `assistant/{engine,client,prompt,tools,install}.py`; QGIS-dependent files are never copied, and a
+test enforces that nothing shipped imports `qgis` / Qt).
+
+## Corporate IT caveats
+- The default environment (`arcgispro-py3`) is read-only for most users: the assistant needs a **cloned**
+  environment with `anthropic` installed. IT may need to allow pip / a package mirror for that clone.
+- The assistant needs outbound **HTTPS (443) to `api.anthropic.com`**; behind a TLS-inspecting proxy the corporate
+  root CA must be trusted by the cloned environment. Check, design, trace and capacity need no network.
+- Pro must be allowed to run `wwnet.exe` (application-control / AppLocker rules may block unsigned binaries).
+- `%APPDATA%\WWNet` is per user (roaming); DPAPI blobs only decrypt for the same Windows user, so a copied key file
+  is useless on another account.
+
+## Data privacy
+When the assistant uses its tools, **attribute values of the features it reads** (IDs, levels, DN, grades, notes ...)
+and your question are sent to Anthropic's API, together with the DS 50 ruleset and schema summary. Geometry is not
+sent. Do not use the assistant on models containing data you may not disclose. Conversation history stored locally
+in `%APPDATA%\WWNet\history\<hash>.json` (one file per project + map) keeps only your questions and the
+assistant's final answers; tick **Reset conversation** to delete it.
+
+## The assistant and edits
+`propose_edits` never writes by itself. With **Apply proposed edits** unticked (default) the run prints the proposals
+as a table (layer, id, field, current, proposed) and a note to re-run with the box ticked. With it ticked, the
+proposals made *in that run* are validated against the schema (enums, types, no id/geometry edits, results/issues
+tables read-only) and written with `arcpy.da.Editor` + `UpdateCursor`; each change is reported (`old -> new`).
+Nothing else is ever written. Because each run is a fresh model call, a re-run may propose slightly different edits:
+review the messages afterwards.
+
+## Editing GeoPackages in Pro
+- Pro reads GeoPackage as a simple feature class (`file.gpkg\main.wwn_conduits`). Editing is supported; `fid` is the
+  ObjectID and tables need the `fid` primary key from `schema.sql`.
+- Do not have an open Pro **Edit** session with unsaved edits on the layer (or a join on it) when applying
+  assistant edits: the cursor will fail with a lock error. Save/discard first.
+- The `wwnet` CLI opens the file itself: save edits in Pro before Check/Design. Remove joins before editing.
+- `wwn_results_conduits` and `wwn_issues` are rewritten by `wwnet design`; treat them as read-only.
+- Layers are added by catalog path (`main.<table>`); if a table is missing from `gpkg_contents` it is skipped.
+
+## Feature comparison with the QGIS plugin
+
+| Feature | QGIS plugin | ArcGIS toolbox |
+|---|---|---|
+| New / open model, grouped layers | yes (menu + toolbar) | yes (tools) |
+| Styling | nodes by type, conduits by DN + label, value-map widgets, defaults | nodes by type, conduits by DN + Arcade label; no form widgets/defaults |
+| Check model | dock with click-to-zoom list | geoprocessing messages + optional table (no dock) |
+| Design run | `wwnet design` result in layer | summary, results table/join, select failed |
+| Trace | via CLI/QGIS | upstream/downstream tool with selection |
+| Pipe capacity | assistant tool only | dedicated calculator tool |
+| Assistant UI | chat dock, streaming, cancel | tool dialog, streamed to messages, no cancel mid-run |
+| Assistant tools / engine / prompt | shared | **same shared modules** |
+| Edit approval | per-edit dialog, selects features | tick-box up front; proposals table; applied only in that run |
+| Key storage | QGIS auth DB / QgsSettings | Windows DPAPI file / env var |
+| `anthropic` install | one-click pip | manual (cloned env) |
+| Conversation | live in dock | persisted per map, resettable |
+| Platforms | Windows/Linux/macOS | Windows (ArcGIS Pro) |
+
+## Development
+
+    pip install pytest anthropic
+    cargo build -p wwnet-cli          # CLI-dependent tests skip without it (or set WWNET_EXE)
+    pytest arcgis_toolbox/tests -q    # no ArcGIS needed: tests use a fake `arcpy` over sqlite3
+    python arcgis_toolbox/package.py  # dist/wwnet-arcgis-<ver>.zip
+
+Not verifiable outside ArcGIS Pro (see the final notes in the change description): real `arcpy` behaviour for
+layer/group creation, symbology, `Editor` on GeoPackage, joins and selections, parameter UI, and the real DPAPI calls.

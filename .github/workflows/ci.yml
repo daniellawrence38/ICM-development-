@@ -30,6 +30,25 @@ jobs:
       - run: python -m compileall -q qgis_plugin/wwnet
       - run: pytest -q qgis_plugin/tests
 
+  arcgis-toolbox:
+    # ArcGIS Pro toolbox: tests run against a fake arcpy; CLI-dependent tests need the built binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p wwnet-cli
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest anthropic pyflakes
+      - run: python -m py_compile arcgis_toolbox/WWNet.pyt
+      - run: python -m compileall -q arcgis_toolbox/wwnet_arcgis
+      - run: python -m pyflakes arcgis_toolbox/WWNet.pyt arcgis_toolbox/wwnet_arcgis
+      - run: pytest -q arcgis_toolbox/tests
+        env:
+          WWNET_EXE: ${{ github.workspace }}/target/debug/wwnet
+
   wheel:
     # abi3 wheel for QGIS's bundled Python (Windows OSGeo4W first)
     runs-on: windows-latest

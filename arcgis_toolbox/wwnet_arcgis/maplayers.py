@@ -1,0 +1,81 @@
+"""Add WWNet GeoPackage layers to the active map (arcpy.mp) in a "WWNet" group layer."""
+from __future__ import annotations
+
+from . import gpkg, symbology
+
+GROUP_NAME = "WWNet"
+
+
+def active_map(arcpy):
+    m = arcpy.mp.ArcGISProject("CURRENT").activeMap
+    if m is None:
+        raise RuntimeError("No active map. Open a map view and run the tool again.")
+    return m
+
+
+def _find_group(m):
+    for lyr in m.listLayers():
+        if getattr(lyr, "isGroupLayer", False) and lyr.name == GROUP_NAME:
+            return lyr
+    return None
+
+
+def _ensure_group(m, msgs):
+    g = _find_group(m)
+    if g is not None:
+        return g
+    try:
+        g = m.createGroupLayer(GROUP_NAME)
+        return g
+    except Exception as exc:  # noqa: BLE001 - older/unsupported API
+        msgs.warn(f"Could not create the '{GROUP_NAME}' group layer ({exc}); layers added ungrouped.")
+        return None
+
+
+def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True) -> list:
+    """Add every wwn_* feature table present in the file. Returns the added layers."""
+    present = gpkg.contents(gpkg_path)
+    tables = [t for t in gpkg.FEATURE_ORDER if t in present]
+    if not tables:
+        raise RuntimeError(f"{gpkg_path} contains no WWNet feature tables (wwn_nodes, wwn_conduits, ...).")
+    m = active_map(arcpy)
+    group = _ensure_group(m, msgs)
+    added = []
+    for t in tables:
+        try:
+            lyr = m.addDataFromPath(gpkg.table_path(gpkg_path, t))
+            lyr.name = present[t][0] or t
+            if group is not None:
+                try:
+                    m.addLayerToGroup(group, lyr)
+                    m.removeLayer(lyr)
+                    lyr = next((x for x in group.listLayers() if x.name == (present[t][0] or t)), lyr)
+                except Exception as exc:  # noqa: BLE001
+                    msgs.warn(f"Could not move {t} into the group layer: {exc}")
+            added.append((t, lyr))
+            msgs.info(f"Added {present[t][0] or t}")
+        except Exception as exc:  # noqa: BLE001
+            msgs.warn(f"Could not add {t}: {exc}")
+    if symbolize:
+        for t, lyr in added:
+            symbology.apply(t, lyr, msgs)
+    return [lyr for _, lyr in added]
+
+
+def add_results_table(arcpy, gpkg_path: str, msgs):
+    m = active_map(arcpy)
+    tbl = m.addDataFromPath(gpkg.table_path(gpkg_path, "wwn_results_conduits"))
+    msgs.info("Added the design results table to the map.")
+    return tbl
+
+
+def find_layer_for(arcpy, gpkg_path: str, table: str):
+    """The map layer showing `table` of `gpkg_path`, or None."""
+    norm = lambda p: str(p).replace("/", "\\").lower()  # noqa: E731
+    m = active_map(arcpy)
+    for lyr in list(m.listLayers()) + list(m.listTables()):
+        ds = getattr(lyr, "dataSource", "") or ""
+        g, t = gpkg.split_datasource(ds)
+        if t == table and g and norm(g) == norm(gpkg_path):
+            return lyr
+    return None
