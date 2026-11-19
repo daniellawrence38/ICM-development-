@@ -1,4 +1,8 @@
-"""Run the `wwnet` CLI (check / design / trace) and parse its output."""
+"""Run WWNet check / design / trace.
+
+The `wwnet_native` Python extension (a wheel, no .exe) is the first choice. The `wwnet` CLI is
+used only as a fallback when the extension is unavailable.
+"""
 from __future__ import annotations
 
 import json
@@ -33,8 +37,25 @@ def find_exe(configured: str | None = None, root: Path | None = None) -> str:
         b = root / "bin" / name
         if b.is_file():
             return str(b)
-    raise CliError("The `wwnet` command-line tool was not found. Put wwnet.exe on PATH, copy it to "
-                   f"{root / 'bin' / 'wwnet.exe'}, or set its location in the 'Set Assistant API Key' tool.")
+    raise CliError(no_backend_message(root))
+
+
+def no_backend_message(root: Path | None = None) -> str:
+    root = root or TOOLBOX_ROOT
+    return ("The WWNet native module (wwnet_native) is not installed, so check/design/trace cannot run. "
+            "Install the wheel into ArcGIS Pro's Python (no .exe required): open the Python Command "
+            "Prompt of a cloned conda environment and run "
+            "`pip install wwnet_native-<version>-cp39-abi3-win_amd64.whl`. "
+            "(Fallback only: a `wwnet` CLI on PATH, in "
+            f"{root / 'bin'}, or set in 'Set Assistant API Key'.)")
+
+
+def native_service():
+    """The wwnet_native module if it provides check/design/trace, else None (the probe)."""
+    try:
+        return shared.core("native").service()
+    except Exception:  # noqa: BLE001 - any import problem means "not available"
+        return None
 
 
 def _run(args, timeout=600):
@@ -56,8 +77,21 @@ def _json(proc, what):
         raise CliError(f"wwnet {what} returned unparseable output (exit {proc.returncode}): {detail}") from exc
 
 
+def _native_call(fn, *args):
+    try:
+        return fn(*args)
+    except Exception as exc:  # noqa: BLE001 - native raises KeyError/RuntimeError/IOError/ValueError
+        msg = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+        raise CliError(str(msg)) from exc
+
+
 def run_check(gpkg: str, exe: str | None = None):
     """Returns (issues, returncode); issues normalised by the shared checks module."""
+    nat = native_service()
+    if nat is not None:
+        raw = _native_call(nat.check, gpkg, True)
+        issues = [shared.core("checks").normalise_issue(x) for x in raw if isinstance(x, dict)]
+        return issues, 1 if any(i["severity"] == "error" for i in issues) else 0
     proc = _run([exe or find_exe(), "check", gpkg, "--json"])
     _json(proc, "check")  # validates JSON before normalising
     return shared.core("checks").parse_issues(proc.stdout), proc.returncode
@@ -65,6 +99,9 @@ def run_check(gpkg: str, exe: str | None = None):
 
 def run_design(gpkg: str, exe: str | None = None) -> dict:
     """Returns the design JSON: conduit_results, node_flows, issues, summary."""
+    nat = native_service()
+    if nat is not None:
+        return _native_call(nat.design, gpkg, None, True)
     proc = _run([exe or find_exe(), "design", gpkg, "--json"])
     data = _json(proc, "design")
     if not isinstance(data, dict) or "summary" not in data:
@@ -91,6 +128,9 @@ def parse_trace(stdout: str) -> dict:
 
 def run_trace(gpkg: str, node_id: str, up: bool = True, down: bool = False,
               exe: str | None = None) -> dict:
+    nat = native_service()
+    if nat is not None:
+        return _native_call(nat.trace, gpkg, node_id, up, down)
     args = [exe or find_exe(), "trace", gpkg, node_id]
     if up:
         args.append("--up")

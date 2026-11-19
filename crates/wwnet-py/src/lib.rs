@@ -1,13 +1,31 @@
 //! Python bindings (`import wwnet`). Flows in L/s, diameters in mm, grades as "1 in x".
 
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyIOError, PyKeyError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
+use std::path::Path;
+use wwnet_design::service;
 use wwnet_hydraulics as hyd;
 use wwnet_rules::{
     check_conduit as rules_check, CheckResult, ConduitDesignInput, Ground, LandUseClass, Location,
     Region, RuleSet,
 };
+
+/// Map library errors onto Python exceptions with the library's message.
+fn lib_err(e: wwnet_core::Error) -> PyErr {
+    use wwnet_core::Error as E;
+    match &e {
+        E::NodeNotFound(_) => PyKeyError::new_err(e.to_string()),
+        E::Io(_) => PyIOError::new_err(e.to_string()),
+        E::Sqlite(_) | E::Cycle(_) | E::Other(_) => PyRuntimeError::new_err(e.to_string()),
+        _ => PyValueError::new_err(e.to_string()),
+    }
+}
+
+/// Parse JSON text produced by wwnet-design's service layer into Python objects.
+fn loads<'py>(py: Python<'py>, text: &str) -> PyResult<Bound<'py, PyAny>> {
+    py.import("json")?.call_method1("loads", (text,))
+}
 
 fn val<E: std::fmt::Display>(e: E) -> PyErr {
     PyValueError::new_err(e.to_string())
@@ -133,6 +151,71 @@ fn ruleset_toml() -> &'static str {
     RuleSet::ds50_toml()
 }
 
+/// Validate a model (same as `wwnet check --json`): list of issue dicts
+/// (severity, code, object_type, object_id, message, clause). With `write`, replaces `wwn_issues`.
+#[pyfunction]
+#[pyo3(signature = (gpkg_path, write=true))]
+fn check<'py>(py: Python<'py>, gpkg_path: &str, write: bool) -> PyResult<Bound<'py, PyAny>> {
+    let text = py
+        .allow_threads(|| {
+            let issues = service::check_file(gpkg_path, write)?;
+            service::issues_json(&issues)
+        })
+        .map_err(lib_err)?;
+    loads(py, &text)
+}
+
+/// Run the DS 50 design (same as `wwnet design --json`): dict with conduit_results, node_flows,
+/// issues and summary. With `write`, saves wwn_results_conduits and appends to wwn_issues.
+#[pyfunction]
+#[pyo3(signature = (gpkg_path, ruleset_path=None, write=true))]
+fn design<'py>(
+    py: Python<'py>,
+    gpkg_path: &str,
+    ruleset_path: Option<&str>,
+    write: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let text = py
+        .allow_threads(|| {
+            let out = service::design_file(gpkg_path, ruleset_path.map(Path::new), write)?;
+            service::design_json(&out)
+        })
+        .map_err(lib_err)?;
+    loads(py, &text)
+}
+
+/// Trace upstream and/or downstream of a node: {"upstream": [ids], "downstream": [ids]}
+/// containing only the requested directions (neither flag means both). KeyError if the node is unknown.
+#[pyfunction]
+fn trace<'py>(
+    py: Python<'py>,
+    gpkg_path: &str,
+    node_id: &str,
+    up: bool,
+    down: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let text = py
+        .allow_threads(|| {
+            let t = service::trace_file(gpkg_path, node_id, up, down)?;
+            service::trace_json(&t)
+        })
+        .map_err(lib_err)?;
+    loads(py, &text)
+}
+
+/// Create an empty model GeoPackage.
+#[pyfunction]
+fn new_model(py: Python<'_>, gpkg_path: &str) -> PyResult<()> {
+    py.allow_threads(|| service::new_model(gpkg_path))
+        .map_err(lib_err)
+}
+
+/// Version of the native module.
+#[pyfunction]
+fn version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
 #[pymodule]
 fn wwnet_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(part_full_flow_lps, m)?)?;
@@ -140,5 +223,10 @@ fn wwnet_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(residential_gsdf, m)?)?;
     m.add_function(wrap_pyfunction!(check_conduit, m)?)?;
     m.add_function(wrap_pyfunction!(ruleset_toml, m)?)?;
+    m.add_function(wrap_pyfunction!(check, m)?)?;
+    m.add_function(wrap_pyfunction!(design, m)?)?;
+    m.add_function(wrap_pyfunction!(trace, m)?)?;
+    m.add_function(wrap_pyfunction!(new_model, m)?)?;
+    m.add_function(wrap_pyfunction!(version, m)?)?;
     Ok(())
 }

@@ -47,6 +47,13 @@ def _find_exe():
     return shutil.which("wwnet")
 
 
+@pytest.fixture
+def no_native(monkeypatch):
+    """Simulate wwnet_native being unavailable so the CLI fallback is exercised."""
+    from wwnet_arcgis import cli
+    monkeypatch.setattr(cli, "native_service", lambda: None)
+
+
 @pytest.fixture(scope="session")
 def wwnet_exe():
     exe = _find_exe()

@@ -32,3 +32,21 @@ def get(refresh: bool = False):
 
 def available() -> bool:
     return get() is not None
+
+
+_SERVICE = ("check", "design", "trace")
+
+INSTALL_HINT = (
+    "Install the wwnet_native wheel (no .exe needed): "
+    "pip install wwnet_native-<version>-cp39-abi3-win_amd64.whl "
+    "into the Python that runs this application (QGIS: OSGeo4W Shell; ArcGIS Pro: a cloned "
+    "conda environment)."
+)
+
+
+def service():
+    """The native module if it provides check/design/trace (wheel >= file-level API), else None."""
+    mod = get()
+    if mod is not None and all(callable(getattr(mod, f, None)) for f in _SERVICE):
+        return mod
+    return None

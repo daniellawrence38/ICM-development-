@@ -8,8 +8,9 @@ sewers). Targets QGIS 3.34 and 3.40 LTR.
   one; all `wwn_*` layers go into a `WWNet` layer group with programmatic styling (nodes by
   `node_type`, conduits by DN labelled e.g. `DN225 1:300`), value-map widgets for the schema enums
   and default `status` / `data_source`.
-- **Check model**: runs `wwnet check <gpkg> --json` (if the CLI is on PATH), lists issues in a dock;
-  click a row to select and zoom to the feature. Without the CLI it shows stored `wwn_issues`.
+- **Check model**: runs the check through the `wwnet_native` module (no `.exe` needed), lists issues in a
+  dock; click a row to select and zoom to the feature. The `wwnet` CLI is used only as a fallback if the
+  module is missing; with neither, the dock shows stored `wwn_issues` and the wheel install hint.
 - **AI assistant** (optional): Claude-powered chat dock that knows the DS 50 ruleset and the schema.
 
 ## Install
@@ -26,10 +27,13 @@ Build the zip (copies `templates/schema.sql` and `rulesets/*.toml` into the pack
   plugin falls back to `templates/` and `rulesets/` in the repository, so packaging is not needed.
   Enable "WWNet" in the plugin manager; the `Plugins > WWNet` menu and the WWNet toolbar appear.
 
-The optional Rust extension should be importable as `wwnet_native`. A top-level module called
+The **required** Rust extension is the `wwnet_native` wheel (the `wwnet.exe` CLI is not needed). Install it into
+QGIS's Python, e.g. from the OSGeo4W Shell: `pip install wwnet_native-<ver>-cp39-abi3-win_amd64.whl`
+(download it from the CI artifact `wwnet_native-windows-abi3`, or build with `maturin build --release` in
+`crates/wwnet-py`). It should be importable as `wwnet_native`. A top-level module called
 `wwnet` clashes with this plugin's folder name, so the plugin probes `wwnet_native`,
 `wwnet._native`, `wwnet.wwnet`, then `wwnet`, and only accepts a module exposing
-`part_full_flow_lps` and `depth_ratio_for_flow`. Without it, pure-Python fallbacks are used.
+`part_full_flow_lps` and `depth_ratio_for_flow`. Without it, hydraulics use pure-Python fallbacks but model check/design/trace are unavailable.
 
 ## Enabling the AI assistant
 1. Toolbar > **AI assistant**, then **Settings...** (or Plugins > WWNet > AI settings).

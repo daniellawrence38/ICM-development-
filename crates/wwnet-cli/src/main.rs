@@ -1,9 +1,10 @@
 mod demo;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use wwnet_core::{gpkg, validate, Model, Network, Severity};
+use wwnet_core::{gpkg, Severity};
+use wwnet_design::service;
 
 #[derive(Parser)]
 #[command(name = "wwnet", version, about = "Wastewater network modelling tool")]
@@ -76,13 +77,9 @@ fn run() -> Result<i32> {
             );
         }
         Cmd::Check { file, json } => {
-            let model =
-                Model::load(&file).with_context(|| format!("loading {}", file.display()))?;
-            let net = Network::build(&model)?;
-            let issues = validate(&model, &net);
-            Model::write_issues(&file, &issues)?;
+            let issues = service::check_file(&file, true)?;
             if json {
-                println!("{}", serde_json::to_string_pretty(&issues)?);
+                println!("{}", service::issues_json(&issues)?);
             } else if issues.is_empty() {
                 println!("no issues");
             } else {
@@ -116,7 +113,7 @@ fn run() -> Result<i32> {
                     count(Severity::Info)
                 );
             }
-            if count(Severity::Error) > 0 {
+            if service::error_count(&issues) > 0 {
                 return Ok(1);
             }
         }
@@ -126,22 +123,12 @@ fn run() -> Result<i32> {
             up,
             down,
         } => {
-            let model = Model::load(&file)?;
-            let net = Network::build(&model)?;
-            let (up, down) = if !up && !down {
-                (true, true)
-            } else {
-                (up, down)
-            };
-            if up {
-                let v = net.upstream_trace(&node_id)?;
-                println!("upstream of {node_id} ({}):", v.len());
-                v.iter().for_each(|n| println!("  {n}"));
-            }
-            if down {
-                let v = net.downstream_trace(&node_id)?;
-                println!("downstream of {node_id} ({}):", v.len());
-                v.iter().for_each(|n| println!("  {n}"));
+            let t = service::trace_file(&file, &node_id, up, down)?;
+            for (label, v) in [("upstream", &t.upstream), ("downstream", &t.downstream)] {
+                if let Some(v) = v {
+                    println!("{label} of {node_id} ({}):", v.len());
+                    v.iter().for_each(|n| println!("  {n}"));
+                }
             }
         }
         Cmd::Design {
@@ -159,17 +146,10 @@ fn opt(v: Option<f64>, prec: usize) -> String {
 }
 
 fn design(file: &std::path::Path, json: bool, ruleset: Option<&std::path::Path>) -> Result<i32> {
-    use wwnet_rules::{CheckResult, RuleSet};
-    let rules = match ruleset {
-        Some(p) => RuleSet::from_path(p).with_context(|| format!("loading {}", p.display()))?,
-        None => RuleSet::ds50(),
-    };
-    let model = Model::load(file).with_context(|| format!("loading {}", file.display()))?;
-    let out = wwnet_design::run_design(&model, &rules)?;
-    Model::save_results(file, &wwnet_design::to_conduit_results(&out, &rules)?)?;
-    Model::append_issues(file, &out.issues)?;
+    use wwnet_rules::CheckResult;
+    let out = service::design_file(file, ruleset, true)?;
     if json {
-        println!("{}", serde_json::to_string_pretty(&out)?);
+        println!("{}", service::design_json(&out)?);
     } else {
         println!(
             "{:<10} {:>4} {:>9} {:>8} {:>8} {:>8} {:>5} {:>5} {:<6} WORST MESSAGE",

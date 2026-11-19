@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "PyO3 bindings exposing wwnet hydraulics and DS50 rules to Python (module `wwnet`)"
+description = "PyO3 bindings exposing wwnet hydraulics and DS50 rules to Python (module `wwnet_native`)"
 
 [lib]
 name = "wwnet_native"
@@ -19,3 +19,5 @@ extension-module = ["pyo3/extension-module"]
 pyo3 = { version = "0.23", features = ["abi3-py39"] }
 wwnet-hydraulics = { path = "../wwnet-hydraulics" }
 wwnet-rules = { path = "../wwnet-rules" }
+wwnet-design = { path = "../wwnet-design" }
+wwnet-core = { path = "../wwnet-core" }

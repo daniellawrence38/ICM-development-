@@ -27,6 +27,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest anthropic
+      - run: pip install maturin
+      - run: maturin build --release --manifest-path crates/wwnet-py/Cargo.toml --out wheels
+      - run: pip install --force-reinstall --no-index --find-links wheels wwnet_native
       - run: python -m compileall -q qgis_plugin/wwnet
       - run: pytest -q qgis_plugin/tests
 
@@ -42,6 +45,9 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pytest anthropic pyflakes
+      - run: pip install maturin
+      - run: maturin build --release --manifest-path crates/wwnet-py/Cargo.toml --out wheels
+      - run: pip install --force-reinstall --no-index --find-links wheels wwnet_native
       - run: python -m py_compile arcgis_toolbox/WWNet.pyt
       - run: python -m compileall -q arcgis_toolbox/wwnet_arcgis
       - run: python -m pyflakes arcgis_toolbox/WWNet.pyt arcgis_toolbox/wwnet_arcgis
@@ -50,7 +56,7 @@ jobs:
           WWNET_EXE: ${{ github.workspace }}/target/debug/wwnet
 
   wheel:
-    # abi3 wheel for QGIS's bundled Python (Windows OSGeo4W first)
+    # wwnet_native abi3 wheel: loaded by QGIS's / ArcGIS Pro's own Python (no .exe needed)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -64,5 +70,6 @@ jobs:
           args: --release --out dist
       - uses: actions/upload-artifact@v4
         with:
-          name: wwnet-wheel-windows
+          # the one required binary: front ends import it, no .exe is needed
+          name: wwnet_native-windows-abi3
           path: crates/wwnet-py/dist

@@ -3,6 +3,8 @@
 //! Computes local loading per sub-catchment (4.2.1), accumulates flow down the gravity
 //! network (stopping at pump station wet wells), runs the clause-referenced conduit checks of
 //! `wwnet-rules` and adds node checks (falls through ACs, drop ACs).
+pub mod service;
+
 use serde::Serialize;
 use std::collections::HashMap;
 use wwnet_core::gpkg::ConduitResult;

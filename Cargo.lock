@@ -748,6 +748,8 @@ name = "wwnet-py"
 version = "0.1.0"
 dependencies = [
  "pyo3",
+ "wwnet-core",
+ "wwnet-design",
  "wwnet-hydraulics",
  "wwnet-rules",
 ]

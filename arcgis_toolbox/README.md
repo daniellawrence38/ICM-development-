@@ -11,11 +11,11 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
 |---|---|
 | New Model | Creates a GeoPackage from `schema.sql` (sqlite3) and adds the layers to the active map in a `WWNet` group layer |
 | Add Model To Map | Adds the `wwn_*` layers (`<file>.gpkg\main.<table>`) of an existing model and applies symbology: nodes by `node_type`, conduits by DN with an Arcade label `DN225 1:300`. Symbology failures only warn |
-| Check Model | `wwnet check --json`; messages via AddMessage/AddWarning/AddError; optional output issues table |
-| Run Design | `wwnet design --json`; pass/warn/fail summary, failing checks with DS 50 clauses; optionally adds / joins `wwn_results_conduits` and selects failed conduits |
+| Check Model | `wwnet_native.check` (same output as `wwnet check --json`); messages via AddMessage/AddWarning/AddError; optional output issues table |
+| Run Design | `wwnet_native.design` (same output as `wwnet design --json`); pass/warn/fail summary, failing checks with DS 50 clauses; optionally adds / joins `wwn_results_conduits` and selects failed conduits |
 | Trace | Upstream / downstream from a node (value list filled from the Nodes layer); selects traced nodes and conduits |
 | Pipe Capacity | Colebrook-White calculator (DN, grade, ks, flow) + DS 50 checks; uses `wwnet_native` if importable, else the shared Python fallback |
-| Set Assistant API Key | Stores the Anthropic key (`GPEncryptedString`) with Windows DPAPI; default model / effort; optional CLI path |
+| Set Assistant API Key | Stores the Anthropic key (`GPEncryptedString`) with Windows DPAPI; default model / effort; optional fallback CLI path |
 | Ask WWNet Assistant | DS 50 assistant with tools `list_layers`, `get_selected_features`, `query_features`, `get_feature`, `pipe_capacity`, `check_conduit`, `residential_gsdf`, `lookup_ds50`, `propose_edits` |
 
 ## Install
@@ -24,15 +24,15 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
    to a folder you can write to, e.g. `C:\Tools\WWNet-ArcGIS`.
 2. In ArcGIS Pro: Catalog pane > Toolboxes > right-click > **Add Toolbox** > select `WWNet.pyt`.
    After updating files, right-click the toolbox > Refresh (or restart Pro) because Pro caches Python modules.
-3. **CLI**: `wwnet.exe` is located in this order: path set in *Set Assistant API Key* > `PATH` >
-   `<toolbox>\bin\wwnet.exe`. Either copy `target\release\wwnet.exe` into `bin\` or build the zip with
-   `python package.py --cli path\to\wwnet.exe`.
-4. **Assistant only** (everything else works in the default environment): clone the Pro Python environment,
-   because `arcgispro-py3` is read-only:
-   - Pro > Settings > **Package Manager** > Environment Manager > *Clone Default*; activate the clone and restart Pro.
-   - Start *Python Command Prompt* from the ArcGIS start-menu folder and run `pip install anthropic`.
-   - Optional (faster hydraulics): `pip install wwnet_native-<ver>-cp3xx-abi3-win_amd64.whl`
-     (built from `crates/wwnet-py`; the toolbox falls back to pure Python without it).
+3. **Native module (required, no `.exe`)**: Check, Design and Trace run inside Pro's own Python through the
+   `wwnet_native` wheel. `arcgispro-py3` is read-only, so clone it: Pro > Settings > **Package Manager** >
+   Environment Manager > *Clone Default*; activate the clone and restart Pro. Then start *Python Command Prompt*
+   from the ArcGIS start-menu folder and run
+   `pip install wwnet_native-<ver>-cp39-abi3-win_amd64.whl` (CI artifact `wwnet_native-windows-abi3`, or build
+   from `crates/wwnet-py` with `maturin build --release`).
+   The `wwnet` CLI is only an optional fallback (path in *Set Assistant API Key* > `PATH` >
+   `<toolbox>\bin\wwnet.exe`) when the module is missing; it is not needed.
+4. **Assistant only**: in the same cloned environment run `pip install anthropic`.
 5. Run **Set Assistant API Key**. The key is encrypted with DPAPI (current Windows user) in
    `%APPDATA%\WWNet\anthropic_key.bin`; model / effort / CLI path go in `%APPDATA%\WWNet\settings.json`.
    Lookup order when running: `ANTHROPIC_API_KEY` environment variable, then the DPAPI file. The key is never printed.
@@ -48,7 +48,8 @@ test enforces that nothing shipped imports `qgis` / Qt).
   environment with `anthropic` installed. IT may need to allow pip / a package mirror for that clone.
 - The assistant needs outbound **HTTPS (443) to `api.anthropic.com`**; behind a TLS-inspecting proxy the corporate
   root CA must be trusted by the cloned environment. Check, design, trace and capacity need no network.
-- Pro must be allowed to run `wwnet.exe` (application-control / AppLocker rules may block unsigned binaries).
+- No `.exe` is run: only the `wwnet_native` Python extension (`.pyd`) is loaded by Pro's own Python, so
+  application-control rules that block unsigned executables do not apply to the toolbox.
 - `%APPDATA%\WWNet` is per user (roaming); DPAPI blobs only decrypt for the same Windows user, so a copied key file
   is useless on another account.
 
@@ -72,8 +73,8 @@ review the messages afterwards.
   ObjectID and tables need the `fid` primary key from `schema.sql`.
 - Do not have an open Pro **Edit** session with unsaved edits on the layer (or a join on it) when applying
   assistant edits: the cursor will fail with a lock error. Save/discard first.
-- The `wwnet` CLI opens the file itself: save edits in Pro before Check/Design. Remove joins before editing.
-- `wwn_results_conduits` and `wwn_issues` are rewritten by `wwnet design`; treat them as read-only.
+- `wwnet_native` opens the file itself: save edits in Pro before Check/Design. Remove joins before editing.
+- `wwn_results_conduits` and `wwn_issues` are rewritten by Design; treat them as read-only.
 - Layers are added by catalog path (`main.<table>`); if a table is missing from `gpkg_contents` it is skipped.
 
 ## Feature comparison with the QGIS plugin
@@ -84,7 +85,7 @@ review the messages afterwards.
 | Styling | nodes by type, conduits by DN + label, value-map widgets, defaults | nodes by type, conduits by DN + Arcade label; no form widgets/defaults |
 | Check model | dock with click-to-zoom list | geoprocessing messages + optional table (no dock) |
 | Design run | `wwnet design` result in layer | summary, results table/join, select failed |
-| Trace | via CLI/QGIS | upstream/downstream tool with selection |
+| Trace | `wwnet_native.trace` only | upstream/downstream tool with selection |
 | Pipe capacity | assistant tool only | dedicated calculator tool |
 | Assistant UI | chat dock, streaming, cancel | tool dialog, streamed to messages, no cancel mid-run |
 | Assistant tools / engine / prompt | shared | **same shared modules** |
@@ -97,7 +98,9 @@ review the messages afterwards.
 ## Development
 
     pip install pytest anthropic
-    cargo build -p wwnet-cli          # CLI-dependent tests skip without it (or set WWNET_EXE)
+    # build + install the native wheel (native-dependent tests skip without it)
+    cd crates/wwnet-py && maturin build --release && pip install --force-reinstall ../../target/wheels/wwnet_native-*.whl
+    cargo build -p wwnet-cli          # only for the CLI-fallback/parity tests (or set WWNET_EXE)
     pytest arcgis_toolbox/tests -q    # no ArcGIS needed: tests use a fake `arcpy` over sqlite3
     python arcgis_toolbox/package.py  # dist/wwnet-arcgis-<ver>.zip
 

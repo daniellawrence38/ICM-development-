@@ -1,10 +1,12 @@
-"""Run the `wwnet check` CLI and normalise its issues (no qgis imports)."""
+"""Run the native check (CLI as fallback) and normalise its issues (no qgis imports)."""
 from __future__ import annotations
 
 import json
 import shutil
 import sqlite3
 import subprocess
+
+from . import native
 
 ALIASES = {
     "severity": ("severity", "level", "sev"),
@@ -70,11 +72,7 @@ def read_issue_table(gpkg: str) -> list:
         con.close()
 
 
-def run_check(gpkg: str, timeout: int = 300):
-    """Returns (issues, message). Falls back to wwn_issues if the CLI is absent."""
-    exe = find_cli()
-    if not exe:
-        return read_issue_table(gpkg), "`wwnet` CLI not found on PATH; showing stored wwn_issues only."
+def _run_cli(exe: str, gpkg: str, timeout: int):
     try:
         proc = subprocess.run([exe, "check", gpkg, "--json"], capture_output=True, text=True,
                               timeout=timeout)
@@ -86,3 +84,23 @@ def run_check(gpkg: str, timeout: int = 300):
         detail = (proc.stderr or proc.stdout).strip()[:500]
         return [], f"wwnet check returned unparseable output (exit {proc.returncode}): {detail}"
     return issues, f"wwnet check finished (exit {proc.returncode}); {len(issues)} issue(s)."
+
+
+def run_check(gpkg: str, timeout: int = 300):
+    """Returns (issues, message).
+
+    Order: native wwnet_native module, then the `wwnet` CLI (fallback only), then the stored
+    wwn_issues table with a message explaining how to install the wheel.
+    """
+    nat = native.service()
+    if nat is not None:
+        try:
+            raw = nat.check(gpkg, True)
+        except Exception as exc:  # noqa: BLE001 - surface any native error to the dock
+            return [], f"wwnet check failed: {exc}"
+        issues = [normalise_issue(x) for x in raw if isinstance(x, dict)]
+        return issues, f"wwnet check finished (native); {len(issues)} issue(s)."
+    exe = find_cli()
+    if exe:
+        return _run_cli(exe, gpkg, timeout)
+    return read_issue_table(gpkg), "wwnet_native is not installed; showing stored wwn_issues only. " + native.INSTALL_HINT

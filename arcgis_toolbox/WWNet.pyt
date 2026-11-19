@@ -181,7 +181,7 @@ class SetAssistantApiKey(object):
                    default=cfg["model"], values=MODELS),
                 _p("effort", "Default effort", "GPString", required=False,
                    default=cfg["effort"], values=EFFORTS),
-                _p("exe", "WWNet CLI path (blank = PATH / bundled)", "DEFile", required=False,
+                _p("exe", "WWNet CLI path (optional fallback, only used if wwnet_native is missing)", "DEFile", required=False,
                    default=cfg["wwnet_exe"] or None)]
 
     def execute(self, parameters, messages):

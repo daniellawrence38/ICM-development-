@@ -35,14 +35,14 @@ def test_find_exe_order(tmp_path, monkeypatch):
         cli.find_exe(str(tmp_path / "missing.exe"), root)
 
 
-def test_run_check_real(wwnet_exe, demo_gpkg):
+def test_run_check_real(no_native, wwnet_exe, demo_gpkg):
     issues, rc = cli.run_check(demo_gpkg, wwnet_exe)
     assert rc == 0
     assert issues and issues[0]["code"] == "INVERT_MISMATCH"
     assert issues[0]["table"] == "wwn_conduits" and issues[0]["severity"] == "info"
 
 
-def test_run_design_real(wwnet_exe, demo_gpkg):
+def test_run_design_real(no_native, wwnet_exe, demo_gpkg):
     d = cli.run_design(demo_gpkg, wwnet_exe)
     assert set(d) >= {"conduit_results", "node_flows", "issues", "summary"}
     assert d["summary"]["conduits"] == len(d["conduit_results"]) == 11
@@ -51,7 +51,7 @@ def test_run_design_real(wwnet_exe, demo_gpkg):
     assert c["checks"][0]["clause"].startswith("DS50")
 
 
-def test_run_trace_real(wwnet_exe, demo_gpkg):
+def test_run_trace_real(no_native, wwnet_exe, demo_gpkg):
     up = cli.run_trace(demo_gpkg, "N06", up=True, exe=wwnet_exe)
     assert "N05" in up["upstream"] and "downstream" not in up
     both = cli.run_trace(demo_gpkg, "N03", up=True, down=True, exe=wwnet_exe)
@@ -62,7 +62,7 @@ def test_run_trace_real(wwnet_exe, demo_gpkg):
     assert conduits == ["P03", "P04"] or len(conduits) == 2
 
 
-def test_unparseable_output(tmp_path):
+def test_unparseable_output(no_native, tmp_path):
     script = tmp_path / "fake.py"
     script.write_text("import sys; print('not json'); sys.exit(3)")
     import sys
