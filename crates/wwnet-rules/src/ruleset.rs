@@ -336,13 +336,14 @@ impl RuleSet {
             Region::South => &self.loading.non_residential.south.rows,
             Region::North => &self.loading.non_residential.north.rows,
         };
-        let row = rows.iter().find(|r| r.0 == land_use).ok_or_else(|| {
-            RulesError::UnknownLandUse {
-                land_use: land_use.into(),
-                table: "Table 4.3",
-                region,
-            }
-        })?;
+        let row =
+            rows.iter()
+                .find(|r| r.0 == land_use)
+                .ok_or_else(|| RulesError::UnknownLandUse {
+                    land_use: land_use.into(),
+                    table: "Table 4.3",
+                    region,
+                })?;
         let (l, g) = match ground {
             Ground::Dry => (row.1, row.2),
             Ground::Wet => (row.3, row.4),

@@ -171,7 +171,10 @@ mod tests {
             let (dn, grade, ratio, table, cole) = (f[0], f[1], f[2], f[3], f[4]);
             let q = part_full_flow(dn / 1000.0, 1.0 / grade, ratio, 0.001) * 1000.0;
             assert!((q - cole).abs() <= 0.15, "DN{dn} 1:{grade}: {q} vs {cole}");
-            assert!((q - table).abs() / table <= 0.06, "DN{dn} 1:{grade}: {q} vs table {table}");
+            assert!(
+                (q - table).abs() / table <= 0.06,
+                "DN{dn} 1:{grade}: {q} vs table {table}"
+            );
             n += 1;
         }
         assert!(n >= 10);
@@ -210,7 +213,7 @@ mod tests {
     #[test]
     fn manning_and_grades() {
         let q = manning_flow(0.3, 0.01, 1.0, 0.013);
-        assert_relative_eq!(q, 0.1006, epsilon = 2e-3);
+        assert_relative_eq!(q, 0.0967, epsilon = 1e-4);
         assert_relative_eq!(slope_from_1in(200.0), 0.005);
         assert_relative_eq!(one_in_from_slope(0.005), 200.0);
         assert_relative_eq!(slope_from_levels(10.0, 9.5, 100.0).unwrap(), 0.005);

@@ -62,7 +62,10 @@ fn residential_gsdf<'py>(
     d.set_item("gsdf_lps_per_ha", r.gsdf_lps_per_ha)?;
     d.set_item("net_area_ha", net_area_ha)?;
     d.set_item("persons", r.persons_per_net_ha * net_area_ha)?;
-    d.set_item("daily_flow_l_per_day", r.persons_per_net_ha * r.lpd * net_area_ha)?;
+    d.set_item(
+        "daily_flow_l_per_day",
+        r.persons_per_net_ha * r.lpd * net_area_ha,
+    )?;
     d.set_item("gsdf_lps", r.gsdf_lps_per_ha * net_area_ha)?;
     d.set_item("flagged", r.flagged)?;
     d.set_item("note", r.note)?;

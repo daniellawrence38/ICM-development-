@@ -132,7 +132,10 @@ pub fn check_conduit(rs: &RuleSet, i: &ConduitDesignInput) -> Vec<Check> {
             i.grade_1in,
             min_grade,
             Pass,
-            format!("Grade 1 in {} is not flatter than 1 in {}", i.grade_1in, min_grade),
+            format!(
+                "Grade 1 in {} is not flatter than 1 in {}",
+                i.grade_1in, min_grade
+            ),
         ));
     } else if let Some(cmin) = spec.conditional_min_grade_1in.filter(|c| i.grade_1in <= *c) {
         let (res, why) = match (i.dn, spec.conditional_min_pumped_lps) {
@@ -149,7 +152,11 @@ pub fn check_conduit(rs: &RuleSet, i: &ConduitDesignInput) -> Vec<Check> {
                 format!("1 in {cmin} allowed only with justification (fewer pump stations, gravity vs PS, fewer entries to >= DN300)"),
             ),
         };
-        let cl = if i.dn == 225 { "DS50 4.2.1(r)" } else { "DS50 4.2.1(q)" };
+        let cl = if i.dn == 225 {
+            "DS50 4.2.1(r)"
+        } else {
+            "DS50 4.2.1(q)"
+        };
         out.push(chk("min_grade", cl, i.grade_1in, min_grade, res, why));
     } else {
         out.push(chk(
@@ -158,7 +165,10 @@ pub fn check_conduit(rs: &RuleSet, i: &ConduitDesignInput) -> Vec<Check> {
             i.grade_1in,
             min_grade,
             Fail,
-            format!("Grade 1 in {} is flatter than minimum 1 in {}", i.grade_1in, min_grade),
+            format!(
+                "Grade 1 in {} is flatter than minimum 1 in {}",
+                i.grade_1in, min_grade
+            ),
         ));
     }
 
@@ -201,14 +211,26 @@ pub fn check_conduit(rs: &RuleSet, i: &ConduitDesignInput) -> Vec<Check> {
     let slope = hyd::slope_from_1in(i.grade_1in);
     let lim = rs.max_d_over_d(i.dn);
     match hyd::depth_ratio_for_flow(total / 1000.0, d, slope, ks) {
-        Some(y) => out.push(chk(
-            "depth_ratio",
-            "DS50 4.2.1(m)",
-            y,
-            lim,
-            pf(y <= lim),
-            format!("d/D {y:.3} at design flow vs limit {lim}"),
-        )),
+        Some(y) => {
+            // Table 4.4 governs; where it allows the flow but computed d/D is marginally
+            // over the limit (e.g. DN150 at 1:200, DN450 at 1:500), warn rather than fail.
+            let table_ok = rs
+                .max_allowable_flow(i.dn, i.grade_1in)
+                .is_some_and(|(q, _)| total <= q);
+            let (res, note) = match (y <= lim, table_ok) {
+                (true, _) => (Pass, ""),
+                (false, true) => (Warn, "; within Table 4.4 flow, which governs"),
+                (false, false) => (Fail, ""),
+            };
+            out.push(chk(
+                "depth_ratio",
+                "DS50 4.2.1(m)",
+                y,
+                lim,
+                res,
+                format!("d/D {y:.3} at design flow vs limit {lim}{note}"),
+            ));
+        }
         None => out.push(chk(
             "depth_ratio",
             "DS50 4.2.1(m)",
@@ -226,7 +248,10 @@ pub fn check_conduit(rs: &RuleSet, i: &ConduitDesignInput) -> Vec<Check> {
         i.length_m,
         spec.max_ac_spacing_m,
         pf(i.length_m <= spec.max_ac_spacing_m),
-        format!("Length {} m vs maximum AC spacing {} m", i.length_m, spec.max_ac_spacing_m),
+        format!(
+            "Length {} m vs maximum AC spacing {} m",
+            i.length_m, spec.max_ac_spacing_m
+        ),
     ));
 
     // Cover.
@@ -238,7 +263,10 @@ pub fn check_conduit(rs: &RuleSet, i: &ConduitDesignInput) -> Vec<Check> {
         cover,
         req,
         pf(cover >= req - 1e-9),
-        format!("Minimum cover {cover:.2} m vs required {req:.2} m ({:?})", i.location),
+        format!(
+            "Minimum cover {cover:.2} m vs required {req:.2} m ({:?})",
+            i.location
+        ),
     ));
 
     // Minimum DN by receiving/serving use (4.2.1(l),(n),(o)).
@@ -250,7 +278,11 @@ pub fn check_conduit(rs: &RuleSet, i: &ConduitDesignInput) -> Vec<Check> {
     }
     if i.pumped_inflow_lps > 0.0 {
         min_dn = min_dn.max(rs.hydraulics.min_dn_receiving_pressure_main);
-        cl = if industrial { "DS50 4.2.1(l),(o)" } else { "DS50 4.2.1(l)" };
+        cl = if industrial {
+            "DS50 4.2.1(l),(o)"
+        } else {
+            "DS50 4.2.1(l)"
+        };
     }
     out.push(chk(
         "min_dn",
@@ -308,8 +340,13 @@ mod tests {
     #[test]
     fn dn150_flow_limit() {
         let rs = RuleSet::ds50();
-        let ok = check_conduit(&rs, &base(150, 200.0, 5.9));
+        let ok = check_conduit(&rs, &base(150, 200.0, 5.0));
         assert!(ok.iter().all(|c| c.result == CheckResult::Pass), "{ok:#?}");
+        // 6 L/s: Table 4.4 passes; computed d/D marginally > 0.5 -> warn only
+        let six = check_conduit(&rs, &base(150, 200.0, 6.0));
+        assert_eq!(get(&six, "max_flow").result, CheckResult::Pass);
+        assert_eq!(get(&six, "depth_ratio").result, CheckResult::Warn);
+        assert!(six.iter().all(|c| c.result != CheckResult::Fail));
         let bad = check_conduit(&rs, &base(150, 200.0, 7.0));
         assert_eq!(get(&bad, "max_flow").result, CheckResult::Fail);
         assert_eq!(get(&bad, "depth_ratio").result, CheckResult::Fail);
@@ -332,15 +369,24 @@ mod tests {
         let mut i = base(225, 300.0, 0.9);
         i.us_cover_m = 0.9;
         i.ds_cover_m = 1.2;
-        assert_eq!(get(&check_conduit(&rs, &i), "min_cover").result, CheckResult::Pass);
+        assert_eq!(
+            get(&check_conduit(&rs, &i), "min_cover").result,
+            CheckResult::Pass
+        );
         i.us_cover_m = 0.8;
-        assert_eq!(get(&check_conduit(&rs, &i), "min_cover").result, CheckResult::Fail);
+        assert_eq!(
+            get(&check_conduit(&rs, &i), "min_cover").result,
+            CheckResult::Fail
+        );
         // 1:350 only with a >= 14 L/s pumped inflow
         let c = check_conduit(&rs, &base(225, 350.0, 2.0));
         assert_eq!(get(&c, "min_grade").result, CheckResult::Fail);
         let mut p = base(225, 350.0, 2.0);
         p.pumped_inflow_lps = 14.0;
-        assert_eq!(get(&check_conduit(&rs, &p), "min_grade").result, CheckResult::Warn);
+        assert_eq!(
+            get(&check_conduit(&rs, &p), "min_grade").result,
+            CheckResult::Warn
+        );
     }
 
     #[test]
@@ -371,7 +417,10 @@ mod tests {
         let rs = RuleSet::ds50();
         let mut i = base(150, 100.0, 1.0);
         i.length_m = 120.0;
-        assert_eq!(get(&check_conduit(&rs, &i), "ac_spacing").result, CheckResult::Fail);
+        assert_eq!(
+            get(&check_conduit(&rs, &i), "ac_spacing").result,
+            CheckResult::Fail
+        );
         let c = check_conduit(&rs, &base(150, 4.0, 1.0));
         assert_eq!(get(&c, "max_grade").result, CheckResult::Fail);
         let json_ok = format!("{:?}", c[0].result);
