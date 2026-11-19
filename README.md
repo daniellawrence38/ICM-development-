@@ -11,6 +11,7 @@ Wastewater network modelling for gravity sewers, pump stations and rising mains.
 | `crates/wwnet-cli` | `wwnet new / check / trace / design` |
 | `crates/wwnet-py` | PyO3 `wwnet_native` abi3 wheel used by the plugin |
 | `qgis_plugin/` | QGIS plugin: model create/open, styling, check dock, AI assistant |
+| `arcgis_toolbox/` | ArcGIS Pro Python toolbox (`WWNet.pyt`): same tools and assistant, shares the plugin core |
 | `rulesets/` | `ds50_v2r4.toml` (transcribed), `ds51_TODO.toml` |
 | `templates/schema.sql` | GeoPackage schema v1 (EPSG:7850) |
 | `docs/` | `PLAN.md`, `reference-survey.md` |
