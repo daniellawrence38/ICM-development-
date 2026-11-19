@@ -38,8 +38,8 @@ dry/wet transitions is the bulk of what ICM's licence fee buys. Recommendation:
 | Component | Approach |
 |---|---|
 | Gravity steady-state design calcs | **Own code** (Colebrook-White + Manning, part-full relationships). Simple, fully auditable, matches DS hand calcs. |
-| Dynamic simulation (gravity + pumps + rising mains) | **EPA SWMM 5.2 engine via `pyswmm` / `swmm-toolkit`**. Dynamic wave, force mains (H-W or D-W), pump curves, on/off level controls, storage nodes for wet wells. Public domain, well validated. |
-| Pressure network steady-state (pump duty point, shared rising mains, multiple stations into a common main) | **Own system-curve solver** for single-station cases; **EPANET 2.2 via `wntr`** for manifolded rising-main networks. |
+| Dynamic simulation (gravity + pumps + rising mains) | **EPA SWMM 5.2 C engine via Rust FFI**. Dynamic wave, force mains (H-W or D-W), pump curves, on/off level controls, storage nodes for wet wells. Public domain, well validated. |
+| Pressure network steady-state (pump duty point, shared rising mains, multiple stations into a common main) | **Own system-curve solver** for single-station cases; **EPANET 2.2 C engine via Rust FFI** for manifolded rising-main networks. |
 
 The tool is therefore: *data model + DS rules engine + loading engine + translators to/from
 SWMM/EPANET + results/compliance UI*. That's achievable for a small team; a bespoke dynamic
@@ -47,21 +47,41 @@ solver isn't (at least not in v1). The engine sits behind an interface so it can
 
 ---
 
-## 3. Tech stack
+## 3. Tech stack (Rust)
 
-Recommended: **Python core library + QGIS plugin front end** (phase 1), optional web front end later.
+Core is a Rust workspace: a pure library (`wwnet-core` and friends), a CLI for batch runs and
+CI, and a desktop GUI on top. No Python in the runtime.
 
-- Core: Python 3.12, `pydantic` (data model/validation), `numpy`/`scipy`, `networkx` (topology,
-  upstream tracing), `pyswmm`, `wntr`, `geopandas`/`shapely`.
-- Storage: **GeoPackage** per model (single file, SQLite, opens in QGIS/ArcGIS). Schema versioned
-  with migrations. PostGIS later if multi-user is needed.
-- UI: QGIS plugin — gives mapping, editing, snapping, symbology, layouts and GIS import for free.
-  Custom panels for property editing, run manager, long sections, results graphs.
-- Reports: long sections (matplotlib), compliance tables to Excel (`openpyxl`) and PDF.
-- Testing: `pytest` with hand-calc benchmark cases; regression against existing ICM/SWMM models.
+| Concern | Crate / approach |
+|---|---|
+| Data model, serialisation | `serde`; rule sets in **TOML** (`toml` crate — `serde_yaml` is unmaintained) |
+| Units safety | `uom` for internal quantities (L/s vs m³/s and m vs mm errors become compile errors), plain `f64` at hot loops |
+| Topology / tracing | `petgraph` (DAG for accumulation, cycle detection, upstream/downstream trace) |
+| Geometry | `geo` / `geo-types`; `proj` only if reprojection is needed (MGA2020 Zone 50 ↔ GDA2020 lat/long) |
+| Storage | GeoPackage via `rusqlite` (bundled SQLite) — write the GPKG tables directly; schema migrations with `refinery` |
+| GIS import | `shapefile`, `csv`; `gdal` crate optional (pulls in the GDAL C library — keep behind a cargo feature) |
+| Numerics | own Colebrook/part-full solvers (bisection/Brent); `nalgebra` if a native network solver is added later |
+| SWMM / EPANET | FFI to the C engines: vendor EPA SWMM 5.2 and EPANET 2.2 source, build with `cc`, bindings with `bindgen`, wrapped in a safe `Engine` trait |
+| Parallel scenarios | `rayon` (independent SWMM runs per scenario in parallel) |
+| Errors / logging | `thiserror` (library), `anyhow` (CLI/app), `tracing` |
+| GUI | **Tauri 2** desktop app: Rust backend + MapLibre GL JS map with editing (TypeScript front end). Alternative: `egui`/`eframe` (pure Rust, but map editing/snapping is far less mature) |
+| Charts / long sections | `plotters` for report images; a JS chart lib in the GUI |
+| Reports | `rust_xlsxwriter` for Excel; Typst templates for PDF reports |
+| Tests | `cargo test`, `approx` for float tolerance, `insta` snapshot tests for compliance tables and .inp output, `proptest` for hydraulic invariants (e.g. Q monotonic with depth up to ~0.94D) |
 
-Alternative (if a browser tool is a hard requirement): FastAPI + React + MapLibre. Roughly
-2–3× the front-end effort; defer.
+**Why the C engines are still worth keeping:** SWMM 5.2 and EPANET 2.2 are small, plain C,
+public domain and compile cleanly with the `cc` crate, so FFI is low risk. Put them behind a
+`HydraulicEngine` trait; a native Rust dynamic-wave solver can then replace SWMM later
+(v2+) and be validated against it run for run.
+
+**QGIS fallback:** if staff want to keep working in QGIS, expose the core with `PyO3`/`maturin`
+as a Python wheel and write a thin QGIS plugin. The core design doesn't change — this is why
+the core stays a GUI-free library.
+
+**Learning curve:** Rust is a big step up from beginner-to-intermediate Python — the borrow
+checker, traits and FFI will slow Phase 0–1 noticeably. The core calculation code is a good
+fit for Rust (pure functions over data); the GUI and FFI layers are the hard parts. Durations
+below allow for this.
 
 ---
 
@@ -96,31 +116,35 @@ and report what's assumed.
 
 ## 5. DS rules engine
 
-Design criteria are **data, not code**: a versioned YAML/JSON rule set per standard revision,
+Design criteria are **data, not code**: a versioned TOML rule set per standard revision,
 so a new DS revision is a new file, not a code change.
 
-```yaml
-standard: DS51
-revision: "<to confirm>"
-loading:
-  adwf_per_ep_lps: <value>
-  peaking_factor: { method: <formula/table>, params: {...} }
-  infiltration: { ... }
-  storm_allowance: { ... }
-gravity:
-  min_velocity_mps: <value>   # self-cleansing at PDWF or nominated flow
-  max_velocity_mps: <value>
-  min_grade_by_dn: { 150: <1 in x>, 225: ..., ... }
-  max_d_over_D_at_pwwf: <value>
-  min_cover_m: { road: ..., verge: ..., lot: ... }
-pump_station:
-  emergency_storage_hours_at_adwf: <value>
-  max_starts_per_hour: <value>
-  min_cycle_time_min: <value>
-rising_main:
-  min_velocity_mps: <value>
-  max_velocity_mps: <value>
-  max_detention_time_hr: <value>
+```toml
+standard = "DS51"
+revision = "<to confirm>"
+
+[loading]
+adwf_per_ep_lps = "<value>"
+peaking_factor  = { method = "<formula/table>" }
+infiltration    = {}
+storm_allowance = {}
+
+[gravity]
+min_velocity_mps    = "<value>"   # self-cleansing at PDWF or nominated flow
+max_velocity_mps    = "<value>"
+max_d_over_D_at_pwwf = "<value>"
+min_grade_by_dn     = { 150 = "<1 in x>", 225 = "<1 in x>" }
+min_cover_m         = { road = "<value>", verge = "<value>", lot = "<value>" }
+
+[pump_station]
+emergency_storage_hours_at_adwf = "<value>"
+max_starts_per_hour             = "<value>"
+min_cycle_time_min              = "<value>"
+
+[rising_main]
+min_velocity_mps      = "<value>"
+max_velocity_mps      = "<value>"
+max_detention_time_hr = "<value>"
 ```
 
 Each check returns pass/fail/warn, the computed value, the limit, and the **clause reference**,
@@ -135,7 +159,7 @@ so outputs can go straight into a design report or variation request.
 
 ## 6. Calculation methods
 
-**Flow accumulation (design mode):** build a directed tree with `networkx`; accumulate EP
+**Flow accumulation (design mode):** build a directed tree with `petgraph`; accumulate EP
 downstream (not flows — peaking factor must be applied to accumulated EP, otherwise you
 over-estimate). At pump stations, the downstream contribution becomes the pumped rate (duty
 flow), not the accumulated PWWF.
@@ -165,15 +189,15 @@ Each phase ends with something usable. Durations assume one developer part-time-
 
 | Phase | Deliverable | Indicative |
 |---|---|---|
-| **0. Foundations** | Repo, CI, schema v1 in GeoPackage, pydantic models, validation (connectivity, inverts, adverse grades, orphans). | 3–4 wks |
-| **1. Asset input** | QGIS plugin: create/edit nodes, pipes, pump stations, rising mains; GIS import with field mapping templates (Water Corp extracts); data confidence flags; long-section viewer. | 6–8 wks |
-| **2. Design mode – gravity** | DS rule set (YAML), EP loading, accumulation, Colebrook/part-full, compliance table and long section with HGL at PWWF. Benchmark vs hand calcs. | 5–6 wks |
-| **3. Pump stations & rising mains (steady)** | Pump curve library, system curve solver, duty point, cycle/storage checks, rising-main checks; EPANET bridge for manifolded mains. | 5–6 wks |
-| **4. Dynamic simulation** | SWMM translator, run manager, results reader, time-series graphs, animated long sections, overflow/surcharge reporting. Validate against an existing ICM model of a known catchment. | 8–10 wks |
+| **0. Foundations** | Cargo workspace, GitHub Actions CI (fmt, clippy, test), core entity structs, GeoPackage schema v1, validation (connectivity, inverts, adverse grades, orphans), CLI `wwnet check`. | 4–6 wks |
+| **1. Asset input** | GIS import with field-mapping templates (Water Corp extracts); Tauri app with MapLibre map: create/edit nodes, pipes, pump stations, rising mains, snapping; data confidence flags; long-section viewer. | 10–12 wks |
+| **2. Design mode – gravity** | DS rule set (TOML), EP loading, accumulation, Colebrook/part-full, compliance table and long section with HGL at PWWF. Benchmark vs hand calcs. | 5–6 wks |
+| **3. Pump stations & rising mains (steady)** | Pump curve library, system curve solver, duty point, cycle/storage checks, rising-main checks; EPANET FFI crate for manifolded mains. | 5–6 wks |
+| **4. Dynamic simulation** | SWMM FFI crate (cc + bindgen), .inp translator, run manager, results reader, time-series graphs, animated long sections, overflow/surcharge reporting. Validate against an existing ICM model of a known catchment. | 8–10 wks |
 | **5. Scenarios & reporting** | Scenario overrides, existing vs ultimate comparison, Excel/PDF report generation, ICM CSV export. | 4–6 wks |
-| **6. v2 candidates** | Rainfall-dependent inflow (RTK), calibration to flow-gauge data, H₂S/septicity, surge, VSD control strategies, web front end, PostGIS multi-user. | — |
+| **6. v2 candidates** | Native Rust dynamic-wave solver behind the engine trait (validated against SWMM), Rainfall-dependent inflow (RTK), calibration to flow-gauge data, H₂S/septicity, surge, VSD control strategies, web front end, PostGIS multi-user. | — |
 
-MVP that's genuinely useful = Phases 0–3 (~5–6 months): asset register + DS-compliant
+MVP that's genuinely useful = Phases 0–3 (~6–8 months in Rust; the CLI is usable for design checks from Phase 2, before the GUI is finished): asset register + DS-compliant
 steady-state design of gravity and pumped systems.
 
 ---
@@ -208,20 +232,23 @@ steady-state design of gravity and pumped systems.
 
 ---
 
-## 10. Repository layout (proposed)
+## 10. Repository layout (Cargo workspace)
 
 ```
-wwnet/
-  core/        # data model, schema, validation, topology
-  loading/     # EP, peaking, infiltration, diurnal patterns
-  hydraulics/  # gravity, pump, rising main steady-state calcs
-  engines/     # swmm/ and epanet/ translators + runners
-  rules/       # rules engine + rulesets/ds50.yaml, ds51.yaml, wsa02.yaml
-  io/          # GIS import mapping templates, SWMM/ICM CSV
-  reports/     # long sections, compliance tables, Excel/PDF
-qgis_plugin/
-tests/
-  benchmarks/  # hand-calc fixtures
+Cargo.toml                # [workspace]
+crates/
+  wwnet-core/             # entities, IDs, validation, petgraph topology, GeoPackage I/O
+  wwnet-loading/          # EP, peaking, infiltration, diurnal patterns
+  wwnet-hydraulics/       # gravity part-full, system curves, duty point, rising main checks
+  wwnet-rules/            # rules engine + rulesets/ds50.toml, ds51.toml, wsa02.toml
+  wwnet-swmm-sys/         # vendored SWMM 5.2 C source, build.rs (cc + bindgen)
+  wwnet-epanet-sys/       # vendored EPANET 2.2 C source, build.rs
+  wwnet-engines/          # safe HydraulicEngine trait, .inp writer, results reader
+  wwnet-io/               # shapefile/CSV import mapping templates, ICM CSV export
+  wwnet-reports/          # Excel, Typst PDF, long-section plots
+  wwnet-cli/              # `wwnet check`, `wwnet design`, `wwnet simulate`
+app/                      # Tauri 2 desktop app (src-tauri + MapLibre front end)
+tests/benchmarks/         # hand-calc fixtures (TOML/CSV)
 docs/
 ```
 
@@ -232,4 +259,4 @@ docs/
 1. Confirm the DS documents and revisions to encode (DS 50, DS 51, pump station standard) and
    supply the parameter tables.
 2. Pick a pilot catchment with an existing ICM model and GIS extract for validation.
-3. Confirm front end (QGIS plugin recommended) and start Phase 0.
+3. Confirm front end (Tauri desktop app recommended; QGIS via PyO3 as fallback) and start Phase 0.
