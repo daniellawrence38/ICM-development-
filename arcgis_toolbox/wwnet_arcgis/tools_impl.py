@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from . import (arcpy_tools, assistant_run, capacity, cli, dpapi, gpkg, issues_table, maplayers,
-               settings, shared, vendor)
+               settings, shared, symbology, vendor)
 from .messages import Messages
 
 MAX_LINES = 300
@@ -59,50 +59,139 @@ def _select(arcpy, layer, ids, field):
                                             where if ids else "")
 
 
-def run_design(arcpy, msgs: Messages, gpkg_path: str, add_table: bool = True, join: bool = False,
+RESULT_FIELDS = [("conduit_id", "TEXT"), ("dn", "LONG"), ("grade_1in", "DOUBLE"), ("gsdf_lps", "DOUBLE"),
+                 ("pumped_lps", "DOUBLE"), ("total_lps", "DOUBLE"), ("capacity_lps", "DOUBLE"),
+                 ("d_over_d", "DOUBLE"), ("velocity_mps", "DOUBLE"), ("result", "TEXT"), ("message", "TEXT")]
+
+
+def _worst_message(c: dict) -> str:
+    chks = cli.failed_checks(c)
+    chks.sort(key=lambda k: 0 if k.get("result") == "fail" else 1)
+    return str(chks[0].get("message") or "") if chks else ""
+
+
+def _num(c, key, default=0.0):
+    v = c.get(key)
+    return default if v is None else v
+
+
+def results_table_lines(conduit_results: list, max_lines: int = MAX_LINES) -> list:
+    hdr = (f"{'Conduit':<10}{'DN':>5}{'Grade 1:x':>10}{'GSDF L/s':>9}{'Pumped':>8}{'Total L/s':>10}"
+           f"{'Cap L/s':>9}{'d/D':>6}{'v m/s':>7}  {'RESULT':<6}  Worst message")
+    lines = [hdr, "-" * len(hdr)]
+    for c in conduit_results[:max_lines]:
+        lines.append(f"{str(c['conduit_id'])[:10]:<10}{int(_num(c, 'dn')):>5}{_num(c, 'grade_1in'):>10.0f}"
+                     f"{_num(c, 'gsdf_lps'):>9.2f}{_num(c, 'pumped_lps'):>8.2f}{_num(c, 'total_lps'):>10.2f}"
+                     f"{_num(c, 'capacity_lps'):>9.1f}{_num(c, 'd_over_d'):>6.2f}{_num(c, 'velocity_mps'):>7.2f}"
+                     f"  {str(c['result']).upper():<6}  {_worst_message(c)[:60]}")
+    if len(conduit_results) > max_lines:
+        lines.append(f"... {len(conduit_results) - max_lines} more")
+    return lines
+
+
+def _safe_stem(gpkg_path: str) -> str:
+    import os
+    import re
+    stem = os.path.splitext(os.path.basename(gpkg_path))[0]
+    return re.sub(r"\W", "_", stem) or "model"
+
+
+def _spatial_ref(arcpy, gpkg_path: str):
+    try:
+        return arcpy.Describe(gpkg.table_path(gpkg_path, "wwn_conduits")).spatialReference
+    except Exception:  # noqa: BLE001
+        return arcpy.SpatialReference(7850)
+
+
+def build_results_fc(arcpy, gpkg_path: str, conduit_results: list) -> str:
+    """Create memory\\wwnet_results_<stem> (POLYLINE) filled from the design output; returns its path."""
+    fc_name = f"wwnet_results_{_safe_stem(gpkg_path)}"
+    fc = "memory\\" + fc_name
+    if arcpy.Exists(fc):
+        arcpy.management.Delete(fc)
+    arcpy.management.CreateFeatureclass("memory", fc_name, "POLYLINE", spatial_reference=_spatial_ref(arcpy, gpkg_path))
+    for name, typ in RESULT_FIELDS:
+        if typ == "TEXT":
+            arcpy.management.AddField(fc, name, "TEXT", field_length=255 if name == "message" else 64)
+        else:
+            arcpy.management.AddField(fc, name, typ)
+    by_id = {c["conduit_id"]: c for c in conduit_results}
+    cols = [f for f, _ in RESULT_FIELDS] + ["SHAPE@"]
+    n = 0
+    with arcpy.da.SearchCursor(gpkg.table_path(gpkg_path, "wwn_conduits"), ["conduit_id", "SHAPE@"]) as src, \
+            arcpy.da.InsertCursor(fc, cols) as ins:
+        for cid, shape in src:
+            c = by_id.get(cid)
+            if c is None:
+                continue
+            ins.insertRow([cid, int(_num(c, "dn")), _num(c, "grade_1in"), _num(c, "gsdf_lps"),
+                           _num(c, "pumped_lps"), _num(c, "total_lps"), _num(c, "capacity_lps"),
+                           _num(c, "d_over_d"), _num(c, "velocity_mps"), c["result"],
+                           _worst_message(c)[:255], shape])
+            n += 1
+    return fc
+
+
+def _show_results_layer(arcpy, msgs, gpkg_path: str, d: dict, select_failed: bool):
+    stem = _safe_stem(gpkg_path)
+    name = f"Design results \u2014 {stem}"
+    maplayers.remove_layers_named(arcpy, name)
+    fc = build_results_fc(arcpy, gpkg_path, d["conduit_results"])
+    lyr = maplayers.add_results_layer(arcpy, fc, name, msgs)
+    symbology.apply("results", lyr, msgs)
+    if select_failed:
+        failed = cli.failed_conduits(d)
+        try:
+            _select(arcpy, lyr, failed, "conduit_id")
+        except Exception as exc:  # noqa: BLE001
+            msgs.warn(f"Could not select failed conduits on the results layer: {exc}")
+    msgs.info(f"Results layer added: {name} (temporary \u2014 re-run Run Design after restarting Pro)")
+
+
+def run_design(arcpy, msgs: Messages, gpkg_path: str, show_layer: bool = True, add_table: bool = False,
                select_failed: bool = True, exe=None) -> dict:
     d = cli.run_design(gpkg_path, exe)
     s = d["summary"]
     msgs.info(f"Design run: {s['conduits']} conduit(s): {s['pass']} pass, {s['warn']} warn, "
               f"{s['fail']} fail. Terminal GSDF {s['terminal_gsdf_lps']:.3f} L/s "
               f"(total local {s['total_local_gsdf_lps']:.3f} L/s).")
+    for line in results_table_lines(d["conduit_results"]):
+        msgs.info(line)
     for c in d["conduit_results"]:
         if c["result"] == "pass":
             continue
         msgs.warn(f"{c['conduit_id']} DN{c['dn']} {c['result'].upper()}: capacity {c['capacity_lps']:.1f} L/s, "
-               f"flow {c['total_lps']:.2f} L/s, d/D {c['d_over_d']:.2f}")
+                  f"flow {c['total_lps']:.2f} L/s, d/D {c['d_over_d']:.2f}")
         for chk in cli.failed_checks(c):
             msgs.warn(f"    {chk['rule']} ({chk['clause']}): {chk['message']}")
     for i in report_issues_sorted(d.get("issues", [])):
         msgs.warn(f"{i.get('code')} {i.get('object_type')} {i.get('object_id')} ({i.get('clause')}): "
                   f"{i.get('message')}")
+    if show_layer:
+        try:
+            _show_results_layer(arcpy, msgs, gpkg_path, d, select_failed)
+        except Exception as exc:  # noqa: BLE001
+            msgs.warn(f"Could not add the results layer to the map: {exc}")
     if add_table:
         try:
             maplayers.add_results_table(arcpy, gpkg_path, msgs)
         except Exception as exc:  # noqa: BLE001
             msgs.warn(f"Could not add the results table to the map: {exc}")
-    lyr = None
-    if select_failed or join:
+    if select_failed:
+        lyr = None
         try:
             lyr = maplayers.find_layer_for(arcpy, gpkg_path, "wwn_conduits")
         except Exception as exc:  # noqa: BLE001
             msgs.warn(f"Could not inspect the map: {exc}")
         if lyr is None:
-            msgs.warn("The model's conduit layer is not in the active map; skipping select/join.")
-    if lyr is not None and select_failed:
-        failed = cli.failed_conduits(d)
-        try:
-            _select(arcpy, lyr, failed, "conduit_id")
-            msgs.info(f"Selected {len(failed)} failed conduit(s)." if failed else "No failed conduits.")
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not select failed conduits: {exc}")
-    if lyr is not None and join:
-        try:
-            arcpy.management.AddJoin(lyr, "conduit_id", gpkg.table_path(gpkg_path, "wwn_results_conduits"),
-                                     "conduit_id")
-            msgs.info("Joined wwn_results_conduits to the conduit layer (remove it from Layer Properties > Joins).")
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not join the results table: {exc}")
+            msgs.warn("The model's conduit layer is not in the active map; skipping select.")
+        else:
+            failed = cli.failed_conduits(d)
+            try:
+                _select(arcpy, lyr, failed, "conduit_id")
+                msgs.info(f"Selected {len(failed)} failed conduit(s)." if failed else "No failed conduits.")
+            except Exception as exc:  # noqa: BLE001
+                msgs.warn(f"Could not select failed conduits: {exc}")
     return d
 
 

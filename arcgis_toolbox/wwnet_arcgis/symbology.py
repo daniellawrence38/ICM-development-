@@ -71,7 +71,28 @@ def style_conduits(layer):
     lc.visible = True
 
 
-_STYLERS = {"wwn_nodes": style_nodes, "wwn_conduits": style_conduits}
+RESULT_COLOURS = {"pass": [46, 158, 68], "warn": [232, 163, 23], "fail": [215, 38, 61]}  # #2E9E44 #E8A317 #D7263D
+
+RESULTS_LABEL_ARCADE = (
+    '$feature.conduit_id + " DN" + $feature.dn + "  " + Text($feature.total_lps,"0.00") + "/" + '
+    'Text($feature.capacity_lps,"0.0") + " L/s  d/D " + Text($feature.d_over_d,"0.00")')
+
+
+def style_results(layer):
+    """Pass/warn/fail unique values on `result`, 2.5 pt lines, capacity labels."""
+    _unique(layer, "result", lambda v: RESULT_COLOURS.get(str(v).lower(), DEFAULT_RGB),
+            width=lambda v: 2.5)
+    layer.showLabels = True
+    lc = layer.listLabelClasses()[0]
+    try:
+        lc.expressionEngine = "Arcade"
+    except Exception:  # noqa: BLE001
+        pass
+    lc.expression = RESULTS_LABEL_ARCADE
+    lc.visible = True
+
+
+_STYLERS = {"wwn_nodes": style_nodes, "wwn_conduits": style_conduits, "results": style_results}
 
 
 def apply(table: str, layer, msgs):

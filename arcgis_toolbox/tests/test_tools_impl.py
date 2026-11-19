@@ -13,6 +13,9 @@ from wwnet_arcgis.messages import Messages
 TOOLBOX = Path(__file__).resolve().parents[1]
 
 
+RES_NAME = "Design results \u2014 demo"
+
+
 def mk(fake_arcpy, gpkg_path):
     layers = [fa.make_layer("Nodes", gpkg.table_path(gpkg_path, "wwn_nodes")),
               fa.make_layer("Gravity sewers", gpkg.table_path(gpkg_path, "wwn_conduits"))]
@@ -84,12 +87,12 @@ def test_run_design_selects_failed(fake_arcpy, wwnet_exe, demo_gpkg):
     con.execute("update wwn_conduits set ds_invert = us_invert - 0.1 where conduit_id='P02'")
     con.commit()
     con.close()
-    d = tools_impl.run_design(a, Messages(a), demo_gpkg, add_table=True, join=True, select_failed=True,
-                              exe=wwnet_exe)
+    d = tools_impl.run_design(a, Messages(a), demo_gpkg, add_table=True, select_failed=True, exe=wwnet_exe)
     assert d["summary"]["fail"] >= 1
-    assert a.selections and a.selections[0][0] == "Gravity sewers" and "'P02'" in a.selections[0][2]
-    assert a.selections[0][1] == "NEW_SELECTION"
-    assert a.joins and a.joins[0][1] == "conduit_id"
+    sel = {n: (m, w) for n, m, w in a.selections}
+    assert "'P02'" in sel["Gravity sewers"][1] and sel["Gravity sewers"][0] == "NEW_SELECTION"
+    assert "'P02'" in sel[RES_NAME][1]
+    assert not a.joins
     assert any(k == "data" and p.endswith("main.wwn_results_conduits") for k, p in a.added)
     text = "\n".join(t for _, t in a.log)
     assert "P02" in text and "FAIL" in text and "Design run: 11 conduit(s)" in text
@@ -97,9 +100,8 @@ def test_run_design_selects_failed(fake_arcpy, wwnet_exe, demo_gpkg):
 
 def test_run_design_all_pass_clears_selection(fake_arcpy, wwnet_exe, demo_gpkg):
     a, _ = mk(fake_arcpy, demo_gpkg)
-    tools_impl.run_design(a, Messages(a), demo_gpkg, add_table=False, join=False, select_failed=True,
-                          exe=wwnet_exe)
-    assert a.selections[0][1] == "CLEAR_SELECTION"
+    tools_impl.run_design(a, Messages(a), demo_gpkg, add_table=False, select_failed=True, exe=wwnet_exe)
+    assert all(m == "CLEAR_SELECTION" for _, m, _ in a.selections) and len(a.selections) == 2
     assert any("No failed conduits" in t for _, t in a.log)
 
 
@@ -159,3 +161,66 @@ def test_pyt_compiles_and_defines_tools(fake_arcpy):
     assert ask["question"].controlCLSID and ask["layer"].datatype == "GPFeatureLayer"
     tr = mod.Trace().getParameterInfo()
     assert tr[1].filter.type == "ValueList"
+
+
+def test_run_design_prints_table(fake_arcpy, wwnet_exe, demo_gpkg):
+    a, _ = mk(fake_arcpy, demo_gpkg)
+    d = tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
+    text = [t for _, t in a.log]
+    hdr = next(t for t in text if t.startswith("Conduit"))
+    for col in ("DN", "Grade 1:x", "GSDF L/s", "Pumped", "Total L/s", "Cap L/s", "d/D", "v m/s", "RESULT",
+                "Worst message"):
+        assert col in hdr
+    c = d["conduit_results"][0]
+    row = next(t for t in text if t.startswith(c["conduit_id"] + " "))
+    assert f"{c['capacity_lps']:.1f}" in row and "PASS" in row
+    assert sum(1 for t in text if t.startswith(("P0", "P1")) and "PASS" in t) >= 1
+    assert text.index(hdr) > next(i for i, t in enumerate(text) if t.startswith("Design run"))
+
+
+def test_results_table_cap():
+    rows = [dict(conduit_id=f"C{i}", dn=150, result="pass") for i in range(5)]
+    lines = tools_impl.results_table_lines(rows, max_lines=3)
+    assert len(lines) == 2 + 3 + 1 and lines[-1] == "... 2 more"
+
+
+def test_run_design_results_layer(fake_arcpy, wwnet_exe, demo_gpkg):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    d = tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
+    fc = a.memory["memory\\wwnet_results_demo"]
+    assert fc["geom"] == "POLYLINE" and fc["sr"].factoryCode == 7850
+    assert [n for n, _ in fc["fields"]] == [f for f, _ in tools_impl.RESULT_FIELDS]
+    assert dict(fc["fields"])["dn"] == "LONG" and dict(fc["fields"])["message"] == "TEXT"
+    assert len(fc["rows"]) == 11
+    by = {r["conduit_id"]: r for r in fc["rows"]}
+    for c in d["conduit_results"]:
+        r = by[c["conduit_id"]]
+        assert r["dn"] == c["dn"] and r["result"] == c["result"]
+        assert r["total_lps"] == c["total_lps"] and r["capacity_lps"] == c["capacity_lps"]
+        assert r["grade_1in"] == c["grade_1in"] and r["velocity_mps"] == c["velocity_mps"]
+        assert r["SHAPE@"]
+    assert [l.name for l in layers].count(RES_NAME) == 1
+    assert any("Results layer added: " + RES_NAME + " (temporary" in t for _, t in a.log)
+
+
+def test_run_design_replaces_existing_layer(fake_arcpy, wwnet_exe, demo_gpkg):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
+    tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
+    assert [l.name for l in layers].count(RES_NAME) == 1
+    assert a.removed == [RES_NAME] and a.deleted == ["memory\\wwnet_results_demo"]
+    assert len(a.memory["memory\\wwnet_results_demo"]["rows"]) == 11
+
+
+def test_run_design_symbology_failure_only_warns(fake_arcpy, wwnet_exe, demo_gpkg):
+    a, layers = mk(fake_arcpy, demo_gpkg)    # fake layers have no .symbology -> styling raises
+    tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
+    assert any(lv == "warn" and "Symbology for results" in t for lv, t in a.log)
+    assert any("Results layer added" in t for _, t in a.log)
+
+
+def test_run_design_show_layer_false(fake_arcpy, wwnet_exe, demo_gpkg):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    tools_impl.run_design(a, Messages(a), demo_gpkg, show_layer=False, exe=wwnet_exe)
+    assert not a.memory and len(layers) == 2
+    assert not any("Results layer" in t for _, t in a.log)

@@ -115,8 +115,8 @@ class RunDesign(object):
 
     def getParameterInfo(self):
         return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
-                _p("add_table", "Add results table to map", "GPBoolean", required=False, default=True),
-                _p("join", "Join results to the conduit layer", "GPBoolean", required=False, default=False),
+                _p("show_layer", "Show results layer on map", "GPBoolean", required=False, default=True),
+                _p("add_table", "Add results table to map", "GPBoolean", required=False, default=False),
                 _p("select_failed", "Select failed conduits", "GPBoolean", required=False, default=True)]
 
     def execute(self, parameters, messages):

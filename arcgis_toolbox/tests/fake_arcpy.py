@@ -69,6 +69,20 @@ class _Cursor:
         return False
 
 
+class _MemCursor:
+    def __init__(self, rows, fields):
+        self.rows, self.fields = rows, list(fields)
+
+    def __iter__(self):
+        return iter([[r.get(f) for f in self.fields] for r in self.rows])
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
 class FakeEditor:
     instances: list = []
 
@@ -109,7 +123,7 @@ def make_layer(name, ds, selection=None, feature=True):
 def make_fake(layers=None, map_name="Map"):
     a = types.ModuleType("arcpy")
     a.log, a.queries, a.writes = [], [], []
-    a.selections, a.joins, a.added, a.inserted = [], [], [], []
+    a.selections, a.joins, a.added, a.inserted, a.removed = [], [], [], [], []
     a.AddMessage = lambda t: a.log.append(("info", t))
     a.AddWarning = lambda t: a.log.append(("warn", t))
     a.AddError = lambda t: a.log.append(("error", t))
@@ -137,12 +151,21 @@ def make_fake(layers=None, map_name="Map"):
 
     a.ListFields = list_fields
 
+    a.memory = {}   # "memory\\name" -> {"fields": [(name, type)], "rows": [row], "sr": ..., "geom": ...}
+    a.deleted = []
+    a.Exists = lambda p: p in a.memory
+    a.SpatialReference = lambda code: NS(factoryCode=code, name=f"EPSG:{code}")
+    a.Describe = lambda p: NS(spatialReference=NS(factoryCode=7850, name="GDA2020 / MGA zone 50"))
+
     class Insert:
         def __init__(self, path, fields):
-            self.path = path
+            self.path, self.fields = path, list(fields)
 
         def insertRow(self, row):
-            a.inserted.append(row)
+            if self.path in a.memory:
+                a.memory[self.path]["rows"].append(dict(zip(self.fields, row)))
+            else:
+                a.inserted.append(row)
 
         def __enter__(self):
             return self
@@ -150,14 +173,34 @@ def make_fake(layers=None, map_name="Map"):
         def __exit__(self, *e):
             return False
 
-    a.da = NS(SearchCursor=lambda ds, f, where_clause=None: _Cursor(a, ds, f, where_clause),
+    def search(ds, f, where_clause=None):
+        if ds in a.memory:
+            return _MemCursor(a.memory[ds]["rows"], f)
+        return _Cursor(a, ds, f, where_clause)
+
+    a.da = NS(SearchCursor=search,
               UpdateCursor=lambda ds, f, where_clause=None: _Cursor(a, ds, f, where_clause, True),
               Editor=FakeEditor, InsertCursor=Insert)
+    def create_fc(workspace, name, geometry_type="POLYLINE", template=None, has_m=None, has_z=None,
+                  spatial_reference=None):
+        assert workspace == "memory", "fake arcpy: only the memory workspace is supported"
+        a.memory["memory\\" + name] = {"fields": [], "rows": [], "sr": spatial_reference, "geom": geometry_type}
+
+    def add_field(table, name, ftype=None, *args, **kw):
+        if table in a.memory:
+            a.memory[table]["fields"].append((name, ftype))
+        else:
+            a.added.append(("field", name))
+
+    def delete_fc(path):
+        a.deleted.append(path)
+        a.memory.pop(path, None)
+
     a.management = NS(
         SelectLayerByAttribute=lambda lyr, mode, where="": a.selections.append((lyr.name, mode, where)),
         AddJoin=lambda *args: a.joins.append(args),
         CreateTable=lambda folder, name: a.added.append(("table", folder, name)),
-        AddField=lambda *args, **kw: a.added.append(("field", args[1])))
+        AddField=add_field, Delete=delete_fc, CreateFeatureclass=create_fc)
 
     layers = layers if layers is not None else []
 
@@ -175,6 +218,10 @@ def make_fake(layers=None, map_name="Map"):
             a.added.append(("data", path))
             layers.append(lyr)
             return lyr
+
+        def removeLayer(self, lyr):
+            layers.remove(lyr)
+            a.removed.append(lyr.name)
 
     m = Map()
     a.mp = NS(ArcGISProject=lambda _x: NS(activeMap=m, filePath="C:/p/test.aprx"))

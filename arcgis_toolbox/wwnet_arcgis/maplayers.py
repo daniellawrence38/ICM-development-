@@ -69,6 +69,32 @@ def add_results_table(arcpy, gpkg_path: str, msgs):
     return tbl
 
 
+def remove_layers_named(arcpy, name: str) -> int:
+    """Remove every map layer / table called `name` (also inside groups). Returns how many."""
+    m = active_map(arcpy)
+    n = 0
+    for lyr in [x for x in list(m.listLayers()) + list(m.listTables()) if x.name == name]:
+        m.removeLayer(lyr)
+        n += 1
+    return n
+
+
+def add_results_layer(arcpy, fc_path: str, name: str, msgs):
+    """Add the in-memory results feature class to the active map (in the WWNet group if present)."""
+    m = active_map(arcpy)
+    lyr = m.addDataFromPath(fc_path)
+    lyr.name = name
+    group = _find_group(m)
+    if group is not None:
+        try:
+            m.addLayerToGroup(group, lyr)
+            m.removeLayer(lyr)
+            lyr = next((x for x in group.listLayers() if x.name == name), lyr)
+        except Exception as exc:  # noqa: BLE001
+            msgs.warn(f"Could not move the results layer into the group layer: {exc}")
+    return lyr
+
+
 def find_layer_for(arcpy, gpkg_path: str, table: str):
     """The map layer showing `table` of `gpkg_path`, or None."""
     norm = lambda p: str(p).replace("/", "\\").lower()  # noqa: E731
