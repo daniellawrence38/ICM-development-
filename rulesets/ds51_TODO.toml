@@ -1,0 +1,15 @@
+# Placeholder — pump stations / pressure mains standard. Populate from the controlled document.
+standard = "DS51"
+revision = "TODO"
+
+[pump_station]
+emergency_storage_hours = "TODO"
+max_starts_per_hour = "TODO"
+min_cycle_time_min = "TODO"
+duty_standby = "TODO"
+
+[pressure_main]
+min_velocity_mps = "TODO"
+max_velocity_mps = "TODO"
+max_detention_time_hr = "TODO"
+formula = "TODO"   # Colebrook-White ks or Hazen-Williams C

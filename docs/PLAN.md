@@ -12,11 +12,12 @@ proper asset register so existing networks and pump stations can be entered and 
 ### In scope
 - Network data model: manholes, gravity pipes, pump stations (wet well, pumps, controls),
   rising mains, valves, discharge/outfall points, catchments/sub-catchments.
-- Loading: equivalent population (EP) / lot-based ADWF, peaking, groundwater infiltration and
-  storm-allowance per Water Corporation method; diurnal profiles for time-varying runs.
+- Loading: DS 50 method — net area × R-Code density × L/person/day (dry or wet ground, north or
+  south of 26°S), Sewer Design Flow = 1.5 × Daily Flow; non-residential by L/net ha/day; pumped
+  inflows at duty rate; diurnal profiles for time-varying runs.
 - Two analysis modes:
-  1. **Design (steady-state)** — PDWF/PWWF accumulated down the tree, pipe sizing and
-     constraint checks (capacity, velocity, grade, depth, d/D, pump duty point).
+  1. **Design (steady-state)** — GSDF accumulated down the tree, pipe sizing and constraint
+     checks (Table 4.4 grade/flow bands, d/D, cover, AC spacing and falls, pump duty point).
   2. **Hydraulic simulation (unsteady)** — extended-period dynamic-wave run with pump cycling,
      wet-well levels, surcharge and overflow (EOS) detection.
 - Constraint / compliance reporting against DS rules, with clause references.
@@ -50,7 +51,9 @@ solver isn't (at least not in v1). The engine sits behind an interface so it can
 ## 3. Tech stack (Rust)
 
 Core is a Rust workspace: a pure library (`wwnet-core` and friends), a CLI for batch runs and
-CI, and a desktop GUI on top. No Python in the runtime.
+CI, and **QGIS as the front end** via a Python wheel built from the Rust core (PyO3/maturin).
+All hydraulics, loading and rules live in Rust; the QGIS plugin is thin PyQGIS glue (forms,
+layer styling, run buttons, results display).
 
 | Concern | Crate / approach |
 |---|---|
@@ -64,8 +67,9 @@ CI, and a desktop GUI on top. No Python in the runtime.
 | SWMM / EPANET | FFI to the C engines: vendor EPA SWMM 5.2 and EPANET 2.2 source, build with `cc`, bindings with `bindgen`, wrapped in a safe `Engine` trait |
 | Parallel scenarios | `rayon` (independent SWMM runs per scenario in parallel) |
 | Errors / logging | `thiserror` (library), `anyhow` (CLI/app), `tracing` |
-| GUI | **Tauri 2** desktop app: Rust backend + MapLibre GL JS map with editing (TypeScript front end). Alternative: `egui`/`eframe` (pure Rust, but map editing/snapping is far less mature) |
-| Charts / long sections | `plotters` for report images; a JS chart lib in the GUI |
+| Python bindings | `pyo3` + `maturin`, built as an **abi3** wheel so one build works across the QGIS-bundled Python versions (OSGeo4W on Windows ships its own Python) |
+| GUI | **QGIS 3.40 LTR plugin** (PyQGIS / Qt): GeoPackage layers edited natively in QGIS, custom dock widgets for properties, run manager, compliance table, long sections |
+| Charts / long sections | `plotters` for report images; in QGIS, matplotlib (bundled with QGIS) or pyqtgraph in a dock widget |
 | Reports | `rust_xlsxwriter` for Excel; Typst templates for PDF reports |
 | Tests | `cargo test`, `approx` for float tolerance, `insta` snapshot tests for compliance tables and .inp output, `proptest` for hydraulic invariants (e.g. Q monotonic with depth up to ~0.94D) |
 
@@ -74,13 +78,15 @@ public domain and compile cleanly with the `cc` crate, so FFI is low risk. Put t
 `HydraulicEngine` trait; a native Rust dynamic-wave solver can then replace SWMM later
 (v2+) and be validated against it run for run.
 
-**QGIS fallback:** if staff want to keep working in QGIS, expose the core with `PyO3`/`maturin`
-as a Python wheel and write a thin QGIS plugin. The core design doesn't change — this is why
-the core stays a GUI-free library.
+**Why QGIS works well here:** mapping, editing, snapping, attribute forms, symbology, print
+layouts and GIS import come free, and the model *is* a GeoPackage QGIS edits directly — the Rust
+core reads the same file. The plugin code is ordinary Python, which suits your existing skills;
+Rust is confined to the calculation crates. Keep the core GUI-free so a CLI (and any later
+standalone app) uses the same code.
 
 **Learning curve:** Rust is a big step up from beginner-to-intermediate Python — the borrow
 checker, traits and FFI will slow Phase 0–1 noticeably. The core calculation code is a good
-fit for Rust (pure functions over data); the GUI and FFI layers are the hard parts. Durations
+fit for Rust (pure functions over data); the C FFI and PyO3 boundary are the hard parts. Durations
 below allow for this.
 
 ---
@@ -117,56 +123,61 @@ and report what's assumed.
 ## 5. DS rules engine
 
 Design criteria are **data, not code**: a versioned TOML rule set per standard revision,
-so a new DS revision is a new file, not a code change.
+so a new DS revision is a new file, not a code change. Each check returns pass/fail/warn, the
+computed value, the limit, and the **clause reference**, so outputs can go straight into a
+design report or variation request.
 
-```toml
-standard = "DS51"
-revision = "<to confirm>"
+### DS 50 Ver 2 Rev 4 (2023) — transcribed: `rulesets/ds50_v2r4.toml`
 
-[loading]
-adwf_per_ep_lps = "<value>"
-peaking_factor  = { method = "<formula/table>" }
-infiltration    = {}
-storm_allowance = {}
+What DS 50 actually specifies for gravity sewers DN150–DN600 (this changes some assumptions
+in the first draft of this plan):
 
-[gravity]
-min_velocity_mps    = "<value>"   # self-cleansing at PDWF or nominated flow
-max_velocity_mps    = "<value>"
-max_d_over_D_at_pwwf = "<value>"
-min_grade_by_dn     = { 150 = "<1 in x>", 225 = "<1 in x>" }
-min_cover_m         = { road = "<value>", verge = "<value>", lot = "<value>" }
+- **Loading (4.2.1, Tables 4.1–4.3):** Daily Flow = net area × persons/net ha × L/person/day
+  (residential) or net area × L/net ha/day (non-residential). **GSDF = 1.5 × Daily Flow** — a
+  flat factor with no peaking curve that depends on population, and infiltration is built in via
+  the dry/wet ground rates. Minimum R15. Broadacre net area = (gross − large reserves − major
+  roads) × 0.75. Separate tables north/south of 26°S.
+- **Hydraulics (4.2.1 l, m, p):** Colebrook-White, ks = 1.0 mm. Max depth at GSDF: ½ full DN150,
+  ⅔ full DN225+. Pumped inflow = pump rate + gravity GSDF; receiving sewer ≥ DN225; refer to
+  Water Corp if the pumped rate exceeds ⅔ of receiving capacity.
+- **Grades (Table 4.4):** min/max grade, max AC/MS spacing and max allowable flow by grade
+  band per DN, plus the conditional reductions (DN150 to 1:250, DN225 to 1:350 with ≥ 14 L/s
+  pumped; DN225 industrial at 1:200 if GSDF < 3 L/s).
+- **No velocity criteria** — self-cleansing is handled by minimum grades, not a minimum
+  velocity check. Velocity is reported for information only.
+- **Cover (4.9):** 0.9 m road reserve/trafficable ROW, 0.75 m elsewhere, +0.3 m where
+  contours are unconfirmed or road design levels are not available.
+- **Access chambers (4.10, Tables 4.5, 4.8):** required at changes of grade/direction/DN/class,
+  at intersections and at the end of a pressure main; falls through ACs and minimum drop heights.
+- **IO/IS sewers (4.2.2):** length and grade limits.
 
-[pump_station]
-emergency_storage_hours_at_adwf = "<value>"
-max_starts_per_hour             = "<value>"
-min_cycle_time_min              = "<value>"
+**Check:** Table 4.4 flows reproduce from Colebrook-White (ks 1.0 mm, ID = nominal DN) at the
+d/D limits to within ±5% (`tests/benchmarks/ds50_table44_colebrook.csv`). Two entries sit
+slightly above the computed capacity (DN450 at 1:500: 110 vs 105 L/s; DN600 at 1:800: 180 vs
+177 L/s), so the engine checks **both** the Table 4.4 band limit (governing) and the computed
+d/D, and reports any difference between the two.
 
-[rising_main]
-min_velocity_mps      = "<value>"
-max_velocity_mps      = "<value>"
-max_detention_time_hr = "<value>"
-```
-
-Each check returns pass/fail/warn, the computed value, the limit, and the **clause reference**,
-so outputs can go straight into a design report or variation request.
-
-> **Action before Phase 2:** populate the rule set from your controlled copies of DS 50 / DS 51
-> (and the sewer pump station standard). I couldn't retrieve DS 51 itself, so no numeric values
-> are assumed in this plan. WSA 02 / WSA 04 defaults can be added as a second rule set for
-> comparison.
+### Still needed
+- **DS 51 / pump station and pressure main standard:** wet-well sizing, starts per hour,
+  emergency storage, rising-main velocity and detention limits. Placeholders in
+  `rulesets/ds51_TODO.toml` until you supply the document.
+- Optional WSA 02 / WSA 04 rule sets for comparison.
 
 ---
 
 ## 6. Calculation methods
 
-**Flow accumulation (design mode):** build a directed tree with `petgraph`; accumulate EP
-downstream (not flows — peaking factor must be applied to accumulated EP, otherwise you
-over-estimate). At pump stations, the downstream contribution becomes the pumped rate (duty
-flow), not the accumulated PWWF.
+**Flow accumulation (design mode):** build a directed tree with `petgraph`; compute GSDF per
+sub-catchment (net area × Table 4.1–4.3 rate) and accumulate downstream. Because DS 50 uses a
+linear 1.5 factor, summing GSDF is equivalent to summing Daily Flow — no non-linear peaking
+issue. Keep a `LoadingMethod` trait so a non-linear method (WSA, or DS 51 if it differs) can
+be plugged in and accumulate the right quantity. At a pump station, the downstream input becomes
+the pump rate, not the accumulated GSDF (4.2.1 l). Report flows at each design point,
+cumulative, in the 3.5(c) design data format (e.g. `1.3-52.5/180-0.21`).
 
-**Gravity capacity:** Colebrook-White full-bore capacity; part-full via circular-section
-geometry (solve depth for Q by bisection). Manning as an option. Report Q/Qfull, d/D,
-velocity at PDWF and PWWF, and critical/supercritical flags.
+**Gravity capacity:** Colebrook-White (ks 1.0 mm per DS 50) full-bore capacity; part-full via
+circular-section geometry (solve depth for Q by bisection). Report Q/Qfull, d/D, velocity
+(information only), and critical/supercritical flags. Manning available for non-DS work.
 
 **Pump station design:** system curve = static (wet-well bottom/stop level to rising-main high
 point or discharge) + friction (H-W or Darcy-Colebrook) + minor losses; intersect with pump
@@ -190,8 +201,8 @@ Each phase ends with something usable. Durations assume one developer part-time-
 | Phase | Deliverable | Indicative |
 |---|---|---|
 | **0. Foundations** | Cargo workspace, GitHub Actions CI (fmt, clippy, test), core entity structs, GeoPackage schema v1, validation (connectivity, inverts, adverse grades, orphans), CLI `wwnet check`. | 4–6 wks |
-| **1. Asset input** | GIS import with field-mapping templates (Water Corp extracts); Tauri app with MapLibre map: create/edit nodes, pipes, pump stations, rising mains, snapping; data confidence flags; long-section viewer. | 10–12 wks |
-| **2. Design mode – gravity** | DS rule set (TOML), EP loading, accumulation, Colebrook/part-full, compliance table and long section with HGL at PWWF. Benchmark vs hand calcs. | 5–6 wks |
+| **1. Asset input + QGIS plugin** | PyO3/maturin wheel; QGIS plugin skeleton; GeoPackage template project (layers, styles, attribute forms, value maps for DN/material/R-Code); GIS import with field-mapping templates (Water Corp extracts); auto-connect pipes to nodes by snapping; data confidence flags; long-section dock. Build it around **your example catchment**. | 8–10 wks |
+| **2. Design mode – gravity (DS 50)** | Load the DS 50 rule set, Table 4.1–4.3 loading, GSDF accumulation, Colebrook/part-full, all DS 50 checks with clause refs, compliance table back into QGIS as attributes + styled layer, design data plan labels, long section with HGL at GSDF. Benchmarks: Table 4.4 fixture + example catchment hand calcs. | 5–6 wks |
 | **3. Pump stations & rising mains (steady)** | Pump curve library, system curve solver, duty point, cycle/storage checks, rising-main checks; EPANET FFI crate for manifolded mains. | 5–6 wks |
 | **4. Dynamic simulation** | SWMM FFI crate (cc + bindgen), .inp translator, run manager, results reader, time-series graphs, animated long sections, overflow/surcharge reporting. Validate against an existing ICM model of a known catchment. | 8–10 wks |
 | **5. Scenarios & reporting** | Scenario overrides, existing vs ultimate comparison, Excel/PDF report generation, ICM CSV export. | 4–6 wks |
@@ -216,8 +227,12 @@ steady-state design of gravity and pumped systems.
 
 ## 9. Risks / issues to flag
 
-- **Peaking-factor application** on accumulated EP vs flows — easy to get wrong, big effect on
-  sizing. Encode once in the loading engine, test hard.
+- **Loading method differences:** DS 50's flat 1.5× factor accumulates linearly; if DS 51 or
+  existing-system planning work uses a non-linear peaking curve, it must be applied to
+  accumulated population, not summed flows. Handled by the `LoadingMethod` trait — test hard.
+- **QGIS Python ABI / distribution:** the plugin's Rust wheel must load in QGIS's bundled
+  Python (Windows OSGeo4W, macOS bundle). Use abi3 wheels, build in CI for Windows x64 first,
+  and test inside QGIS LTR, not just system Python.
 - **SWMM limitations vs ICM:** SWMM's surcharge handling (no Preissmann slot by default in older
   builds — use 5.2 with slot option), wet-well/pump interactions at small timesteps, and
   instability with very short steep pipes. Mitigation: auto-lengthening of short conduits and
@@ -240,23 +255,48 @@ crates/
   wwnet-core/             # entities, IDs, validation, petgraph topology, GeoPackage I/O
   wwnet-loading/          # EP, peaking, infiltration, diurnal patterns
   wwnet-hydraulics/       # gravity part-full, system curves, duty point, rising main checks
-  wwnet-rules/            # rules engine + rulesets/ds50.toml, ds51.toml, wsa02.toml
+  wwnet-rules/            # rules engine (reads rulesets/*.toml)
   wwnet-swmm-sys/         # vendored SWMM 5.2 C source, build.rs (cc + bindgen)
   wwnet-epanet-sys/       # vendored EPANET 2.2 C source, build.rs
   wwnet-engines/          # safe HydraulicEngine trait, .inp writer, results reader
   wwnet-io/               # shapefile/CSV import mapping templates, ICM CSV export
   wwnet-reports/          # Excel, Typst PDF, long-section plots
   wwnet-cli/              # `wwnet check`, `wwnet design`, `wwnet simulate`
-app/                      # Tauri 2 desktop app (src-tauri + MapLibre front end)
+  wwnet-py/               # PyO3 bindings -> `wwnet` Python wheel (maturin, abi3)
+qgis_plugin/wwnet/        # PyQGIS plugin: metadata.txt, docks, processing provider
+templates/                # GeoPackage template + QGIS styles (.qml) + import field maps
+rulesets/                 # ds50_v2r4.toml, ds51_TODO.toml, wsa02.toml
 tests/benchmarks/         # hand-calc fixtures (TOML/CSV)
+examples/<catchment>/     # pilot catchment data + expected results
 docs/
 ```
 
 ---
 
-## 11. Immediate next steps
+## 11. Example catchment — data to prepare
 
-1. Confirm the DS documents and revisions to encode (DS 50, DS 51, pump station standard) and
-   supply the parameter tables.
-2. Pick a pilot catchment with an existing ICM model and GIS extract for validation.
-3. Confirm front end (Tauri desktop app recommended; QGIS via PyO3 as fallback) and start Phase 0.
+The example catchment drives Phases 1–2 and becomes the regression test. Ideal contents
+(shapefile, GeoPackage or CSV are all fine; MGA2020 Zone 50 / GDA2020 preferred):
+
+| Layer | Fields |
+|---|---|
+| Access chambers / maintenance shafts | AC no., type (AC/MS/drop), easting, northing, surface level, invert(s), status (existing/proposed) |
+| Gravity sewers | US AC, DS AC, DN, material/class, US & DS invert, length, location (road reserve / lot / ROW), status |
+| Sub-catchments | polygon, outlet AC, net area (ha), R-Code or land use, dry/wet ground, north/south of 26°S |
+| Pump station (if any) | wet-well AC, pump rate (L/s), pressure main discharge AC, inflow area |
+| Ground levels | surface levels at ACs at minimum; DEM optional (used for cover checks along the pipe) |
+| Expected results | your hand-calc or existing design-data-plan flows and pipe sizes, to compare against |
+
+Ten to forty ACs with one branch junction, one DN change, and ideally a pumped inflow covers
+every DS 50 check. Put it in `examples/<name>/` (or keep it out of git if it is
+Water Corp-restricted — the tests can point to a local path).
+
+---
+
+## 12. Immediate next steps
+
+1. ~~DS 50 parameters~~ — done (`rulesets/ds50_v2r4.toml`). Supply DS 51 / pump station
+   standard when available.
+2. Prepare the example catchment (section 11).
+3. Phase 0: Cargo workspace, CI, core structs, GeoPackage schema, `wwnet check`; plus the
+   `wwnet-hydraulics` Colebrook part-full function passing the Table 4.4 benchmark.

@@ -1,0 +1,182 @@
+# Water Corporation DS 50 — Design and Construction Requirements for Gravity Sewers DN150 to DN600
+# Ver 2 Rev 4 (2023). Transcribed from the controlled PDF; clause refs in comments.
+# Units: L/s, L/day, m, ha. Grades stored as "1 in x" (x = denominator).
+
+standard = "DS50"
+revision = "Ver 2 Rev 4"
+year = 2023
+
+[loading]
+# 4.2.1(i): Sewer Design Flow (GSDF) = 1.5 x Daily Flow. No EP-dependent peaking curve.
+sdf_factor = 1.5
+# 4.2.1(c): use R15 where Local Authority code < R15 or no code
+min_rcode = "R15"
+# 4.2.1(k): broadacre net area = (gross - large reserves - major roads) x (1 - 0.25)
+broadacre_pos_minor_road_deduction = 0.25
+# 3.5(c)(v): design-data sub-catchments ~10 ha
+target_subcatchment_ha = 10.0
+# Region split at latitude 26 deg S (Tables 4.1/4.2/4.3)
+region_split_latitude_deg_s = 26.0
+
+# Table 4.1 — residential, south of 26 deg S
+# [rcode, persons/dwelling, persons/net ha, dry L/p/d, dry GSDF L/s/net ha, wet L/p/d, wet GSDF L/s/net ha]
+[loading.residential.south]
+columns = ["rcode", "persons_per_dwelling", "persons_per_net_ha", "dry_lpd", "dry_gsdf_lps_ha", "wet_lpd", "wet_gsdf_lps_ha"]
+rows = [
+  ["R15", 3.5,  52.5, 180, 0.164, 230, 0.210],
+  ["R20", 3.5,  70.0, 180, 0.219, 220, 0.267],
+  ["R25", 3.5,  87.5, 180, 0.273, 210, 0.319],
+  ["R30", 3.5, 105.0, 180, 0.328, 205, 0.374],
+  ["R40", 3.0, 120.0, 180, 0.375, 200, 0.417],
+  ["R50", 3.0, 150.0, 180, 0.469, 200, 0.521],
+  ["R60", 3.0, 180.0, 180, 0.563, 195, 0.609],
+  ["R80", 2.5, 200.0, 180, 0.625, 195, 0.677],
+  ["R100", 2.2, 220.0, 180, 0.688, 190, 0.726],
+  ["R160", 2.0, 320.0, 180, 1.000, 190, 1.056],
+  ["R220", 1.9, 418.0, 180, 1.306, 190, 1.379],
+  ["R280", 1.8, 504.0, 180, 1.575, 190, 1.663],
+  ["R360", 1.7, 612.0, 180, 1.913, 190, 2.019],
+  ["R480", 1.6, 768.0, 180, 2.400, 190, 2.533],
+]
+
+# Table 4.2 — residential, north of 26 deg S
+[loading.residential.north]
+columns = ["rcode", "persons_per_dwelling", "persons_per_net_ha", "dry_lpd", "dry_gsdf_lps_ha", "wet_lpd", "wet_gsdf_lps_ha"]
+rows = [
+  ["R15", 3.5,  52.5, 230, 0.210, 280, 0.255],
+  ["R20", 3.5,  70.0, 230, 0.280, 270, 0.328],
+  ["R25", 3.5,  87.5, 230, 0.349, 260, 0.395],
+  ["R30", 3.5, 105.0, 230, 0.419, 255, 0.465],
+  ["R40", 3.0, 120.0, 230, 0.479, 250, 0.521],
+  ["R50", 3.0, 150.0, 230, 0.599, 250, 0.651],
+  ["R60", 3.0, 180.0, 230, 0.719, 245, 0.766],
+  ["R80", 2.5, 200.0, 230, 0.799, 245, 0.851],
+  ["R100", 2.2, 220.0, 230, 0.879, 240, 0.917],
+  ["R160", 2.0, 320.0, 230, 1.278, 240, 1.333],
+]
+
+# Table 4.3 — non-residential. [landuse, dry L/net ha/d, dry GSDF, wet L/net ha/d, wet GSDF]
+[loading.non_residential.south]
+columns = ["landuse", "dry_l_ha_d", "dry_gsdf_lps_ha", "wet_l_ha_d", "wet_gsdf_lps_ha"]
+rows = [
+  ["suburban_commercial_school_hospital_public", 9450, 0.164, 12075, 0.210],
+  ["hotel_motel", 21600, 0.375, 24000, 0.417],
+  ["perth_cba", 172800, 3.000, 172800, 3.000],
+  ["industrial", 14976, 0.260, 16992, 0.295],
+]
+[loading.non_residential.north]
+columns = ["landuse", "dry_l_ha_d", "dry_gsdf_lps_ha", "wet_l_ha_d", "wet_gsdf_lps_ha"]
+rows = [
+  ["suburban_commercial_school_hospital_public", 12075, 0.210, 14700, 0.255],
+  ["hotel_motel", 27600, 0.479, 30000, 0.521],
+  ["industrial", 14976, 0.260, 16992, 0.295],
+]
+
+[hydraulics]
+# 4.2.1(p): Colebrook-White, ks = 1.0 mm. Internal diameter = nominal DN reproduces Table 4.4 within ~5%.
+formula = "colebrook_white"
+ks_mm = 1.0
+# 4.2.1(m), 4.11(b): max depth of flow at design flow; also flow-to-flow levels at junctions <= DN375
+max_d_over_D = { 150 = 0.5, default = 0.6667 }
+# 4.2.1(u): pressure main discharge > 2/3 receiving sewer capacity -> refer to Water Corp
+pressure_main_discharge_refer_ratio = 0.6667
+# 4.2.1(l): min DN receiving a pressure main
+min_dn_receiving_pressure_main = 225
+
+[sizing]
+# 4.2.1(n),(o)
+min_dn_residential = 150
+min_dn_industrial_large_commercial = 225
+small_commercial_max_ha = 0.5
+dn225_at_1in300_permitted_if_gsdf_lps_ge = 3.0
+# 4.2.1(s): DN225 industrial/large commercial with GSDF < 3 L/s -> min grade 1:200
+industrial_dn225_low_flow = { gsdf_lt_lps = 3.0, min_grade_1in = 200 }
+# 4.2.1(v): diameter should not reduce downstream (warning)
+no_downstream_reduction = true
+
+# Table 4.4 — grades, AC/MS spacing and max allowable flow by grade band.
+# bands: [steepest_1in (0 = max grade), flattest_1in, max_flow_lps, conditional]
+[[grades]]
+dn = 150
+min_grade_1in = 200
+max_grade_1in = 5          # note (1): IS sewers may be steeper
+max_ac_spacing_m = 100
+bands = [[0, 100, 8, false], [101, 200, 6, false], [201, 250, 5, true]]
+# 4.2.1(q): 1:250 allowed only with justification (fewer PSs, gravity vs PS, fewer entries to >=DN300)
+conditional_min_grade_1in = 250
+
+[[grades]]
+dn = 225
+min_grade_1in = 300
+max_grade_1in = 5
+max_ac_spacing_m = 100
+bands = [[0, 200, 27, false], [201, 300, 22, false], [301, 350, 20, true]]
+# 4.2.1(r): 1:350 where a PS discharges >= 14 L/s into the sewer
+conditional_min_grade_1in = 350
+conditional_min_pumped_lps = 14.0
+
+[[grades]]
+dn = 300
+min_grade_1in = 400
+max_grade_1in = 30
+max_ac_spacing_m = 150
+bands = [[0, 250, 50, false], [251, 400, 40, false]]
+
+[[grades]]
+dn = 375
+min_grade_1in = 450
+max_grade_1in = 40
+max_ac_spacing_m = 150
+bands = [[0, 300, 85, false], [301, 450, 70, false]]
+
+[[grades]]
+dn = 450
+min_grade_1in = 500
+max_grade_1in = 55
+max_ac_spacing_m = 150
+bands = [[0, 350, 125, false], [351, 500, 110, false]]
+
+[[grades]]
+dn = 600
+min_grade_1in = 800
+max_grade_1in = 80
+max_ac_spacing_m = 180
+bands = [[0, 400, 250, false], [401, 600, 200, false], [601, 800, 180, false]]
+
+[io_is_sewers]
+# 4.2.2
+io_max_length_m = 100
+io_min_grade_1in = 200
+is_max_length_m = 50
+is_min_grade_1in = 100
+is_permitted_dn = [150, 225]
+is_max_parent_dn = 375
+
+[cover]
+# 4.9 — minimum cover to top of pipe (m)
+road_reserve_trafficable_row_m = 0.9
+road_parallel_below_crown_m = 0.75
+elsewhere_m = 0.75
+# 4.9(d): +0.3 m if unconfirmed aerial contours or no road design levels
+uncertainty_increment_m = 0.3
+
+[access_chambers]
+# 4.10.2(b): AC required at change of grade, direction, DN, pipe class, intersections (not IS), end of pressure main
+required_at = ["grade_change", "direction_change", "dn_change", "class_change", "intersection", "pressure_main_end"]
+flood_freeboard_cover_m = 0.1
+
+# Table 4.8 — falls through ACs (m). [ds_dn, us_dn, fall_m]. Not required through maintenance shafts.
+falls = [
+  [150, 150, 0.01],
+  [225, 150, 0.09], [225, 225, 0.01],
+  [300, 150, 0.14], [300, 225, 0.06], [300, 300, 0.01],
+  [375, 150, 0.19], [375, 225, 0.11], [375, 300, 0.06], [375, 375, 0.01],
+  [450, 150, 0.06], [450, 225, 0.06], [450, 300, 0.11], [450, 375, 0.06], [450, 450, 0.01],
+  [600, 150, 0.08], [600, 225, 0.08], [600, 300, 0.08], [600, 375, 0.08], [600, 450, 0.11], [600, 600, 0.01],
+]
+
+# Table 4.5 — min invert difference for drop ACs (m). [drop_dn, sewer_dn, vc_m, pvc_m]
+drops = [
+  [150, 150, 0.46, 0.40], [150, 225, 0.54, 0.48], [150, 300, 0.59, 0.53], [150, 375, 0.64, 0.58],
+  [225, 225, 0.61, 0.87], [225, 300, 0.66, 0.92], [225, 375, 0.71, 0.97],
+]
