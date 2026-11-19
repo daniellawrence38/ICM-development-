@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from . import (arcpy_tools, assistant_run, capacity, cli, dpapi, gpkg, issues_table, maplayers,
-               settings, shared)
+               settings, shared, vendor)
 from .messages import Messages
 
 MAX_LINES = 300
@@ -167,6 +167,45 @@ def set_settings(msgs: Messages, key: str | None, clear: bool, model: str | None
                                         "dpapi": "yes (stored, DPAPI)"}.get(src, "NO")))
     if clear and src == "env":
         msgs.warn("ANTHROPIC_API_KEY is still set in the environment and takes precedence.")
+
+
+# -------------------------------------------------------------- verify setup
+
+def verify_setup(msgs: Messages, live: bool = False, model: str | None = None, client_factory=None) -> bool:
+    """Print the vendor/package report; with `live` make one tiny API call. Never prints the key.
+    Returns True when imports (and the live call, if requested) succeeded."""
+    rep = vendor.report()
+    for line in vendor.format_report(rep):
+        msgs.info(line)
+    ok = rep["_import_anthropic"][0] and rep["_import_wwnet_native"][0]
+    if not rep["_import_anthropic"][0]:
+        msgs.warn("anthropic is not importable: the assistant will not work (check/design do not need it).")
+    if not rep["_import_wwnet_native"][0]:
+        msgs.warn("wwnet_native is not importable: check/design/trace need it (or a wwnet CLI fallback).")
+    if not live:
+        msgs.info("Live API test skipped (tick 'Live API test' to run it).")
+        return ok
+    key, src = dpapi.get_api_key()
+    if not key:
+        msgs.error("No Anthropic API key: run 'Set Assistant API Key' first (or set ANTHROPIC_API_KEY).")
+        return False
+    if not rep["_import_anthropic"][0]:
+        return False
+    client_mod = shared.assistant("client")
+    model = model or settings.load()["model"]
+    try:
+        note = vendor.inject_truststore()
+        if note:
+            msgs.info(note)
+        client = (client_factory or client_mod.make_client)(key)
+        res = client.messages.create(model=model, max_tokens=16,
+                                     messages=[{"role": "user", "content": "Reply with the word: ok"}])
+        msgs.info(f"Live API test OK: model {getattr(res, 'model', model)} responded "
+                  f"(key from {'environment variable' if src == 'env' else 'stored DPAPI file'}).")
+        return ok
+    except Exception as exc:  # noqa: BLE001 - mapped to friendly text; the key is never part of it
+        msgs.error("Live API test FAILED: " + client_mod.friendly_error(exc))
+        return False
 
 
 # ----------------------------------------------------------------- assistant

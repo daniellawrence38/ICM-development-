@@ -43,15 +43,21 @@ def find_exe(configured: str | None = None, root: Path | None = None) -> str:
 def no_backend_message(root: Path | None = None) -> str:
     root = root or TOOLBOX_ROOT
     return ("The WWNet native module (wwnet_native) is not installed, so check/design/trace cannot run. "
-            "Install the wheel into ArcGIS Pro's Python (no .exe required): open the Python Command "
-            "Prompt of a cloned conda environment and run "
-            "`pip install wwnet_native-<version>-cp39-abi3-win_amd64.whl`. "
+            "Use the no-install bundle (CI artifact wwnet-arcgis-bundle-win-py311, which carries it in "
+            f"{root / 'vendor'}) and run the 'Verify Setup' tool, or pip install "
+            "`wwnet_native-<version>-cp39-abi3-win_amd64.whl` into a cloned environment (no .exe required). "
             "(Fallback only: a `wwnet` CLI on PATH, in "
             f"{root / 'bin'}, or set in 'Set Assistant API Key'.)")
 
 
+def _activate_vendor():
+    from . import vendor
+    vendor.activate(TOOLBOX_ROOT)
+
+
 def native_service():
     """The wwnet_native module if it provides check/design/trace, else None (the probe)."""
+    _activate_vendor()
     try:
         return shared.core("native").service()
     except Exception:  # noqa: BLE001 - any import problem means "not available"

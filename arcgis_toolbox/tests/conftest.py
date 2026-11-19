@@ -68,3 +68,7 @@ def rows(gpkg, sql, *args):
         return con.execute(sql, args).fetchall()
     finally:
         con.close()
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "slow: builds a vendor dir / venv with pip (needs network)")

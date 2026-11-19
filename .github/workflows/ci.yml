@@ -73,3 +73,36 @@ jobs:
           # the one required binary: front ends import it, no .exe is needed
           name: wwnet_native-windows-abi3
           path: crates/wwnet-py/dist
+
+  arcgis-bundle:
+    # No-install bundle for ArcGIS Pro 3.x (Python 3.11 win_amd64): toolbox + vendor/ (anthropic, pydantic, httpx2,
+    # jiter, truststore, typing_extensions, wwnet_native). anyio/sniffio/idna/certifi are left to Pro's own copies.
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install maturin
+      - run: maturin build --release --manifest-path crates/wwnet-py/Cargo.toml --out wheels
+      - name: Build vendor folder
+        run: |
+          pip install --target vendor --only-binary=:all: anthropic wheels/wwnet_native-*.whl
+          rm -rf vendor/anyio vendor/anyio-* vendor/sniffio vendor/sniffio-* vendor/idna vendor/idna-* \
+                 vendor/certifi vendor/certifi-* vendor/bin
+          ls vendor
+      - run: python arcgis_toolbox/package.py --vendor-dir vendor --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wwnet-arcgis-bundle-win-py311
+          path: dist/*.zip
+      - name: Smoke test in a Pro-like venv (old anyio / typing_extensions already loaded)
+        run: |
+          python -m venv pro-like
+          pro-like/Scripts/python -m pip install anyio==4.2.0 typing_extensions==4.9.0 sniffio==1.3.0 idna==3.4 certifi==2024.2.2
+          python -m zipfile -e dist/wwnet-arcgis-*.zip extracted
+          SITE=$(pro-like/Scripts/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          pro-like/Scripts/python arcgis_toolbox/tests/bundle_smoke.py "$PWD/extracted/WWNet-ArcGIS" "$SITE" native

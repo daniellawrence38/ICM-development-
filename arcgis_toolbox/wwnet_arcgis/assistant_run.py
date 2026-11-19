@@ -5,14 +5,17 @@ import copy
 import json
 from dataclasses import dataclass, field
 
-from . import settings, shared
+from . import settings, shared, vendor
 from .messages import ChunkedWriter
 
 MAX_TURNS_KEPT = 20
 
 INSTALL_HELP = """\
 The WWNet assistant needs the Python package 'anthropic', which is not installed in this
-ArcGIS Pro Python environment. Pro's default environment (arcgispro-py3) is read-only, so:
+ArcGIS Pro Python environment.
+Easiest: use the no-install bundle (CI artifact wwnet-arcgis-bundle-win-py311; it carries 'anthropic' and
+wwnet_native in its vendor folder) and run the 'Verify Setup' tool. Alternative: Pro's default environment
+(arcgispro-py3) is read-only, so:
   1. In ArcGIS Pro: Settings > Package Manager > Environment Manager > Clone Default
      (give it a name such as arcgispro-py3-wwnet) and activate the clone. Restart Pro.
   2. Open 'Python Command Prompt' from the ArcGIS start-menu folder (it uses the active environment) and run:
@@ -66,6 +69,7 @@ def system_blocks() -> list:
 
 def check_prereqs():
     """Raises RuntimeError with install instructions if `anthropic` is missing."""
+    vendor.activate(shared.TOOLBOX_ROOT)
     if not shared.assistant("client").anthropic_available():
         raise RuntimeError(INSTALL_HELP)
 
@@ -128,6 +132,10 @@ def run(question: str, *, api_key: str, model: str, effort: str, tools, msgs,
         reset_history(history_key)
         msgs.info("Conversation history reset.")
     prior = load_history(history_key)
+    if client_factory is None:           # real client only: trust the Windows store (assistant run only)
+        note = vendor.inject_truststore()
+        if note:
+            msgs.info(note)
     client = (client_factory or client_mod.make_client)(api_key)
 
     handlers = {**shared.assistant("tools").pure_handlers(), **tools.handlers()}

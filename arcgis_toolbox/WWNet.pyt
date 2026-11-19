@@ -9,6 +9,9 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
+from wwnet_arcgis import vendor as _vendor  # noqa: E402
+_vendor.activate(_HERE)  # no-install bundle: <toolbox>/vendor first on sys.path (before wwnet_native / anthropic)
+
 from wwnet_arcgis import settings as _settings  # noqa: E402
 from wwnet_arcgis import tools_impl as impl  # noqa: E402
 from wwnet_arcgis.messages import Messages  # noqa: E402
@@ -54,7 +57,7 @@ class Toolbox(object):
         self.label = "WWNet"
         self.alias = "wwnet"
         self.tools = [NewModel, AddModelToMap, CheckModel, RunDesign, Trace, PipeCapacity,
-                      SetAssistantApiKey, AskWWNetAssistant]
+                      SetAssistantApiKey, AskWWNetAssistant, VerifySetup]
 
 
 class NewModel(object):
@@ -214,3 +217,18 @@ class AskWWNetAssistant(object):
                            bool(parameters[2].value), parameters[3].valueAsText,
                            parameters[4].valueAsText, bool(parameters[5].value),
                            bool(parameters[6].value))
+
+
+class VerifySetup(object):
+    def __init__(self):
+        self.label = "Verify Setup"
+        self.description = ("Show which wwnet_native / anthropic / pydantic ... copies are loaded (and from "
+                            "where), whether they import, and optionally make one tiny live API call.")
+        self.category = "Assistant"
+
+    def getParameterInfo(self):
+        return [_p("live", "Live API test (one tiny request with the stored key)", "GPBoolean",
+                   required=False, default=False)]
+
+    def execute(self, parameters, messages):
+        impl.verify_setup(Messages(arcpy), bool(parameters[0].value))
