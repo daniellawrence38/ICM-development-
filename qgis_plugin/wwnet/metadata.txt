@@ -1,0 +1,19 @@
+[general]
+name=WWNet
+qgisMinimumVersion=3.34
+qgisMaximumVersion=3.99
+description=Wastewater network design tool (Water Corporation WA, DS 50 gravity sewers)
+version=0.1.0
+author=WWNet developers
+email=wwnet@example.invalid
+about=Create and edit WWNet GeoPackage models, run DS 50 checks and use an optional Claude-powered design assistant. The AI assistant sends selected feature attributes to Anthropic's API when its tools are used.
+tracker=https://example.invalid/wwnet/issues
+repository=https://example.invalid/wwnet
+tags=wastewater,sewer,hydraulics,design,DS50
+homepage=https://example.invalid/wwnet
+category=Plugins
+icon=icon.svg
+experimental=True
+deprecated=False
+hasProcessingProvider=no
+supportsQt6=False
