@@ -149,3 +149,19 @@ def test_install_python_executable(monkeypatch, tmp_path):
     assert cmd[1:] == ["-m", "pip", "install", "--user", "--upgrade", "anthropic"]
     monkeypatch.setattr(sys, "executable", "/usr/bin/python3.12")
     assert install.python_executable() == "/usr/bin/python3.12"
+
+
+def test_native_miss_is_not_cached(monkeypatch):
+    """A failed probe must be retried later (the module may become importable)."""
+    calls = []
+    real = native.importlib.import_module
+
+    def fake(name):
+        calls.append(name)
+        raise ImportError(name)
+    monkeypatch.setattr(native, "_cache", {})
+    monkeypatch.setattr(native.importlib, "import_module", fake)
+    assert native.get() is None
+    n = len(calls)
+    assert native.get() is None and len(calls) > n
+    monkeypatch.setattr(native.importlib, "import_module", real)

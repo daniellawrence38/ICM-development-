@@ -72,6 +72,7 @@ class NewModel(object):
                 _p("overwrite", "Overwrite if it exists", "GPBoolean", required=False, default=False)]
 
     def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl.new_model(arcpy, Messages(arcpy), parameters[0].valueAsText,
                        bool(parameters[1].value), bool(parameters[2].value))
 
@@ -87,6 +88,7 @@ class AddModelToMap(object):
                 _p("symbolize", "Apply symbology", "GPBoolean", required=False, default=True)]
 
     def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl.add_model_to_map(arcpy, Messages(arcpy), parameters[0].valueAsText, bool(parameters[1].value))
 
 
@@ -101,6 +103,7 @@ class CheckModel(object):
                 _p("out_table", "Output issues table (optional)", "DETable", "Output", required=False)]
 
     def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl.check_model(arcpy, Messages(arcpy), parameters[0].valueAsText, _text(parameters[1]))
 
 
@@ -117,6 +120,7 @@ class RunDesign(object):
                 _p("select_failed", "Select failed conduits", "GPBoolean", required=False, default=True)]
 
     def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl.run_design(arcpy, Messages(arcpy), parameters[0].valueAsText, bool(parameters[1].value),
                         bool(parameters[2].value), bool(parameters[3].value))
 
@@ -146,6 +150,7 @@ class Trace(object):
         return
 
     def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl.trace(arcpy, Messages(arcpy), _layer_obj(parameters[0]), parameters[1].valueAsText,
                    parameters[2].valueAsText, bool(parameters[3].value))
 
@@ -164,6 +169,7 @@ class PipeCapacity(object):
                 _p("full_flow", "Full-bore capacity (L/s)", "GPDouble", "Output", required=False)]
 
     def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         res = impl.pipe_capacity(Messages(arcpy), parameters[0].value, parameters[1].value,
                                  parameters[2].value, parameters[3].value)
         parameters[4].value = res["full_flow_lps"]
@@ -188,6 +194,7 @@ class SetAssistantApiKey(object):
                    default=cfg["wwnet_exe"] or None)]
 
     def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl.set_settings(Messages(arcpy), _text(parameters[0]), bool(parameters[1].value),
                           _text(parameters[2]), _text(parameters[3]), _text(parameters[4]) or "")
 
@@ -212,6 +219,7 @@ class AskWWNetAssistant(object):
                 _p("reset", "Reset conversation", "GPBoolean", required=False, default=False)]
 
     def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         lyr = _layer_obj(parameters[1]).name if parameters[1].value else None
         impl.ask_assistant(arcpy, Messages(arcpy), parameters[0].valueAsText, lyr,
                            bool(parameters[2].value), parameters[3].valueAsText,
@@ -231,4 +239,5 @@ class VerifySetup(object):
                    required=False, default=False)]
 
     def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl.verify_setup(Messages(arcpy), bool(parameters[0].value))

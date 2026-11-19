@@ -239,3 +239,27 @@ def test_bundle_smoke_in_pro_like_venv(tmp_path):
     script = TOOLBOX / "tests" / "bundle_smoke.py"
     r = _run([str(py), str(script), str(bundle), site, "native" if native else "no"], cwd=tmp_path)
     assert r.returncode == 0 and "SMOKE-OK" in r.stdout, r.stdout + r.stderr
+
+
+def test_vendor_module_importable_after_pro_resets_sys_path(tmp_path, clean, monkeypatch):
+    """Regression: Pro restores sys.path between loading the .pyt and running a tool, which
+    dropped the vendor folder (wwnet_native 'not found' on a real PC). activate() at the start of
+    each run must make vendored modules importable again."""
+    root = make_root(tmp_path)
+    (root / "vendor" / "wwnet_probe_mod.py").write_text("X = 1\n")
+    saved = list(sys.path)
+    vendor.activate(root)                       # .pyt load
+    sys.path[:] = saved                         # Pro resets sys.path before execute()
+    monkeypatch.delitem(sys.modules, "wwnet_probe_mod", raising=False)
+    with pytest.raises(ImportError):
+        __import__("wwnet_probe_mod")
+    vendor.activate(root)                       # execute() re-activates
+    assert __import__("wwnet_probe_mod").X == 1
+    assert vendor.report()["_vendor"] == str(root / "vendor")
+
+
+def test_every_pyt_execute_reactivates_vendor():
+    src = (TOOLBOX / "WWNet.pyt").read_text()
+    n_exec = src.count("def execute(self, parameters, messages):")
+    assert n_exec == 9
+    assert src.count("def execute(self, parameters, messages):\n        _vendor.activate(_HERE)") == n_exec

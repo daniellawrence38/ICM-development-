@@ -17,7 +17,9 @@ _cache: dict = {}
 
 def get(refresh: bool = False):
     """Return the native module or None."""
-    if refresh or "mod" not in _cache:
+    # Only successes are cached: a miss is retried, because the module may become importable
+    # later (e.g. ArcGIS Pro resets sys.path between tool runs; the vendor folder is re-added).
+    if refresh or _cache.get("mod") is None:
         _cache["mod"] = None
         for name in _CANDIDATES:
             try:

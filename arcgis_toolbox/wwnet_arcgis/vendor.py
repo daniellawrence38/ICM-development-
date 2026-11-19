@@ -197,7 +197,7 @@ def report() -> dict:
                 ver = getattr(mod, "__version__", None) if mod is not None else None
         out[mod_name] = (ver or "unknown", loc)
     out["_python"] = f"{sys.version.split()[0]} ({sys.platform}, {sys.executable})"
-    out["_vendor"] = next((p for p in sys.path[:3] if Path(p).name == "vendor"), None)
+    out["_vendor"] = next((p for p in sys.path if Path(p).name == "vendor"), None)
     out["_notes"] = list(NOTES)
     out["_import_anthropic"] = _try_import("anthropic")
     out["_import_wwnet_native"] = _try_import("wwnet_native")
