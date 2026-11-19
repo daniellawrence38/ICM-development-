@@ -3,11 +3,11 @@ requires = ["maturin>=1.5,<2"]
 build-backend = "maturin"
 
 [project]
-name = "wwnet"
+name = "wwnet_native"
 version = "0.1.0"
 description = "Wastewater network hydraulics and DS50 rule checks"
 requires-python = ">=3.9"
 
 [tool.maturin]
 features = ["extension-module"]
-module-name = "wwnet"
+module-name = "wwnet_native"

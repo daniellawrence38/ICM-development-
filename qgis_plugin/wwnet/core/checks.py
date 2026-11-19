@@ -8,9 +8,9 @@ import subprocess
 
 ALIASES = {
     "severity": ("severity", "level", "sev"),
-    "code": ("code", "rule", "id"),
+    "code": ("code", "rule"),
     "object_type": ("object_type", "entity", "kind", "type", "layer"),
-    "object_id": ("object_id", "object", "feature_id", "element", "target"),
+    "object_id": ("object_id", "object", "feature_id", "element", "target", "id"),
     "clause": ("clause", "ref", "reference"),
     "message": ("message", "msg", "text", "description"),
 }

@@ -7,7 +7,7 @@ rust-version.workspace = true
 description = "PyO3 bindings exposing wwnet hydraulics and DS50 rules to Python (module `wwnet`)"
 
 [lib]
-name = "wwnet"
+name = "wwnet_native"
 crate-type = ["cdylib"]
 
 [features]

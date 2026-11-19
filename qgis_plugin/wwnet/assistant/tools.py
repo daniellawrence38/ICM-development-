@@ -133,12 +133,38 @@ def pipe_capacity(args: dict) -> dict:
     return out
 
 
+_NATIVE_LAND_USE = {
+    "residential": "residential",
+    "small_commercial": "small_commercial",
+    "commercial": "industrial_large_commercial",
+    "hotel_motel": "industrial_large_commercial",
+    "perth_cba": "industrial_large_commercial",
+    "industrial": "industrial_large_commercial",
+}
+
+
+def _native_kwargs(kw: dict) -> dict:
+    """Map the tool schema's argument names onto wwnet_native.check_conduit's signature."""
+    out = {"dn": int(round(kw["dn_mm"])), "grade_1in": float(kw["grade_1in"]),
+           "gsdf_lps": float(kw.get("gsdf_lps") or 0.0)}
+    if kw.get("length_m") is not None:
+        out["length_m"] = float(kw["length_m"])
+    if kw.get("pumped_lps") is not None:
+        out["pumped_inflow_lps"] = float(kw["pumped_lps"])
+    if kw.get("land_use"):
+        out["land_use_class"] = _NATIVE_LAND_USE.get(kw["land_use"], "residential")
+    for k in ("us_cover_m", "ds_cover_m", "location", "levels_uncertain"):
+        if kw.get(k) is not None:
+            out[k] = kw[k]
+    return out
+
+
 def check_conduit(args: dict) -> dict:
     kwargs = {k: v for k, v in args.items() if v is not None}
     nat = native.get()
     if nat is not None and callable(getattr(nat, "check_conduit", None)):
         try:
-            return {"source": "wwnet", "results": nat.check_conduit(**kwargs)}
+            return {"source": "wwnet", "results": nat.check_conduit(**_native_kwargs(kwargs))}
         except Exception as exc:  # wrong kwargs for this build etc.
             note = f"wwnet.check_conduit failed ({type(exc).__name__}: {exc}); used Python fallback"
             return {"source": "python-fallback", "note": note, "results": rules.check_conduit(**kwargs)}

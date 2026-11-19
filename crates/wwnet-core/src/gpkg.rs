@@ -619,9 +619,20 @@ impl Model {
 
     /// Replace the contents of `wwn_issues` with `issues`.
     pub fn write_issues(path: impl AsRef<Path>, issues: &[Issue]) -> Result<()> {
+        Self::store_issues(path.as_ref(), issues, true)
+    }
+
+    /// Append `issues` to `wwn_issues` (stamped with the current time), keeping existing rows.
+    pub fn append_issues(path: impl AsRef<Path>, issues: &[Issue]) -> Result<()> {
+        Self::store_issues(path.as_ref(), issues, false)
+    }
+
+    fn store_issues(path: &Path, issues: &[Issue], replace: bool) -> Result<()> {
         let mut c = open(path)?;
         let tx = c.transaction()?;
-        tx.execute("DELETE FROM wwn_issues", [])?;
+        if replace {
+            tx.execute("DELETE FROM wwn_issues", [])?;
+        }
         for i in issues {
             tx.execute(
                 "INSERT INTO wwn_issues (run_at,severity,code,object_type,object_id,clause,message)

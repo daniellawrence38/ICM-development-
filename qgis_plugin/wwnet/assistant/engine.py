@@ -10,7 +10,7 @@ Manual tool-use loop per the Anthropic SDK docs:
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from . import client as client_mod

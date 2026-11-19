@@ -134,7 +134,7 @@ fn ruleset_toml() -> &'static str {
 }
 
 #[pymodule]
-fn wwnet(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn wwnet_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(part_full_flow_lps, m)?)?;
     m.add_function(wrap_pyfunction!(depth_ratio_for_flow, m)?)?;
     m.add_function(wrap_pyfunction!(residential_gsdf, m)?)?;

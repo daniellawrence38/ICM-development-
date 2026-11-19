@@ -1,0 +1,18 @@
+[package]
+name = "wwnet-design"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "DS 50 gravity sewer design engine: loading, accumulation and conduit checks"
+
+[dependencies]
+wwnet-core = { path = "../wwnet-core" }
+wwnet-rules = { path = "../wwnet-rules" }
+wwnet-hydraulics = { path = "../wwnet-hydraulics" }
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+approx.workspace = true
