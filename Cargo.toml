@@ -19,3 +19,4 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 clap = { version = "4", features = ["derive"] }
 approx = "0.5"
 csv = "1"
+tempfile = "3"

@@ -1,0 +1,21 @@
+[package]
+name = "wwnet-py"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "PyO3 bindings exposing wwnet hydraulics and DS50 rules to Python (module `wwnet`)"
+
+[lib]
+name = "wwnet"
+crate-type = ["cdylib"]
+
+[features]
+# Enabled by maturin (see pyproject.toml). Left off for plain `cargo build/test`
+# so the cdylib links against libpython.
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+pyo3 = { version = "0.23", features = ["abi3-py39"] }
+wwnet-hydraulics = { path = "../wwnet-hydraulics" }
+wwnet-rules = { path = "../wwnet-rules" }
