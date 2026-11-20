@@ -1,4 +1,5 @@
 //! SWMM `.inp` writer. Output ordering follows model order, so it is stable.
+#![allow(clippy::neg_cmp_op_on_partial_ord)] // deliberate: NaN must fail positivity checks
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -127,7 +128,8 @@ fn node_invert_hint(n: &Node) -> Option<f64> {
 fn n_from_ks(d_m: f64, slope: f64, ks_mm: f64) -> f64 {
     let s = slope.max(0.002);
     let r = d_m / 4.0;
-    let v = wwnet_hydraulics::colebrook_velocity(r, s, ks_mm / 1000.0, wwnet_hydraulics::NU_WASTEWATER);
+    let v =
+        wwnet_hydraulics::colebrook_velocity(r, s, ks_mm / 1000.0, wwnet_hydraulics::NU_WASTEWATER);
     if v <= 0.0 {
         0.013
     } else {
@@ -178,7 +180,10 @@ pub fn build_inp(input: &SimInput<'_>) -> Result<BuiltInp> {
     // conduit inverts (us, ds) resolved after node inverts are known; first pass uses
     // stated conduit inverts only.
     for c in &model.conduits {
-        let (u, d) = (node_ix[c.us_node_id.as_str()], node_ix[c.ds_node_id.as_str()]);
+        let (u, d) = (
+            node_ix[c.us_node_id.as_str()],
+            node_ix[c.ds_node_id.as_str()],
+        );
         has_out[u] = true;
         connected[u] = true;
         connected[d] = true;
@@ -326,9 +331,13 @@ SURCHARGE_METHOD     SLOT\n\
     let mut cond = String::from(
         "\n[CONDUITS]\n;;Name  From  To  Length  Roughness  InOffset  OutOffset  InitFlow  MaxFlow\n",
     );
-    let mut xs = String::from("\n[XSECTIONS]\n;;Link  Shape  Geom1  Geom2  Geom3  Geom4  Barrels\n");
+    let mut xs =
+        String::from("\n[XSECTIONS]\n;;Link  Shape  Geom1  Geom2  Geom3  Geom4  Barrels\n");
     for c in &model.conduits {
-        let (u, d) = (node_ix[c.us_node_id.as_str()], node_ix[c.ds_node_id.as_str()]);
+        let (u, d) = (
+            node_ix[c.us_node_id.as_str()],
+            node_ix[c.ds_node_id.as_str()],
+        );
         let (un, dn) = (&nodes[node_swmm_ix[&u]], &nodes[node_swmm_ix[&d]]);
         let dia = c.effective_id_mm() / 1000.0;
         if !(dia > 0.0) {

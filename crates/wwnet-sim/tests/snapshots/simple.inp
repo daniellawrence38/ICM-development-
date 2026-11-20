@@ -1,0 +1,81 @@
+[TITLE]
+;;WWNet dynamic hydraulic simulation (EPA SWMM 5.2.4)
+
+[OPTIONS]
+FLOW_UNITS           LPS
+INFILTRATION         HORTON
+FLOW_ROUTING         DYNWAVE
+LINK_OFFSETS         ELEVATION
+FORCE_MAIN_EQUATION  D-W
+IGNORE_RAINFALL      YES
+IGNORE_SNOWMELT      YES
+IGNORE_GROUNDWATER   YES
+IGNORE_RDII          YES
+IGNORE_ROUTING       NO
+IGNORE_QUALITY       YES
+ALLOW_PONDING        NO
+SKIP_STEADY_STATE    NO
+START_DATE           01/01/2001
+START_TIME           00:00:00
+REPORT_START_DATE    01/01/2001
+REPORT_START_TIME    00:00:00
+END_DATE             01/02/2001
+END_TIME             02:00:00
+SWEEP_START          01/01
+SWEEP_END            12/31
+DRY_DAYS             0
+REPORT_STEP          00:05:00
+WET_STEP             00:05:00
+DRY_STEP             00:05:00
+ROUTING_STEP         5
+LENGTHENING_STEP     0
+VARIABLE_STEP        0.75
+INERTIAL_DAMPING     PARTIAL
+NORMAL_FLOW_LIMITED  BOTH
+MIN_SURFAREA         0
+MIN_SLOPE            0
+SURCHARGE_METHOD     SLOT
+
+[JUNCTIONS]
+;;Name  Invert  MaxDepth  InitDepth  SurDepth  Aponded
+MH_1  10.0000  2.0000  0  0  0
+
+[OUTFALLS]
+;;Name  Invert  Type  Gated
+MH2  9.6000  FREE  NO
+
+[CONDUITS]
+;;Name  From  To  Length  Roughness  InOffset  OutOffset  InitFlow  MaxFlow
+P_1  MH_1  MH2  40.000  0.0130  10.0000  9.6000  0  0
+
+[XSECTIONS]
+;;Link  Shape  Geom1  Geom2  Geom3  Geom4  Barrels
+P_1  CIRCULAR  0.1530  0  0  0  1
+
+[INFLOWS]
+;;Node  Constituent  TimeSeries  Type  Mfactor  Sfactor  Baseline  Pattern
+MH_1  FLOW  TS_MH_1  FLOW  1  1  0
+
+[TIMESERIES]
+;;Name  Hours  Value
+TS_MH_1  0.0000  2.000000
+TS_MH_1  12.0000  4.000000
+TS_MH_1  24.0000  2.000000
+TS_MH_1  36.0000  4.000000
+TS_MH_1  48.0000  2.000000
+TS_MH_1  60.0000  4.000000
+
+[REPORT]
+INPUT NO
+CONTROLS NO
+SUBCATCHMENTS NONE
+NODES NONE
+LINKS NONE
+
+[COORDINATES]
+;;Node  X  Y
+MH_1  0.000  0.000
+MH2  40.000  0.000
+
+[VERTICES]
+;;Link  X  Y
