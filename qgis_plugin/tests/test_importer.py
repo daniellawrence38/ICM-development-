@@ -126,7 +126,8 @@ def test_direction_reversal():
     model, rep = build_model(acs, [], [p])
     c = model["conduits"][0]
     assert c["geom"] == [[0, 0], [10, 0]] and rep.counts["reversed"] == 1
-    assert "direction_reversed" in codes_of(rep) and "geometry reversed" in c["notes"]
+    assert "direction_reversed" not in codes_of(rep) and "geometry reversed" in c["notes"]
+    assert any(x.startswith("Reversed digitising direction of 1") for x in rep.summary_lines(0))
     # correct direction untouched
     model, rep = build_model(acs, [], [pipe("P", [(0, 0), (10, 0)], "A", "B", LENGTH=10)])
     assert model["conduits"][0]["geom"] == [[0, 0], [10, 0]] and "reversed" not in rep.counts
@@ -310,7 +311,7 @@ def test_segmented_run_junctions_direction_and_inverts():
     # S2 and BR1 were digitised against the flow and are reversed; the others are untouched
     assert c["S2"]["geom"][0] == [100, 0] and c["BR1"]["geom"][0] == [100, 80] and c["S1"]["geom"][0] == [0, 0]
     assert rep.counts["reversed"] == 2
-    assert sorted(w.object_id for w in rep.warnings if w.code == "direction_reversed") == ["BR1", "S2"]
+    assert sorted(k for k in c if "geometry reversed" in (c[k].get("notes") or "")) == ["BR1", "S2"]
     # segment levels are used as is after orientation
     assert (c["S2"]["us_invert"], c["S2"]["ds_invert"]) == (9.7, 9.4)
     # node invert: lowest outgoing us invert, else lowest incoming ds invert

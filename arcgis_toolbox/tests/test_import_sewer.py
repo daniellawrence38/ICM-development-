@@ -80,7 +80,8 @@ def test_end_to_end_valid_gpkg_and_messages(world, tmp_path):
     assert cp_reads and not any(r["full_scan"] for r in cp_reads)      # far-away C9 is never read
     log = a.log
     assert any(lv == "warn" and "grade_mismatch" in t and "22030223" in t for lv, t in log)
-    assert any("direction_reversed" in t for lv, t in log if lv == "warn")
+    assert any(t.startswith("Reversed digitising direction of 1") for lv, t in log if lv == "info")
+    assert not any("direction_reversed" in t for lv, t in log)
     assert not [t for lv, t in log if lv == "error"]
     assert any(t.startswith("Model check:") for _, t in log)
     # read with the target SR, SHAPE@XY for points / SHAPE@ for lines

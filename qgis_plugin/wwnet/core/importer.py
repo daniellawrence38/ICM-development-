@@ -163,7 +163,11 @@ class ImportReport:
         if c.get("context_chambers_unused"):
             lines.append(f"Ignored {c['context_chambers_unused']} context chamber(s) not touching any sewer end.")
         if c.get("reversed"):
-            lines.append(f"Reversed digitising direction of {c['reversed']} sewer(s).")
+            n, tot = c["reversed"], c.get("conduits_read") or 0
+            share = f" of {tot} ({100 * n / tot:.0f}%)" if tot else ""
+            conv = (" - the source is drawn downstream -> upstream; this is a convention, not an error"
+                    if tot and n / tot >= 0.8 else "; each reversed sewer is noted in its notes field")
+            lines.append(f"Reversed digitising direction of {n}{share} sewer(s){conv}.")
         lines.extend(self.diagnostics)
         for fld, codes in self.assumed_codes.items():
             what = ", ".join(f"{k!r} x{v}" + (f" ({self.assumed_notes[fld][k]})" if k in self.assumed_notes.get(fld, {}) else "")
@@ -496,6 +500,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             rep.warn("pipe_no_geometry", "conduit", pid, "sewer without usable geometry skipped")
             continue
         pipe_ids.add(pid)
+        rep.count("conduits_read")
         segs.append({"pid": pid, "row": row, "line": line, "us_id": to_id(get(row, "us_node")),
                      "ds_id": to_id(get(row, "ds_node")), "ends": [None, None]})
 
@@ -840,8 +845,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         nchain = [s["ends"][0]] + [segs[i]["ends"][1] for i in idxs]
         if flipped:
             line, pieces, nchain = line[::-1], [q[::-1] for q in pieces[::-1]], nchain[::-1]
-            rep.count("reversed")
-            rep.warn("direction_reversed", "conduit", pid, "digitised against flow; geometry reversed")
+            rep.count("reversed")      # summary line only: a source drawn downstream->upstream reverses all
             notes.append("geometry reversed")
         us, ds = nchain[0], nchain[-1]
         if s["why"] in why_notes:
