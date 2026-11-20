@@ -61,8 +61,12 @@ its fields with the Water Corporation names that exist in it; change any of them
   becomes a dangling end node `E<n>`. No per-sewer placeholders are created.
 - Direction: for each (US id, DS id) run the chain of segments is oriented from the end at the US chamber (or the
   DS chamber) through the shared junctions; leftovers take the direction of already oriented neighbours, else the
-  digitised direction is kept (`direction_unknown`). Only segments really flipped are reversed
-  (`direction_reversed`). A segment end at a chamber that is neither its US nor DS id warns `id_mismatch`.
+  digitised direction is kept (`direction_unknown`). Remaining unknowns are resolved in this order, to a fixed
+  point (each counted as `Direction: ... N by dead-end rule, N by IS/IO rule` and noted on the conduit):
+  (a) dead-end rule: exactly one end attached to the network (chamber, connection point, or a junction shared with
+  another segment) and the other dangling -> the dangling end is upstream; (b) IS/IO sewers (`MAINTYPE` `E`/`IS`/`IO`):
+  the end not at a chamber is upstream (covers a blank US id); (c) neighbour propagation again through junctions.
+  Only segments really flipped are reversed (`direction_reversed`). A segment end at a chamber that is neither its US nor DS id warns `id_mismatch`.
 - Each segment keeps its own `UPSTREAM`/`DOWNSTREAM` levels as `us_invert`/`ds_invert`. Node `invert_level` = lowest
   `us_invert` of the outgoing segments, else the lowest `ds_invert` of the incoming ones (noted on the node).
   Falls into a node (incoming invert above the node invert, e.g. falls through manholes) are normal and not
@@ -74,9 +78,22 @@ its fields with the Water Corporation names that exist in it; change any of them
   points intersecting the sewer extent + 2 m (`SearchCursor` spatial filter; where-clause only if the installed
   arcpy rejects it) are read. A selection in the layer is honoured with *Use selected features only*. With sewers
   selected and no chambers selected, chambers are read the same way (extent + 2 m).
+- **Context chambers**: with *Use selected features only* the chamber selection never starves connectivity. After
+  the sewers are read, chambers whose `PACID` equals a US/DS manhole id used by the read sewers but not yet read
+  (`PACID IN (...)`, 900 per query, quoted/numeric per field type) and chambers within the sewer extent + 2 m
+  (spatial filter, same fallback as connection points) are read too, with the chamber-type rule applied. The chamber
+  layer is never scanned in full when sewers are selected. Message: "Access chambers: N selected + M
+  referenced/nearby read (not the whole layer)". They are reported as "context chamber(s)"; context chambers no
+  sewer end touches are dropped (`Ignored N context chamber(s)`).
+- Dangling ends summary: "dangling ends: X IS/IO upstream ends (expected), Y dead-end upstream starts, Z other
+  (listed)". "Other" (a dangling *downstream* end) is listed as warning `dangling_end` with conduit id and
+  coordinates (max 20).
 - Grade from levels is compared with `FLOW_GRADE`; a difference over 10 % warns with both values. Grade source
   `field` derives a missing invert from the other invert, length and `FLOW_GRADE` (data_source `assumed`); it never
-  overrides levels that are present.
+  overrides levels that are present. The summary adds one `Grade check` line: the median of levels grade /
+  `FLOW_GRADE` (1.0 = agree) using the `LENGTH` field, the geometry length and, if the sewer layer has it, the
+  optional `Shape_Length` field (template key `shape_length`, not a tool parameter), plus median `LENGTH` /
+  geometry length, to identify why the two grades differ. The levels grade is always the one used.
 - Diameter: a standard DN (100-1200) is used as is; any other value maps to the nearest standard DN and the raw
   value is kept in `internal_diameter_mm`. **If no diameter field is mapped every sewer gets DN 150 (assumed) and a
   loud warning is printed: capacity results are meaningless until real diameters are supplied.**

@@ -321,7 +321,8 @@ def test_segmented_run_junctions_direction_and_inverts():
     assert "ac_no_id" not in codes and rep.counts["inspection_shafts_skipped"] == 1
     assert "skipped 1 inspection shaft(s)" in "\n".join(rep.summary_lines()).lower()
     assert "id_mismatch" not in codes and "end_far_from_node" not in codes
-    assert codes.count("direction_unknown") == 1      # BR2 has no usable id and only a dangling end
+    assert codes.count("direction_unknown") == 0      # BR2: no usable id, but the dead-end rule orients it
+    assert rep.counts["direction_dead_end"] == 1 and "dead-end rule" in c["BR2"]["notes"]
 
 
 def test_segmented_run_passes_model_check(tmp_path):
@@ -417,3 +418,75 @@ def test_warning_summary_spread_across_codes():
             many.warn(f"code{k}", "conduit", str(i), "m")
     assert len(many.example_warnings(40)) == 40
     assert max(sum(w.code == f"code{k}" for w in many.example_warnings(40)) for k in range(12)) <= 5
+
+
+def test_dead_end_rule_orients_from_dangling_end():
+    acs = [ac("A", 0, 0)]
+    # no ids; the end at chamber A is attached, the other end dangles -> the dangling end is upstream
+    sew = [seg("P1", [(0, 0), (30, 0)], None, None, 5.0, 4.5)]
+    model, rep = build_model(acs, [], sew)
+    c = model["conduits"][0]
+    assert c["ds_node_id"] == "A" and c["geom"][0] == [30, 0] and "direction_unknown" not in codes_of(rep)
+    assert rep.counts["direction_dead_end"] == 1 and "dead-end rule" in c["notes"]
+    assert rep.counts["dangling_dead_end"] == 1 and rep.counts["dangling_other"] == 0
+    assert any("0 IS/IO upstream ends (expected), 1 dead-end upstream starts, 0 other" in x
+               for x in rep.summary_lines(0))
+    # propagates through a junction: P2 joins P1's dangling-free end via a shared junction and is oriented
+    sew = [seg("Q1", [(0, 0), (30, 0)], None, None, 5.0, 4.5), seg("Q2", [(30, 0), (60, 0)], None, None, 5.5, 5.0)]
+    model, rep = build_model(acs, [], sew)
+    c = by_id(model["conduits"], "conduit_id")
+    assert c["Q1"]["ds_node_id"] == "A" and c["Q2"]["ds_node_id"] == c["Q1"]["us_node_id"]
+    assert "direction_unknown" not in codes_of(rep)
+
+
+def test_is_sewer_blank_us_orientation_and_breakdown():
+    acs = [ac("B", 10, 0)]
+    # IS sewer digitised downstream-first, blank US id, DS chamber named only by geometry (DS id blank too)
+    sew = [seg("S1", [(10, 0), (10, 12)], None, None, 21.0, 19.5, MAINTYPE="E- inspection shaft")]
+    model, rep = build_model(acs, [], sew)
+    c = model["conduits"][0]
+    assert c["ds_node_id"] == "B" and c["geom"][0] == [10, 12]
+    assert rep.counts["direction_dead_end"] + rep.counts["direction_is_io"] == 1
+    assert rep.counts["dangling_is_io"] == 1 and rep.counts["dangling_other"] == 0
+    # IS sewer with both ends dangling is not oriented by the rules; IS rule needs exactly one chamber end
+    model, rep = build_model([], [], [seg("S2", [(0, 0), (5, 0)], None, None, 2.0, 1.0, MAINTYPE="IS")])
+    assert "direction_unknown" in codes_of(rep) and rep.counts["direction_unknown"] == 1
+
+
+def test_dangling_other_listed_with_coordinates():
+    acs = [ac("A", 0, 0), ac("B", 100, 0)]
+    # P1 ends at A (id says A is upstream) and dangles downstream at (50, 0): suspicious
+    sew = [seg("P1", [(0, 0), (50, 0)], "A", None, 5.0, 4.5), seg("P2", [(70, 0), (100, 0)], "A", "B", 4.4, 4.0)]
+    model, rep = build_model(acs, [], sew)
+    d = [w for w in rep.warnings if w.code == "dangling_end"]
+    assert rep.counts["dangling_other"] >= 1 and d and any(w.object_id == "P1" and "50.00, 0.00" in w.message
+                                                           for w in d)
+    many = [seg(f"M{i}", [(1000 + 10 * i, 0), (1005 + 10 * i, 0)], "A", "B", 5.0, 4.0) for i in range(30)]
+    _m, rep = build_model(acs, [], many)
+    assert len([w for w in rep.warnings if w.code == "dangling_end"]) <= 20
+    assert rep.counts["dangling_other"] >= 20
+
+
+def test_grade_ratio_summary_line():
+    acs = [ac("A", 0, 0), ac("B", 100, 0)]
+    # levels grade = length/drop = 100/4 = 25 vs FLOW_GRADE 20 -> ratio 1.25; geometry length 90 -> 22.5/20
+    sew = [pipe("P1", [(0, 0), (90, 0)], "A", "B", UPSTREAM=10.0, DOWNSTREAM=6.0, LENGTH=100.0, FLOW_GRADE=20,
+                Shape_Length=80.0)]
+    model, rep = build_model(acs, [], sew)
+    line = next(x for x in rep.summary_lines(0) if x.startswith("Grade check"))
+    assert "1 sewer(s)" in line and "LENGTH: 1.25" in line and "geometry length: 1.125" in line
+    assert "Shape_Length: 1" in line and "Levels grade is used" in line
+    # the grade used is still the levels: no derived inverts / no change of levels
+    assert model["conduits"][0]["us_invert"] == 10.0 and model["conduits"][0]["ds_invert"] == 6.0
+    _m, rep = build_model(acs, [], [pipe("P2", [(0, 0), (90, 0)], "A", "B", FLOW_GRADE=None)])
+    assert not any(x.startswith("Grade check") for x in rep.summary_lines(0))
+
+
+def test_context_chambers_counted_and_unused_dropped():
+    rows = [ac("A", 0, 0), dict(ac("C1", 50, 0), **{imp.CONTEXT: True}), dict(ac("C2", 500, 500), **{imp.CONTEXT: True})]
+    sew = [seg("P1", [(0, 0), (50, 0)], "A", "C1", 5.0, 4.5)]
+    model, rep = build_model(rows, [], sew)
+    assert sorted(n["node_id"] for n in model["nodes"]) == ["A", "C1"]
+    assert rep.counts["access_chambers"] == 1 and rep.counts["context_chambers"] == 1
+    assert rep.counts["context_chambers_unused"] == 1
+    assert "1 context chamber(s)" in rep.summary_lines(0)[0]

@@ -29,6 +29,7 @@ us_invert = "UPSTREAM"          # invert levels, m AHD (confirmed)
 ds_invert = "DOWNSTREAM"
 flow_grade = "FLOW_GRADE"       # "1 in x"; informational: calculated grade from levels takes preference (confirmed)
 length = "LENGTH"               # m
+shape_length = "Shape_Length"   # optional, diagnostics only (grade ratio line); ignored when the layer has no such field
 diameter = "HEIGHT"             # pipe diameter, mm (confirmed by user)
 status = "STATUS"
 sewer_type = "MAINTYPE"

@@ -63,14 +63,21 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
                   "access chamber (inspection shafts are not skipped).")
         fmap = fmap.with_overrides(chamber_type="")
     si.prepare_projection(arcpy, msgs, sources)
+    sewer_names = {n.lower() for n in si.layer_field_names(arcpy, sewer_layer)}
+    if fmap.shape_length and fmap.shape_length.lower() not in sewer_names:
+        fmap = fmap.with_overrides(shape_length="")          # optional diagnostic field absent: skip it
     roles = {k: si.roles_for(k, {r: getattr(fmap, r) for r, *_ in si.FIELD_ROLES})
              for k in ("ac", "cp", "sewer")}
+    if fmap.shape_length:
+        roles["sewer"]["shape_length"] = fmap.shape_length
     sewers = si.read_features(arcpy, sewer_layer, roles["sewer"], "line", "Gravity sewers",
                               use_selected, msgs)
     if not sewers:
         raise RuntimeError("No gravity sewers were read (nothing selected / empty layer?).")
     ext = si.rows_extent(sewers)
     sewers_selected = use_selected and si.selection_count(sewer_layer) > 0
+    refs = {imp.to_id(r.get(f)) for r in sewers for f in (fmap.us_node, fmap.ds_node) if f}
+    refs.discard("")
     acs = None
     if sewers_selected and not si.selection_count(ac_layer) and ext is not None:
         acs = si.read_in_extent(arcpy, ac_layer, roles["ac"], "point", "Access chambers", ext, msgs)
@@ -79,13 +86,20 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
         else:
             msgs.info(f"Access chambers: nothing selected; read {len(acs)} feature(s) within the selected "
                       f"sewers' extent +{si.EXTENT_BUFFER_M:g} m.")
+            for r in acs:
+                r[imp.CONTEXT] = True            # nothing selected: all of these are context chambers
+            acs = si.add_referenced_chambers(arcpy, ac_layer, roles["ac"], fmap.ac_id, refs, acs, msgs,
+                                             extent_too=False, n_selected=0)
+    elif use_selected and si.selection_count(ac_layer) and ext is not None:
+        acs = si.read_features(arcpy, ac_layer, roles["ac"], "point", "Access chambers", True, msgs)
+        n_sel = len(acs)
+        acs = si.add_referenced_chambers(arcpy, ac_layer, roles["ac"], fmap.ac_id, refs, acs, msgs, ext=ext,
+                                         n_selected=n_sel)
     if acs is None:
         acs = si.read_features(arcpy, ac_layer, roles["ac"], "point", "Access chambers", use_selected, msgs)
     cps = []
     if cp_layer is not None:
         ac_ids = {imp.to_id(r.get(fmap.ac_id)) for r in acs}
-        refs = {imp.to_id(r.get(f)) for r in sewers for f in (fmap.us_node, fmap.ds_node) if f}
-        refs.discard("")
         cps = si.read_connection_points(arcpy, cp_layer, roles["cp"], fmap.cp_id, sorted(refs - ac_ids), ext,
                                         use_selected, msgs)
     model, rep = imp.build_model(acs, cps, sewers, fmap, opts, cfg)

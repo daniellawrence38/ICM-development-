@@ -282,6 +282,51 @@ def read_connection_points(arcpy, src, roles_fields: dict, id_field: str, ref_id
     return out
 
 
+def add_referenced_chambers(arcpy, src, roles_fields: dict, id_field: str, ref_ids, rows: list, msgs, ext=None,
+                            n_selected=None, extent_too: bool = True, label: str = "Access chambers") -> list:
+    """Context chambers: `rows` (already read) plus the chambers whose id is in `ref_ids` (sewer end ids) and,
+    when `ext` is given, those within it. Never scans the whole layer. Added rows carry the CONTEXT flag.
+    The chamber-type rule is applied later by the importer."""
+    imp = importer()
+    cols = _columns(arcpy, src, roles_fields, label)
+    cursor_src = _cursor_source(arcpy, src, False, msgs, label)
+    actual_id = next(c for c in cols if c.lower() == id_field.lower())
+    seen = {imp.to_id(r.get(actual_id)) for r in rows}
+    out = list(rows)
+    n_sel = len(rows) if n_selected is None else n_selected
+    todo = sorted(set(i for i in (ref_ids or ()) if i and i not in seen))
+    n_id = n_ext = 0
+
+    def add(new):
+        n = 0
+        for r in new:
+            k = imp.to_id(r.get(actual_id))
+            if k in seen:
+                continue
+            seen.add(k)
+            r[imp.CONTEXT] = True
+            out.append(r)
+            n += 1
+        return n
+
+    lits = _id_literals(arcpy, src, actual_id, todo)
+    delim = arcpy.AddFieldDelimiters(cursor_src, actual_id)
+    for i in range(0, len(lits), ID_CHUNK):
+        where = f"{delim} IN ({', '.join(lits[i:i + ID_CHUNK])})"
+        n_id += add(_rows(arcpy, cursor_src, cols, "point", where_clause=where))
+    if ext is not None and extent_too:
+        got = read_in_extent(arcpy, src, roles_fields, "point", label, ext, msgs)
+        if got is None:
+            msgs.warn(f"{label}: referenced chambers read by id only; chambers only located by geometry "
+                      "will be missing.")
+        else:
+            n_ext = add(got)
+    if extent_too or n_id:
+        msgs.info(f"{label}: {n_sel} selected + {n_id + n_ext} referenced/nearby read (not the whole layer): "
+                  f"{n_id} by id, {n_ext} within the sewer extent +{EXTENT_BUFFER_M:g} m.")
+    return out
+
+
 def roles_for(layer_key: str, fields: dict) -> dict:
     return {r: fields.get(r) or "" for r, k, _l, _q in FIELD_ROLES if k == layer_key}
 

@@ -364,6 +364,87 @@ def test_chambers_read_by_extent_when_only_sewers_selected(world, tmp_path):
     assert [r for r in a.cursor_log if r["source"] == "C:/d/ac"][0]["full_scan"]
 
 
+def ac_reads(a):
+    return [r for r in a.cursor_log if r["source"] == "C:/d/ac"]
+
+
+def test_context_chamber_referenced_by_id_is_fetched(world, tmp_path):
+    a, lyr, _ = world
+    lyr["sew"] = fa.make_layer("sew", "C:/d/sew", selection=[2])         # A3 -> A4
+    lyr["ac"] = fa.make_layer("ac", "C:/d/ac", selection=[3])            # only A3 selected; A4 is not
+    # A4 sits more than 2 m beyond the extent, so only the id lookup can find it
+    a.sources["C:/d/sew"]["rows"][1]["DS_MANHOLE_ID"] = "A4"
+    a.sources["C:/d/ac"]["rows"].append({"PACID": "A9", "TOPLEV": 1.0, GEOM: (385300.0, 6460000.0)})
+    res = run(a, lyr, tmp_path, use_selected=True)
+    reads = ac_reads(a)
+    assert not any(r["full_scan"] for r in reads)
+    assert reads[0]["selected"]
+    by_id = [r for r in reads if r["where"]]
+    assert by_id and by_id[0]["where"] == '"PACID" IN (\'A4\')' and by_id[0]["spatial_filter"] is None
+    assert any(r["spatial_filter"] is not None for r in reads)
+    nodes = {n["node_id"] for n in res["model"]["nodes"]}
+    assert nodes == {"A3", "A4"}                                         # A9 (not referenced/near) never read
+    cnd = res["model"]["conduits"][0]
+    assert (cnd["us_node_id"], cnd["ds_node_id"]) == ("A3", "A4")
+    assert res["report"].counts["context_chambers"] == 1 and res["report"].counts["access_chambers"] == 1
+    assert any("Access chambers: 1 selected + 1 referenced/nearby read (not the whole layer)" in t for _, t in a.log)
+    assert any("1 context chamber(s)" in t for lv, t in a.log if lv == "info")
+
+
+def test_context_chambers_apply_type_rule_and_chunk_ids(world, tmp_path):
+    a, lyr, _ = world
+    a.sources["C:/d/ac"]["fields"] = AC_FIELDS[:3] + [("CHAMBER_TY", "String")] + AC_FIELDS[3:]
+    for r in a.sources["C:/d/ac"]["rows"]:
+        r["CHAMBER_TY"] = "M- standard manhole"
+    a.sources["C:/d/ac"]["rows"][3]["CHAMBER_TY"] = "I- inspection shaft"     # A4 is an inspection shaft
+    lyr["sew"] = fa.make_layer("sew", "C:/d/sew", selection=[2])
+    lyr["ac"] = fa.make_layer("ac", "C:/d/ac", selection=[3])
+    res = run(a, lyr, tmp_path, use_selected=True)
+    assert res["report"].counts["inspection_shafts_skipped"] == 1
+    assert {n["node_id"] for n in res["model"]["nodes"]} == {"A3", "E1"} or "A4" not in {
+        n["node_id"] for n in res["model"]["nodes"]}
+    # many referenced ids -> chunked <= 900, quoted
+    a.env.overwriteOutput = True
+    del a.cursor_log[:]
+    rows = a.sources["C:/d/sew"]["rows"]
+    lyr["sew"] = fa.make_layer("sew", "C:/d/sew", selection=list(range(2, 2 + 1)))
+    for i in range(2000):
+        rows.append(sewer(f"Z{i}", [(385200.0 + i * 0.01, 6460000.0), (385200.0 + i * 0.01, 6460005.0)],
+                          f"U'{i}", f"V{i}"))
+    lyr["sew"] = fa.make_layer("sew", "C:/d/sew", selection=[2] + list(range(3, 2003)))
+    run(a, lyr, tmp_path, use_selected=True)
+    where = [r["where"] for r in ac_reads(a) if r["where"]]
+    assert len(where) == 5 and all(w.count("', '") + 1 <= 900 for w in where)
+    assert any("'U''0'" in w for w in where) and not any(r["full_scan"] for r in ac_reads(a))
+
+
+def test_is_sewer_with_blank_us_id_and_ds_chamber_outside_selection(world, tmp_path):
+    a, lyr, _ = world
+    a.sources["C:/d/sew"]["rows"].append(sewer(
+        "IS1", [(385100.0, 6460012.0), (385100.0, 6460000.0)], None, "A3", MAINTYPE="E- inspection shaft",
+        UPSTREAM=5.5, DOWNSTREAM=5.2, FLOW_GRADE=40, LENGTH=12.0))
+    lyr["sew"] = fa.make_layer("sew", "C:/d/sew", selection=[3])         # only the IS sewer; A3 not selected
+    res = run(a, lyr, tmp_path, use_selected=True)
+    c = res["model"]["conduits"][0]
+    assert c["sewer_type"] == "is" and c["ds_node_id"] == "A3"
+    up = [n for n in res["model"]["nodes"] if n["node_id"] == c["us_node_id"]][0]
+    assert up["node_type"] == "is_end"
+    rep = res["report"]
+    assert rep.counts["context_chambers"] == 1 and rep.counts["dangling_is_io"] == 1
+    assert rep.counts["direction_unknown"] == 0
+    assert not any(r["full_scan"] for r in ac_reads(a))
+    assert any("1 IS/IO upstream ends (expected), 0 dead-end upstream starts, 0 other" in t for lv, t in a.log)
+
+
+def test_dead_end_and_grade_ratio_lines_reach_messages(world, tmp_path):
+    a, lyr, _ = world
+    res = run(a, lyr, tmp_path)
+    info = [t for lv, t in a.log if lv == "info"]
+    assert any(t.startswith("Direction:") for t in info)
+    assert any(t.startswith("Grade check") and "median ratio" in t for t in info)
+    assert res["report"].counts["direction_unknown"] == 0
+
+
 def test_chambers_extent_unsupported_reads_all(world, tmp_path):
     a, lyr, _ = world
     a.spatial_filter_supported = False

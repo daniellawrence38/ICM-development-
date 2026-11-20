@@ -20,6 +20,7 @@ from typing import Iterable
 from . import paths, tomlmini
 
 GEOM = "_geom"                 # key holding the geometry coordinates in each input row
+CONTEXT = "_context"           # chamber rows flagged True were read only as context for the sewers (not selected)
 TEMPLATE_NAME = "watercorp_sewer.toml"
 
 # role -> (config table, key in the template)
@@ -33,7 +34,7 @@ _ROLE_KEYS = {
     "diameter": ("sewers", "diameter"), "status": ("sewers", "status"),
     "sewer_type": ("sewers", "sewer_type"), "purpose": ("sewers", "purpose"),
     "material": ("sewers", "material"), "install_date": ("sewers", "install_date"),
-    "planset": ("sewers", "planset"),
+    "planset": ("sewers", "planset"), "shape_length": ("sewers", "shape_length"),
 }
 
 
@@ -58,6 +59,7 @@ class FieldMap:
     material: str = "MATERIAL"
     install_date: str = "DATEINST"
     planset: str = "PLANSET"
+    shape_length: str = "Shape_Length"     # optional diagnostic only (grade ratio); not a required role
 
     @classmethod
     def from_config(cls, cfg: dict | None = None) -> "FieldMap":
@@ -116,6 +118,7 @@ class ImportReport:
     unknown_codes: dict = field(default_factory=dict)     # {"STATUS": {"X": 3}}
     assumed_codes: dict = field(default_factory=dict)     # {"MAINTYPE": {"E": 26}}: mapped by assumption
     assumed_notes: dict = field(default_factory=dict)     # {"MAINTYPE": {"E": "meaning unconfirmed ..."}}
+    diagnostics: list = field(default_factory=list)       # [str] summary lines (direction, dangling ends, grade ratios)
 
     def warn(self, code: str, object_type: str, object_id: str, message: str):
         self.warnings.append(ImportWarning(code, object_type, str(object_id), message))
@@ -145,7 +148,8 @@ class ImportReport:
     def summary_lines(self, max_warnings: int = 40) -> list:
         """Counts, per-code warning summary, then example warnings (0 = summary only)."""
         c = self.counts
-        lines = [f"Imported {c.get('nodes', 0)} node(s) ({c.get('access_chambers', 0)} chamber(s), "
+        ctx = f" + {c['context_chambers']} context chamber(s)" if c.get("context_chambers") else ""
+        lines = [f"Imported {c.get('nodes', 0)} node(s) ({c.get('access_chambers', 0)} chamber(s){ctx}, "
                  f"{c.get('connection_points_used', 0)} connection point(s), "
                  f"{c.get('junction_nodes', 0)} segment junction(s), {c.get('dangling_ends', 0)} dangling "
                  f"end(s)) and {c.get('conduits', 0)} conduit(s).",
@@ -153,8 +157,11 @@ class ImportReport:
                  f"{c.get('conduits_skipped', 0)} sewer(s), {c.get('access_chambers_skipped', 0)} chamber(s)."]
         if c.get("inspection_shafts_skipped"):
             lines.append(f"Skipped {c['inspection_shafts_skipped']} inspection shaft(s) (type skip: not imported).")
+        if c.get("context_chambers_unused"):
+            lines.append(f"Ignored {c['context_chambers_unused']} context chamber(s) not touching any sewer end.")
         if c.get("reversed"):
             lines.append(f"Reversed digitising direction of {c['reversed']} sewer(s).")
+        lines.extend(self.diagnostics)
         for fld, codes in self.assumed_codes.items():
             what = ", ".join(f"{k!r} x{v}" + (f" ({self.assumed_notes[fld][k]})" if k in self.assumed_notes.get(fld, {}) else "")
                              for k, v in sorted(codes.items()))
@@ -339,6 +346,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     node_pos: dict = {}              # node_id -> (x, y)
     node_ref: dict = {}              # node_id -> source id (chamber id / connection point id)
     ac_ids: set = set()
+    ctx_ids: set = set()             # chambers read only as context (referenced by id / near the sewers)
     cp_pool: dict = {}               # cp id -> (x, y)
     grid = _Grid(tol)
     used_ids: set = set()
@@ -366,6 +374,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             rep.count("access_chambers_skipped")
             rep.warn("ac_no_geometry", "node", nid, "access chamber without geometry skipped")
             continue
+        if row.get(CONTEXT):
+            ctx_ids.add(nid)
         nodes[nid] = _clean({"node_id": nid, "geom": list(p), "node_type": node_type,
                              "surface_level": to_float(get(row, "ac_surface_level")),
                              "status": "existing", "data_source": "gis", "asset_id": nid})
@@ -374,7 +384,6 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         ac_ids.add(nid)
         used_ids.add(nid)
         grid.add(nid, p)
-    rep.count("access_chambers", len(ac_ids))
 
     for row in connection_points or ():
         cid = to_id(get(row, "cp_id"))
@@ -449,6 +458,15 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 s["ends"][e] = nid
             elif cid is not None:
                 s["ends"][e] = use_cp(cid)
+    used_ends = {n for s in segs for n in s["ends"] if n is not None}
+    ctx_unused = ctx_ids - used_ends
+    for nid in ctx_unused:           # context chambers no sewer end touches are not imported
+        nodes.pop(nid, None)
+        node_pos.pop(nid, None)
+        node_ref.pop(nid, None)
+    rep.count("access_chambers", len(ac_ids - ctx_ids))
+    rep.count("context_chambers", len(ctx_ids - ctx_unused))
+    rep.count("context_chambers_unused", len(ctx_unused))
     # 2. connection point named by id but slightly further away than the tolerance
     cp_reach = max(4 * tol, 2.0)
     for s in segs:
@@ -535,40 +553,102 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                     if sj in mset and sj not in up_end:
                         up_end[sj] = e if as_up else 1 - e
                         queue.append(sj)
-    # hints from already oriented neighbours (any run), repeated until nothing changes
-    changed = True
-    while changed:
-        changed = False
+    for si in up_end:
+        segs[si]["why"] = "ids"
+
+    sewer_codes = codes.get("sewer_type", {})
+
+    def stype_of(row):
+        raw = get(row, "sewer_type")
+        if blank(raw):
+            return ""
+        return sewer_codes.get(code_of(raw)) or sewer_codes.get(str(raw).strip().upper()) or ""
+
+    def attached(si, e):
+        node = segs[si]["ends"][e]
+        return node_ref.get(node) is not None or len(node_segs.get(node, ())) >= 2
+
+    def neighbour_hints() -> bool:
+        """Orient sewers from already oriented neighbours (any run), repeated until nothing changes."""
+        any_change, changed = False, True
+        while changed:
+            changed = False
+            for si, s in enumerate(segs):
+                if si in up_end:
+                    continue
+                votes = set()
+                for e in (0, 1):
+                    has_in = has_out = False
+                    for sj, ej in node_segs.get(s["ends"][e], ()):
+                        if sj == si or sj not in up_end:
+                            continue
+                        if up_end[sj] == ej:
+                            has_out = True
+                        else:
+                            has_in = True
+                    if has_in != has_out:
+                        votes.add(e if has_in else 1 - e)      # flows out of an inflow-only node / into an outflow-only one
+                if len(votes) == 1:
+                    up_end[si] = votes.pop()
+                    s["why"] = "neighbours"
+                    changed = any_change = True
+        return any_change
+
+    def dead_end_rule() -> bool:
+        """Exactly one end attached to the network, the other dangling: the dangling end is upstream."""
+        ch = False
         for si, s in enumerate(segs):
             if si in up_end:
                 continue
-            votes = set()
-            for e in (0, 1):
-                has_in = has_out = False
-                for sj, ej in node_segs.get(s["ends"][e], ()):
-                    if sj == si or sj not in up_end:
-                        continue
-                    if up_end[sj] == ej:
-                        has_out = True
-                    else:
-                        has_in = True
-                if has_in != has_out:
-                    votes.add(e if has_in else 1 - e)      # flows out of an inflow-only node / into an outflow-only one
-            if len(votes) == 1:
-                up_end[si] = votes.pop()
-                s["hint"] = True
-                changed = True
+            a0, a1 = attached(si, 0), attached(si, 1)
+            if a0 != a1:
+                up_end[si] = 1 if a0 else 0
+                s["why"] = "dead_end"
+                ch = True
+        return ch
+
+    def is_io_rule() -> bool:
+        """IS / IO sewers: the end that is not at a chamber is upstream."""
+        ch = False
+        for si, s in enumerate(segs):
+            if si in up_end or stype_of(s["row"]) not in ("is", "io"):
+                continue
+            at_ch = [e for e in (0, 1) if s["ends"][e] in ac_ids and s["ends"][e] in nodes]
+            if len(at_ch) == 1:
+                up_end[si] = 1 - at_ch[0]
+                s["why"] = "is_io"
+                ch = True
+        return ch
+
+    changed = True
+    while changed:
+        changed = neighbour_hints()
+        changed = dead_end_rule() or changed
+        changed = is_io_rule() or changed
+    why_notes = {"neighbours": "direction from neighbouring sewers",
+                 "dead_end": "direction from dead-end rule (dangling end is upstream)",
+                 "is_io": "direction from IS/IO rule (end not at a chamber is upstream)"}
+    why_counts = {"ids": 0, "neighbours": 0, "dead_end": 0, "is_io": 0, "unknown": 0}
     for si, s in enumerate(segs):
         if si not in up_end:
             up_end[si] = 0
+            s["why"] = "unknown"
             rep.warn("direction_unknown", "conduit", s["pid"], "flow direction could not be determined from "
-                     "manhole ids or neighbouring sewers; digitised direction kept")
+                     "manhole ids, neighbouring sewers or dead-end / IS rules; digitised direction kept")
+        why_counts[s["why"]] += 1
+    for k, v in why_counts.items():
+        rep.count(f"direction_{k}", v)
+    rep.diagnostics.append(
+        f"Direction: {why_counts['ids']} from manhole ids, {why_counts['neighbours']} from neighbouring sewers, "
+        f"{why_counts['dead_end']} by dead-end rule, {why_counts['is_io']} by IS/IO rule, "
+        f"{why_counts['unknown']} unknown (digitised direction kept).")
 
     # ---- conduits --------------------------------------------------------------------------------
     conduits: list = []
     outgoing: dict = {}              # node_id -> [us inverts]
     incoming: dict = {}              # node_id -> [ds inverts]
     dn_unmapped = 0
+    ratios = {"field": [], "geom": [], "shape": [], "len_vs_geom": []}     # levels grade / FLOW_GRADE variants
 
     for si, s in enumerate(segs):
         pid, row, line = s["pid"], s["row"], s["line"]
@@ -581,8 +661,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             rep.warn("direction_reversed", "conduit", pid, "digitised against flow; geometry reversed")
             notes.append("geometry reversed")
         us, ds = s["ends"][up_end[si]], s["ends"][1 - up_end[si]]
-        if s.get("hint"):
-            notes.append("direction from neighbouring sewers")
+        if s["why"] in why_notes:
+            notes.append(why_notes[s["why"]])
 
         # ids are validation only
         mismatch = []
@@ -631,6 +711,13 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 rep.warn("non_falling_grade", "conduit", pid, f"levels give no fall (us {_fmt(ui)}, "
                          f"ds {_fmt(di)})")
             elif fgrade and length:
+                ratios["field"].append(length / drop / fgrade)
+                if glen > 0:
+                    ratios["geom"].append(glen / drop / fgrade)
+                    ratios["len_vs_geom"].append(length / glen)
+                shp = to_float(get(row, "shape_length")) if fm.shape_length else None
+                if shp and shp > 0:
+                    ratios["shape"].append(shp / drop / fgrade)
                 lg = length / drop
                 if abs(lg - fgrade) / fgrade * 100.0 > opt.grade_tolerance_pct:
                     rep.warn("grade_mismatch", "conduit", pid, f"grade from levels 1 in {lg:.1f} vs "
@@ -689,6 +776,22 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         rep.warn("dn_not_mapped", "import", "", f"NO DIAMETER FIELD MAPPED: DN {opt.default_dn} ASSUMED for all "
                  f"{dn_unmapped} conduit(s). Capacity results are meaningless until real diameters are supplied.")
 
+    def med(xs):
+        xs = sorted(xs)
+        n = len(xs)
+        return None if not n else (xs[n // 2] if n % 2 else (xs[n // 2 - 1] + xs[n // 2]) / 2)
+
+    if ratios["field"]:
+        parts = [f"{fm.length or 'length field'}: {med(ratios['field']):.3f}",
+                 f"geometry length: {med(ratios['geom']):.3f}" if ratios["geom"] else ""]
+        if ratios["shape"]:
+            parts.append(f"{fm.shape_length}: {med(ratios['shape']):.3f}")
+        rep.diagnostics.append(
+            f"Grade check ({len(ratios['field'])} sewer(s) with levels and {fm.flow_grade}): median ratio "
+            f"levels grade / {fm.flow_grade} (1 in x values; 1.0 = agree) using " + ", ".join(p for p in parts if p)
+            + (f"; median {fm.length}/geometry length {med(ratios['len_vs_geom']):.3f}"
+               if ratios["len_vs_geom"] else "") + ". Levels grade is used.")
+
     # ---- node finishing --------------------------------------------------------------------
     for cid in cp_has_io:
         nodes[cp_map[cid]]["node_type"] = "io_end"
@@ -702,6 +805,32 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         if t and n is not None and n.get("notes") == "dangling end":
             n["node_type"], n["notes"] = t
             rep.count("is_io_ends")
+    dang = {nid for nid, n in nodes.items() if n.get("notes") in ("dangling end",) or
+            n.get("notes", "").startswith(("inspection shaft (IS", "inspection opening (IO"))}
+    n_isio = n_dead = 0
+    other: list = []
+    for c in conduits:
+        for end, nid in (("us", c["us_node_id"]), ("ds", c["ds_node_id"])):
+            if nid not in dang:
+                continue
+            n = nodes[nid]
+            if n["node_type"] in ("is_end", "io_end") and end == "us" and n.get("notes", "").startswith("insp"):
+                n_isio += 1
+            elif end == "us":
+                n_dead += 1
+            else:
+                other.append((c["conduit_id"], n["geom"]))
+    rep.count("dangling_is_io", n_isio)
+    rep.count("dangling_dead_end", n_dead)
+    rep.count("dangling_other", len(other))
+    if dang:
+        rep.diagnostics.append(f"Dangling ends: {n_isio} IS/IO upstream ends (expected), {n_dead} dead-end "
+                               f"upstream starts, {len(other)} other" + (" (listed)." if other else "."))
+    for cid, g in other[:20]:
+        rep.warn("dangling_end", "conduit", cid, f"downstream end is dangling (no chamber, connection point or "
+                 f"other sewer) at ({g[0]:.2f}, {g[1]:.2f})")
+    if len(other) > 20:
+        rep.diagnostics.append(f"... {len(other) - 20} more other dangling end(s) not listed.")
     for nid, n in nodes.items():
         if nid in outgoing:
             lv, how = min(outgoing[nid]), "lowest outgoing sewer us invert"
