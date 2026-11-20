@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 import fake_arcpy as fa
-from wwnet_arcgis import capacity, gpkg, symbology, tools_impl
+from wwnet_arcgis import capacity, gpkg, maplayers, symbology, tools_impl
 from wwnet_arcgis.messages import Messages
 
 TOOLBOX = Path(__file__).resolve().parents[1]
@@ -448,3 +448,31 @@ def test_run_simulation_tool_parameters(fake_arcpy):
     assert p["duration_h"].value == 48.0 and p["warmup_h"].value == 24.0 and p["manning_n"].value == 0.013
     assert p["roughness"].filter.list == ["manning", "ks"] and p["show_layer"].value is True
     assert p["export_inp"].direction == "Output" and p["export_inp"].parameterType == "Optional"
+
+
+class _ProBasemapLayer:
+    """Mimics real Pro layers (basemaps, some service layers) where reading an unsupported
+    property raises: "The attribute 'name' is not supported on this instance of Layer"."""
+    isGroupLayer = False
+    isFeatureLayer = False
+
+    def supports(self, prop):
+        return False
+
+    def __getattr__(self, item):
+        if item in ("name", "dataSource"):
+            raise NameError(f"The attribute '{item}' is not supported on this instance of Layer.")
+        raise AttributeError(item)
+
+
+def test_run_simulation_tolerates_layers_without_name(fake_arcpy, demo_gpkg, monkeypatch):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    layers.insert(0, _ProBasemapLayer())
+    monkeypatch.setattr(tools_impl.cli, "run_simulate", lambda *args: _fake_sim())
+    monkeypatch.setattr(tools_impl.symbology, "apply", lambda t, lyr, m: True)
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg, 12.0, 6.0, "manning", 0.013, 1.0, True, None)
+    assert [maplayers.layer_name(l) for l in layers].count(SIM_NAME) == 1
+    assert not any("Could not add the simulation layers" in t for _, t in a.log)
+    # second run replaces the layer, still tolerating the odd layer
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg, 12.0, 6.0, "manning", 0.013, 1.0, True, None)
+    assert [maplayers.layer_name(l) for l in layers].count(SIM_NAME) == 1

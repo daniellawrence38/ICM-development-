@@ -46,8 +46,9 @@ def _layer_obj(param):
     if hasattr(v, "dataSource"):
         return v
     name = param.valueAsText
+    from wwnet_arcgis import maplayers as _ml
     for lyr in arcpy.mp.ArcGISProject("CURRENT").activeMap.listLayers():
-        if lyr.name == name:
+        if _ml.layer_name(lyr) == name:
             return lyr
     raise RuntimeError(f"Layer {name!r} not found in the active map.")
 

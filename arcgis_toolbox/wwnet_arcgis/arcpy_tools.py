@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as _dt
 from dataclasses import dataclass
 
-from . import gpkg, messages, shared
+from . import gpkg, maplayers, messages, shared
 
 MAX_ROWS = 200
 MAX_SELECTED = 100
@@ -65,7 +65,7 @@ def default_layers(arcpy):
     for lyr in list(m.listLayers()) + list(m.listTables()):
         if getattr(lyr, "isGroupLayer", False) or getattr(lyr, "isBroken", False):
             continue
-        if getattr(lyr, "dataSource", None):
+        if maplayers.layer_source(lyr):
             out.append(lyr)
     return out
 
@@ -91,7 +91,7 @@ class ArcpyTools:
 
     @staticmethod
     def table_of(layer):
-        return gpkg.table_of(layer.dataSource)
+        return gpkg.table_of(maplayers.layer_source(layer))
 
     def find_layer(self, name: str):
         n = (name or "").strip().lower()
@@ -100,9 +100,9 @@ class ArcpyTools:
             if (self.table_of(lyr) or "").lower() == n:
                 return lyr
         for lyr in ls:
-            if lyr.name.lower() == n:
+            if maplayers.layer_name(lyr).lower() == n:
                 return lyr
-        avail = [self.table_of(lyr) or lyr.name for lyr in ls]
+        avail = [self.table_of(lyr) or maplayers.layer_name(lyr) for lyr in ls]
         raise _engine().ToolError(f"Layer {name!r} not found. Available: {avail}")
 
     def _fields(self, ds):

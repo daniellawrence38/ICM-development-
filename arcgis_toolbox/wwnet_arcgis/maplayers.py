@@ -6,6 +6,43 @@ from . import gpkg, symbology
 GROUP_NAME = "WWNet"
 
 
+def layer_name(lyr) -> str:
+    """A layer's name, or '' for layer types that don't support NAME (real Pro raises
+    "The attribute 'name' is not supported on this instance of Layer" for some layers)."""
+    try:
+        sup = getattr(lyr, "supports", None)
+        if callable(sup) and not sup("NAME"):
+            return ""
+        return lyr.name or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def layer_source(lyr) -> str:
+    """A layer's dataSource, or '' when the layer type doesn't support it (basemaps, groups ...).
+    Pro raises a non-AttributeError for unsupported attributes, so getattr() defaults don't help."""
+    try:
+        sup = getattr(lyr, "supports", None)
+        if callable(sup) and not sup("DATASOURCE"):
+            return ""
+        return lyr.dataSource or ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def set_layer_name(lyr, name: str, msgs=None) -> bool:
+    try:
+        sup = getattr(lyr, "supports", None)
+        if callable(sup) and not sup("NAME"):
+            raise AttributeError("layer does not support NAME")
+        lyr.name = name
+        return True
+    except Exception as exc:  # noqa: BLE001
+        if msgs is not None:
+            msgs.warn(f"Could not rename the layer to {name!r} ({exc}); it keeps its default name.")
+        return False
+
+
 def active_map(arcpy):
     m = arcpy.mp.ArcGISProject("CURRENT").activeMap
     if m is None:
@@ -15,7 +52,7 @@ def active_map(arcpy):
 
 def _find_group(m):
     for lyr in m.listLayers():
-        if getattr(lyr, "isGroupLayer", False) and lyr.name == GROUP_NAME:
+        if getattr(lyr, "isGroupLayer", False) and layer_name(lyr) == GROUP_NAME:
             return lyr
     return None
 
@@ -51,12 +88,12 @@ def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True) -> list:
     for t in tables:
         try:
             lyr = m.addDataFromPath(gpkg.table_path(gpkg_path, t))
-            lyr.name = present[t][0] or t
+            set_layer_name(lyr, present[t][0] or t)
             if group is not None:
                 try:
                     m.addLayerToGroup(group, lyr)
                     m.removeLayer(lyr)
-                    lyr = next((x for x in group.listLayers() if x.name == (present[t][0] or t)), lyr)
+                    lyr = next((x for x in group.listLayers() if layer_name(x) == (present[t][0] or t)), lyr)
                 except Exception as exc:  # noqa: BLE001
                     msgs.warn(f"Could not move {t} into the group layer: {exc}")
             added.append((t, lyr))
@@ -87,7 +124,7 @@ def remove_layers_named(arcpy, name: str) -> int:
     """Remove every map layer / table called `name` (also inside groups). Returns how many."""
     m = active_map(arcpy)
     n = 0
-    for lyr in [x for x in list(m.listLayers()) + list(m.listTables()) if x.name == name]:
+    for lyr in [x for x in list(m.listLayers()) + list(m.listTables()) if layer_name(x) == name]:
         m.removeLayer(lyr)
         n += 1
     return n
@@ -97,13 +134,14 @@ def add_results_layer(arcpy, fc_path: str, name: str, msgs):
     """Add the in-memory results feature class to the active map (in the WWNet group if present)."""
     m = active_map(arcpy)
     lyr = m.addDataFromPath(fc_path)
-    lyr.name = name
+    renamed = set_layer_name(lyr, name, msgs)
     group = _find_group(m)
     if group is not None:
         try:
             m.addLayerToGroup(group, lyr)
             m.removeLayer(lyr)
-            lyr = next((x for x in group.listLayers() if x.name == name), lyr)
+            want = name if renamed else layer_name(lyr)
+            lyr = next((x for x in group.listLayers() if layer_name(x) == want), lyr)
         except Exception as exc:  # noqa: BLE001
             msgs.warn(f"Could not move the results layer into the group layer: {exc}")
     return lyr
@@ -114,7 +152,7 @@ def find_layer_for(arcpy, gpkg_path: str, table: str):
     norm = lambda p: str(p).replace("/", "\\").lower()  # noqa: E731
     m = active_map(arcpy)
     for lyr in list(m.listLayers()) + list(m.listTables()):
-        ds = getattr(lyr, "dataSource", "") or ""
+        ds = layer_source(lyr)
         g, t = gpkg.split_datasource(ds)
         if t == table and g and norm(g) == norm(gpkg_path):
             return lyr
