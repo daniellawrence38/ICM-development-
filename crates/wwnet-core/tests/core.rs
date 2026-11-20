@@ -53,7 +53,7 @@ fn codes(v: &[Issue]) -> Vec<&str> {
 }
 
 #[test]
-fn tree_has_only_adverse_grade_and_mismatch_info() {
+fn tree_has_only_adverse_grade() {
     let issues = run(&tree());
     let errs: Vec<_> = issues
         .iter()
@@ -62,11 +62,37 @@ fn tree_has_only_adverse_grade_and_mismatch_info() {
     assert_eq!(errs.len(), 1, "{issues:?}");
     assert_eq!(errs[0].code, "ADVERSE_GRADE");
     assert_eq!(errs[0].object_id, "C5");
-    // C5 ds invert 9.95 is above N3 invert 9.4
-    assert!(issues
-        .iter()
-        .any(|i| i.code == "INVERT_MISMATCH" && i.object_id == "C5"));
-    assert_eq!(issues.len(), 2, "{issues:?}");
+    // C5 ds invert 9.95 is above N3 invert 9.4: a fall into the node is normal, no issue
+    assert_eq!(issues.len(), 1, "{issues:?}");
+}
+
+#[test]
+fn falls_and_steps_at_nodes() {
+    // fall into an ac: no issue
+    let mut m = tree();
+    m.conduits[0].ds_invert = Some(9.9); // N2 invert 9.7: 0.2 m fall
+    m.conduits[1].us_invert = Some(9.7);
+    assert!(!codes(&run(&m)).contains(&"INVERT_MISMATCH"));
+    assert!(!codes(&run(&m)).contains(&"FALL_THROUGH_MS"));
+    // same fall into a maintenance shaft: info
+    m.nodes[1].node_type = NodeType::Ms;
+    let r = run(&m);
+    let i = r.iter().find(|i| i.code == "FALL_THROUGH_MS").unwrap();
+    assert_eq!((i.severity, i.object_id.as_str()), (Severity::Info, "C1"));
+    // small fall (<= 0.05) through a shaft: no issue
+    m.conduits[0].ds_invert = Some(9.74);
+    assert!(!codes(&run(&m)).contains(&"FALL_THROUGH_MS"));
+    // adverse step: incoming ds invert below the node invert
+    m.conduits[0].ds_invert = Some(9.5);
+    let r = run(&m);
+    let i = r.iter().find(|i| i.code == "INVERT_BELOW_NODE").unwrap();
+    assert_eq!(i.severity, Severity::Warning);
+    // outgoing us invert above the node invert: info
+    let mut m = tree();
+    m.conduits[1].us_invert = Some(9.8); // N2 invert 9.7
+    let r = run(&m);
+    let i = r.iter().find(|i| i.code == "INVERT_MISMATCH").unwrap();
+    assert_eq!((i.severity, i.object_id.as_str()), (Severity::Info, "C2"));
 }
 
 #[test]

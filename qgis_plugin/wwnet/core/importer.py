@@ -25,6 +25,7 @@ TEMPLATE_NAME = "watercorp_sewer.toml"
 # role -> (config table, key in the template)
 _ROLE_KEYS = {
     "ac_id": ("access_chambers", "id"), "ac_surface_level": ("access_chambers", "surface_level"),
+    "chamber_type": ("access_chambers", "chamber_type"),
     "cp_id": ("connection_points", "id"),
     "pipe_id": ("sewers", "id"), "us_node": ("sewers", "us_node"), "ds_node": ("sewers", "ds_node"),
     "us_invert": ("sewers", "us_invert"), "ds_invert": ("sewers", "ds_invert"),
@@ -41,6 +42,7 @@ class FieldMap:
     """Role -> source field name ('' = not mapped). Defaults are Water Corporation names."""
     ac_id: str = "PACID"
     ac_surface_level: str = "TOPLEV"
+    chamber_type: str = "CHAMBER_TY"
     cp_id: str = "ID"
     pipe_id: str = "ID"
     us_node: str = "US_MANHOLE_ID"
@@ -112,6 +114,8 @@ class ImportReport:
     warnings: list = field(default_factory=list)          # [ImportWarning]
     infos: list = field(default_factory=list)             # [str]
     unknown_codes: dict = field(default_factory=dict)     # {"STATUS": {"X": 3}}
+    assumed_codes: dict = field(default_factory=dict)     # {"MAINTYPE": {"E": 26}}: mapped by assumption
+    assumed_notes: dict = field(default_factory=dict)     # {"MAINTYPE": {"E": "meaning unconfirmed ..."}}
 
     def warn(self, code: str, object_type: str, object_id: str, message: str):
         self.warnings.append(ImportWarning(code, object_type, str(object_id), message))
@@ -125,24 +129,47 @@ class ImportReport:
             out[w.code] = out.get(w.code, 0) + 1
         return out
 
-    def summary_lines(self, max_warnings: int = 25) -> list:
+    def example_warnings(self, max_total: int = 40, per_code: int = 5) -> list:
+        """Up to `max_total` warnings spread across the codes (at most `per_code` of each), 'import' first."""
+        by_code: dict = {}
+        for w in self.warnings:
+            by_code.setdefault(w.code, []).append(w)
+        order = sorted(by_code, key=lambda k: (by_code[k][0].object_type != "import", k))
+        out: list = []
+        for rnd in range(per_code):
+            for k in order:
+                if rnd < len(by_code[k]) and len(out) < max_total:
+                    out.append(by_code[k][rnd])
+        return out
+
+    def summary_lines(self, max_warnings: int = 40) -> list:
+        """Counts, per-code warning summary, then example warnings (0 = summary only)."""
         c = self.counts
-        lines = [f"Imported {c.get('nodes', 0)} node(s) ({c.get('access_chambers', 0)} access chamber(s), "
+        lines = [f"Imported {c.get('nodes', 0)} node(s) ({c.get('access_chambers', 0)} chamber(s), "
                  f"{c.get('connection_points_used', 0)} connection point(s), "
-                 f"{c.get('placeholder_nodes', 0)} placeholder(s)) and {c.get('conduits', 0)} conduit(s).",
+                 f"{c.get('junction_nodes', 0)} segment junction(s), {c.get('dangling_ends', 0)} dangling "
+                 f"end(s)) and {c.get('conduits', 0)} conduit(s).",
                  f"Skipped: {c.get('connection_points_skipped', 0)} unreferenced connection point(s), "
                  f"{c.get('conduits_skipped', 0)} sewer(s), {c.get('access_chambers_skipped', 0)} chamber(s)."]
+        if c.get("inspection_shafts_skipped"):
+            lines.append(f"Skipped {c['inspection_shafts_skipped']} inspection shaft(s) (type skip: not imported).")
         if c.get("reversed"):
             lines.append(f"Reversed digitising direction of {c['reversed']} sewer(s).")
+        for fld, codes in self.assumed_codes.items():
+            what = ", ".join(f"{k!r} x{v}" + (f" ({self.assumed_notes[fld][k]})" if k in self.assumed_notes.get(fld, {}) else "")
+                             for k, v in sorted(codes.items()))
+            lines.append(f"Assumed {fld} codes: {what}")
         for fld, codes in self.unknown_codes.items():
             lines.append(f"Unknown {fld} codes: " + ", ".join(f"{k!r} x{v}" for k, v in sorted(codes.items())))
         wc = self.warning_counts()
         if wc:
             lines.append(f"{len(self.warnings)} warning(s): " + ", ".join(f"{k} x{v}" for k, v in sorted(wc.items())))
-        lines.extend(str(w) for w in self.warnings[:max_warnings])
-        if len(self.warnings) > max_warnings:
-            lines.append(f"... {len(self.warnings) - max_warnings} more warning(s) in ImportReport.warnings")
-        lines.extend(self.infos[:max_warnings])
+        if max_warnings > 0:
+            ex = self.example_warnings(max_warnings)
+            lines.extend(str(w) for w in ex)
+            if len(self.warnings) > len(ex):
+                lines.append(f"... {len(self.warnings) - len(ex)} more warning(s) in ImportReport.warnings")
+            lines.extend(self.infos[:max_warnings])
         return lines
 
 
@@ -279,6 +306,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         raise ValueError(f"grade_source must be 'levels' or 'field', not {opt.grade_source!r}")
     std = sorted(int(x) for x in cfg.get("standard_dn", {}).get("list", [150]))
     codes = cfg.get("codes", {})
+    assumed = cfg.get("assumed", {})
     rep = ImportReport()
     tol = float(opt.snap_tolerance_m)
 
@@ -290,11 +318,15 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         """Coded value -> enum text. Unknown/blank -> default + counted warning."""
         raw = get(row, role)
         c = code_of(raw)
-        if c in cmap:
-            return cmap[c], c
         whole = str(raw).strip().upper() if not blank(raw) else ""
-        if whole in cmap:
-            return cmap[whole], whole
+        for key in (c, whole):
+            if key in cmap:
+                note = assumed.get(role, {}).get(key)
+                if note is not None:
+                    bucket = rep.assumed_codes.setdefault(fname, {})
+                    bucket[key] = bucket.get(key, 0) + 1
+                    rep.assumed_notes.setdefault(fname, {})[key] = note
+                return cmap[key], key
         label = c if c else "(blank)"
         bucket = rep.unknown_codes.setdefault(fname, {})
         bucket[label] = bucket.get(label, 0) + 1
@@ -305,12 +337,21 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     # ---- nodes (access chambers) ------------------------------------------------------------
     nodes: dict = {}                 # node_id -> dict (model form)
     node_pos: dict = {}              # node_id -> (x, y)
+    node_ref: dict = {}              # node_id -> source id (chamber id / connection point id)
     ac_ids: set = set()
-    cp_pool: dict = {}               # cp id -> (x, y, row)
+    cp_pool: dict = {}               # cp id -> (x, y)
     grid = _Grid(tol)
     used_ids: set = set()
+    ctype_map = codes.get("chamber_type", {})
 
     for row in access_chambers:
+        node_type = "ac"
+        if fm.chamber_type and fm.chamber_type in row:
+            node_type, _c = code_lookup("chamber_type", fm.chamber_type, row, ctype_map, "ac", "node",
+                                        to_id(get(row, "ac_id")), "chamber type")
+            if node_type == "skip":
+                rep.count("inspection_shafts_skipped")
+                continue
         nid = to_id(get(row, "ac_id"))
         p = _point(row)
         if not nid:
@@ -325,10 +366,11 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             rep.count("access_chambers_skipped")
             rep.warn("ac_no_geometry", "node", nid, "access chamber without geometry skipped")
             continue
-        nodes[nid] = _clean({"node_id": nid, "geom": list(p), "node_type": "ac",
+        nodes[nid] = _clean({"node_id": nid, "geom": list(p), "node_type": node_type,
                              "surface_level": to_float(get(row, "ac_surface_level")),
                              "status": "existing", "data_source": "gis", "asset_id": nid})
         node_pos[nid] = p
+        node_ref[nid] = nid
         ac_ids.add(nid)
         used_ids.add(nid)
         grid.add(nid, p)
@@ -348,6 +390,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     cp_grid = _Grid(tol)
     for cid, p in cp_pool.items():
         cp_grid.add(cid, p)
+    cp_map: dict = {}
+    cp_by_node: dict = {}
 
     def use_cp(cid):
         """Materialise a connection point as a node (once); returns its node id."""
@@ -357,32 +401,13 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             used_ids.add(nid)
             cp_map[cid] = nid
             cp_by_node[nid] = cid
+            node_ref[nid] = cid
             p = cp_pool[cid]
             nodes[nid] = _clean({"node_id": nid, "geom": list(p), "node_type": "junction",
                                  "status": "existing", "data_source": "gis", "asset_id": cid,
                                  "notes": "connection point"})
             node_pos[nid] = p
         return cp_map[cid]
-
-    cp_map: dict = {}
-    cp_by_node: dict = {}
-
-    def resolve_id(ref):
-        if not ref:
-            return None
-        if ref in ac_ids:
-            return ref
-        if ref in cp_pool:
-            return use_cp(ref)
-        return None
-
-    def snap(p):
-        """Nearest real or placeholder node within tolerance; connection points compete too."""
-        nid, d1 = grid.nearest(p, tol)
-        cid, d2 = cp_grid.nearest(p, tol)
-        if cid is not None and (d1 is None or d2 < d1):
-            return use_cp(cid)
-        return nid
 
     def new_id(base):
         nid, k = base, 2
@@ -392,12 +417,9 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         used_ids.add(nid)
         return nid
 
-    # ---- conduits --------------------------------------------------------------------------
-    conduits: list = []
+    # ---- sewer segments: parse ----------------------------------------------------------------
+    segs: list = []
     pipe_ids: set = set()
-    inverts: dict = {}               # node_id -> [levels]
-    dn_unmapped = 0
-
     for row in sewers:
         pid = to_id(get(row, "pipe_id"))
         line = _line(row)
@@ -414,50 +436,171 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             rep.warn("pipe_no_geometry", "conduit", pid, "sewer without usable geometry skipped")
             continue
         pipe_ids.add(pid)
+        segs.append({"pid": pid, "row": row, "line": line, "us_id": to_id(get(row, "us_node")),
+                     "ds_id": to_id(get(row, "ds_node")), "ends": [None, None]})
+
+    # ---- connectivity by geometry ---------------------------------------------------------------
+    # 1. segment end within tolerance of a chamber, else of a connection point
+    for s in segs:
+        for e, pt in ((0, s["line"][0]), (1, s["line"][-1])):
+            nid, d1 = grid.nearest(pt, tol)
+            cid, d2 = cp_grid.nearest(pt, tol)
+            if nid is not None and (cid is None or d1 <= d2):
+                s["ends"][e] = nid
+            elif cid is not None:
+                s["ends"][e] = use_cp(cid)
+    # 2. connection point named by id but slightly further away than the tolerance
+    cp_reach = max(4 * tol, 2.0)
+    for s in segs:
+        for cid in dict.fromkeys(i for i in (s["us_id"], s["ds_id"]) if i in cp_pool and i not in ac_ids):
+            best = None
+            for e, pt in ((0, s["line"][0]), (1, s["line"][-1])):
+                d = _dist(pt, cp_pool[cid])
+                if s["ends"][e] is None and d <= cp_reach and (best is None or d < best[1]):
+                    best = (e, d)
+            if best is not None:
+                s["ends"][best[0]] = use_cp(cid)
+                rep.warn("end_far_from_node", "conduit", s["pid"], f"end is {_fmt(best[1], 2)} m from "
+                         f"connection point {cid} named by id; connected anyway")
+    # 3. remaining ends: coincident ends share a junction, lone ends are dangling
+    cgrid = _Grid(tol)
+    clusters: list = []
+    for si, s in enumerate(segs):
+        for e, pt in ((0, s["line"][0]), (1, s["line"][-1])):
+            if s["ends"][e] is not None:
+                continue
+            k, _d = cgrid.nearest(pt, tol)
+            if k is None:
+                k = len(clusters)
+                clusters.append({"pts": [], "members": []})
+                cgrid.add(k, pt)
+            clusters[k]["pts"].append(pt)
+            clusters[k]["members"].append((si, e))
+    jn, en = 0, 0
+    for cl in clusters:
+        pts = cl["pts"]
+        c = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
+        if len(cl["members"]) >= 2:
+            jn += 1
+            nid, note = new_id(f"J{jn}"), "segment junction"
+            rep.count("junction_nodes")
+        else:
+            en += 1
+            nid, note = new_id(f"E{en}"), "dangling end"
+            rep.count("dangling_ends")
+        nodes[nid] = _clean({"node_id": nid, "geom": list(c), "node_type": "junction",
+                             "status": "existing", "data_source": "gis", "notes": note})
+        node_pos[nid] = c
+        node_ref[nid] = None
+        for si, e in cl["members"]:
+            segs[si]["ends"][e] = nid
+    node_segs: dict = {}
+    for si, s in enumerate(segs):
+        for e in (0, 1):
+            node_segs.setdefault(s["ends"][e], []).append((si, e))
+
+    # ---- direction ----------------------------------------------------------------------------
+    up_end: dict = {}                # segment index -> index (0/1) of its upstream end
+
+    def ref_of(si, e):
+        return node_ref.get(segs[si]["ends"][e])
+
+    groups: dict = {}
+    for si, s in enumerate(segs):
+        groups.setdefault((s["us_id"], s["ds_id"]), []).append(si)
+    for (us_id, ds_id), members in groups.items():
+        mset = set(members)
+        queue: list = []
+        for want_us in (True, False):
+            for si in members:
+                if si in up_end:
+                    continue
+                target = us_id if want_us else ds_id
+                if not target:
+                    continue
+                for e in (0, 1):
+                    if ref_of(si, e) == target:
+                        up_end[si] = e if want_us else 1 - e
+                        queue.append(si)
+                        break
+        idset = {us_id, ds_id}
+        while queue:
+            si = queue.pop(0)
+            up = up_end[si]
+            for e_here, as_up in ((1 - up, True), (up, False)):
+                node = segs[si]["ends"][e_here]
+                if node_ref.get(node) in idset and node_ref.get(node):
+                    continue
+                for sj, e in node_segs.get(node, ()):
+                    if sj in mset and sj not in up_end:
+                        up_end[sj] = e if as_up else 1 - e
+                        queue.append(sj)
+    # hints from already oriented neighbours (any run), repeated until nothing changes
+    changed = True
+    while changed:
+        changed = False
+        for si, s in enumerate(segs):
+            if si in up_end:
+                continue
+            votes = set()
+            for e in (0, 1):
+                has_in = has_out = False
+                for sj, ej in node_segs.get(s["ends"][e], ()):
+                    if sj == si or sj not in up_end:
+                        continue
+                    if up_end[sj] == ej:
+                        has_out = True
+                    else:
+                        has_in = True
+                if has_in != has_out:
+                    votes.add(e if has_in else 1 - e)      # flows out of an inflow-only node / into an outflow-only one
+            if len(votes) == 1:
+                up_end[si] = votes.pop()
+                s["hint"] = True
+                changed = True
+    for si, s in enumerate(segs):
+        if si not in up_end:
+            up_end[si] = 0
+            rep.warn("direction_unknown", "conduit", s["pid"], "flow direction could not be determined from "
+                     "manhole ids or neighbouring sewers; digitised direction kept")
+
+    # ---- conduits --------------------------------------------------------------------------------
+    conduits: list = []
+    outgoing: dict = {}              # node_id -> [us inverts]
+    incoming: dict = {}              # node_id -> [ds inverts]
+    dn_unmapped = 0
+
+    for si, s in enumerate(segs):
+        pid, row, line = s["pid"], s["row"], s["line"]
         notes: list = []
         data_source = "gis"
-
-        # end nodes: by id first, then geometry
-        us = resolve_id(to_id(get(row, "us_node")))
-        ds = resolve_id(to_id(get(row, "ds_node")))
-        # digitising direction (uses whichever id-matched end is available)
-        flipped = False
-        if us is not None:
-            flipped = _dist(node_pos[us], line[-1]) < _dist(node_pos[us], line[0])
-        elif ds is not None:
-            flipped = _dist(node_pos[ds], line[0]) < _dist(node_pos[ds], line[-1])
+        flipped = up_end[si] == 1
         if flipped:
             line = line[::-1]
             rep.count("reversed")
-            rep.warn("direction_reversed", "conduit", pid, "digitised against flow (upstream node nearer the "
-                     "last vertex); geometry reversed")
+            rep.warn("direction_reversed", "conduit", pid, "digitised against flow; geometry reversed")
             notes.append("geometry reversed")
-        for end, nid, pt in (("US", us, line[0]), ("DS", ds, line[-1])):
-            if nid is None:
-                why = "blank" if not to_id(get(row, "us_node" if end == "US" else "ds_node")) else "unmatched"
-                nid = snap(pt)
-                if nid is not None:
-                    rep.count("ends_snapped")
-                    rep.warn("end_snapped", "conduit", pid, f"{end} manhole id {why}; snapped to node {nid} "
-                             f"({_fmt(_dist(pt, node_pos[nid]), 2)} m)")
-                else:
-                    nid = new_id(f"X{pid}_{end}")
-                    nodes[nid] = _clean({"node_id": nid, "geom": list(pt), "node_type": "junction",
-                                         "status": "existing", "data_source": "assumed",
-                                         "notes": f"placeholder: {end} end of {pid} matched no chamber"})
-                    node_pos[nid] = pt
-                    grid.add(nid, pt)
-                    rep.count("placeholder_nodes")
-                    rep.warn("placeholder_node", "conduit", pid, f"{end} manhole id {why} and no node within "
-                             f"{_fmt(tol, 2)} m; placeholder node {nid} created")
-            else:
-                d = _dist(node_pos[nid], pt)
-                if d > tol:
-                    rep.warn("end_far_from_node", "conduit", pid, f"{end} end is {_fmt(d, 2)} m from node {nid}")
-            if end == "US":
-                us = nid
-            else:
-                ds = nid
+        us, ds = s["ends"][up_end[si]], s["ends"][1 - up_end[si]]
+        if s.get("hint"):
+            notes.append("direction from neighbouring sewers")
+
+        # ids are validation only
+        mismatch = []
+        for end, nid, rid in (("US", us, s["us_id"]), ("DS", ds, s["ds_id"])):
+            ref = node_ref.get(nid)
+            if ref is None or ref == rid:
+                continue
+            known = rid in ac_ids or rid in cp_pool
+            if not rid or not known:
+                why = "blank" if not rid else "unmatched"
+                rep.count("ends_snapped")
+                rep.warn("end_snapped", "conduit", pid, f"{end} manhole id {why}; connected to node {nid} "
+                         f"by geometry ({_fmt(_dist(line[0] if end == 'US' else line[-1], node_pos[nid]), 2)} m)")
+            elif ref not in (s["us_id"], s["ds_id"]):
+                mismatch.append(f"{end} end at {nid}")
+        if mismatch:
+            rep.warn("id_mismatch", "conduit", pid, f"{'; '.join(mismatch)}, but the sewer's manhole ids are "
+                     f"{s['us_id'] or '(blank)'} -> {s['ds_id'] or '(blank)'}")
         if us == ds:
             rep.warn("self_loop", "conduit", pid, f"US and DS node are both {us}")
 
@@ -492,9 +635,10 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 if abs(lg - fgrade) / fgrade * 100.0 > opt.grade_tolerance_pct:
                     rep.warn("grade_mismatch", "conduit", pid, f"grade from levels 1 in {lg:.1f} vs "
                              f"{fm.flow_grade} 1 in {_fmt(fgrade, 1)} (>{_fmt(opt.grade_tolerance_pct, 1)}%)")
-        for nid, lv in ((us, ui), (ds, di)):
-            if lv is not None:
-                inverts.setdefault(nid, []).append(lv)
+        if ui is not None:
+            outgoing.setdefault(us, []).append(ui)
+        if di is not None:
+            incoming.setdefault(ds, []).append(di)
 
         # diameter
         dn, internal = opt.default_dn, None
@@ -507,7 +651,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                      f"usable diameter in mm; DN {dn} assumed")
             notes.append(f"DN {dn} assumed (diameter {get(row, 'diameter')!r})")
         else:
-            near = min(std, key=lambda s: (abs(s - draw), s))
+            near = min(std, key=lambda x: (abs(x - draw), x))
             dn = near
             if abs(draw - near) > 1e-6:
                 internal = draw
@@ -517,8 +661,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 if abs(draw - near) / draw > 0.1:
                     rep.warn("dn_far_from_standard", "conduit", pid, msg)
 
-        sewer_type, stype_code = code_lookup("sewer_type", fm.sewer_type, row, codes.get("sewer_type", {}),
-                                             "reticulation", "conduit", pid, "sewer type")
+        sewer_type, _stc = code_lookup("sewer_type", fm.sewer_type, row, codes.get("sewer_type", {}),
+                                       "reticulation", "conduit", pid, "sewer type")
         status, _ = code_lookup("status", fm.status, row, codes.get("status", {}), "existing",
                                 "conduit", pid, "status")
         material, _ = code_lookup("material", fm.material, row, codes.get("material", {}), "other",
@@ -548,13 +692,18 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     # ---- node finishing --------------------------------------------------------------------
     for cid in cp_has_io:
         nodes[cp_map[cid]]["node_type"] = "io_end"
-    for nid, lv in inverts.items():
-        n = nodes[nid]
-        n["invert_level"] = min(lv)
-        n["notes"] = "; ".join(x for x in (n.get("notes"), "invert derived from connected pipes") if x)
+    for nid, n in nodes.items():
+        if nid in outgoing:
+            lv, how = min(outgoing[nid]), "lowest outgoing sewer us invert"
+        elif nid in incoming:
+            lv, how = min(incoming[nid]), "lowest incoming sewer ds invert (no outgoing sewer)"
+        else:
+            continue
+        n["invert_level"] = lv
+        n["notes"] = "; ".join(x for x in (n.get("notes"), f"invert derived from {how}") if x)
         sl = n.get("surface_level")
-        if sl is not None and n["invert_level"] > sl:
-            rep.warn("invert_above_surface", "node", nid, f"invert {n['invert_level']:.3f} is above surface "
+        if sl is not None and lv > sl:
+            rep.warn("invert_above_surface", "node", nid, f"invert {lv:.3f} is above surface "
                      f"level {sl:.3f}")
     rep.count("connection_points_used", len(cp_used))
     rep.count("connection_points_skipped", len(cp_pool) - len(cp_used))

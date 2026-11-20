@@ -76,7 +76,8 @@ def test_sample_rows_basic_mapping():
     n = by_id(model["nodes"], "node_id")
     assert n["A1"]["invert_level"] == 17.459999 and n["A2"]["invert_level"] == 17.450001
     assert n["A1"]["surface_level"] == 20.0 and n["A1"]["node_type"] == "ac" and n["A1"]["data_source"] == "gis"
-    assert "invert derived from connected pipes" in n["A2"]["notes"]
+    assert "invert derived from lowest incoming sewer ds invert" in n["A2"]["notes"]
+    assert "lowest outgoing sewer us invert" in n["A1"]["notes"]
     # both sample sewers disagree with FLOW_GRADE by more than 10%: 1 in 100 vs 120 and 1 in 172 vs 150
     gm = {w.object_id: w.message for w in rep.warnings if w.code == "grade_mismatch"}
     assert set(gm) == {"22030208", "22030223"}
@@ -142,21 +143,22 @@ def test_snapping_blank_and_unmatched_ids():
     # outside tolerance: option respected
     p = pipe("P", [(0.3, 0), (10.2, 0)], None, None, LENGTH=10)
     model, rep = build_model(acs, [], [p], options=ImportOptions(snap_tolerance_m=0.1))
-    assert rep.counts["placeholder_nodes"] == 2
+    assert rep.counts["dangling_ends"] == 2 and "placeholder_nodes" not in rep.counts
 
 
-def test_placeholder_nodes_and_sharing():
+def test_dangling_ends_and_shared_junction():
     acs = [ac("A", 0, 0)]
     p1 = pipe("P1", [(0, 0), (50, 0)], "A", None, LENGTH=50, UPSTREAM=5, DOWNSTREAM=4)
     p2 = pipe("P2", [(50.2, 0), (80, 0)], None, None, LENGTH=30, UPSTREAM=4, DOWNSTREAM=3)
     model, rep = build_model(acs, [], [p1, p2])
     n = by_id(model["nodes"], "node_id")
-    assert "XP1_DS" in n and n["XP1_DS"]["node_type"] == "junction" and n["XP1_DS"]["data_source"] == "assumed"
+    assert not [k for k in n if k.startswith("X")]
     c = by_id(model["conduits"], "conduit_id")
-    assert c["P1"]["ds_node_id"] == "XP1_DS" and c["P2"]["us_node_id"] == "XP1_DS"   # P2 snaps to the placeholder
-    assert c["P2"]["ds_node_id"] == "XP2_DS"
-    assert rep.counts["placeholder_nodes"] == 2 and rep.counts["ends_snapped"] == 1
-    assert n["XP1_DS"]["invert_level"] == 4  # min(4.0 from P1 ds, 4 from P2 us)
+    assert c["P1"]["ds_node_id"] == "J1" and c["P2"]["us_node_id"] == "J1"      # coincident ends share a junction
+    assert n["J1"]["node_type"] == "junction" and n["J1"]["notes"].startswith("segment junction")
+    assert c["P2"]["ds_node_id"] == "E1" and n["E1"]["notes"].startswith("dangling end")
+    assert rep.counts["junction_nodes"] == 1 and rep.counts["dangling_ends"] == 1
+    assert n["J1"]["invert_level"] == 4      # outgoing P2 us invert
 
 
 def test_connection_points():
@@ -267,3 +269,146 @@ def test_native_write_model_errors(tmp_path):
     c = sqlite3.connect(out)
     assert c.execute("select node_id from wwn_nodes").fetchall() == [("B",)]
     c.close()
+
+
+# ------------------------------------------------------------------ segmented runs (real-data shape)
+
+def chamber(pid, x, y, ctype, top=20.0):
+    return {"PACID": pid, "CHAMBER_TY": ctype, "TOPLEV": top, GEOM: (x, y)}
+
+
+def seg(pid, line, us, ds, ui, di, **kw):
+    return pipe(pid, line, us, ds, UPSTREAM=ui, DOWNSTREAM=di, LENGTH=None, FLOW_GRADE=None, **kw)
+
+
+def segmented_world():
+    """A -> S1 -> J1 -> S2 -> J2 -> S3 -> B (one run A->B in three segments); branch run X -> J1 (X is a
+    maintenance shaft); an inspection-shaft end feeding J2. S2 and BR1 are digitised against the flow."""
+    acs = [chamber("A", 0, 0, "M- standard manhole"), chamber("B", 300, 0, "M- standard manhole", 15.0),
+           chamber("X", 100, 80, "J- maintenance shaft"),
+           {"PACID": None, "CHAMBER_TY": "I- inspection shaft", "TOPLEV": 19.0, GEOM: (200, 60)}]
+    sew = [seg("S1", [(0, 0), (100, 0)], "A", "B", 10.0, 9.7),
+           seg("S2", [(200, 0), (100, 0)], "A", "B", 9.7, 9.4),
+           seg("S3", [(200, 0), (300, 0)], "A", "B", 9.4, 9.1),
+           seg("BR1", [(100.2, 0), (100, 80)], "X", "B", 9.9, 9.75),
+           seg("BR2", [(200, 60), (200, 0.3)], None, "B", 9.6, 9.45)]
+    return acs, sew
+
+
+def test_segmented_run_junctions_direction_and_inverts():
+    acs, sew = segmented_world()
+    model, rep = build_model(acs, [], sew)
+    n, c = by_id(model["nodes"], "node_id"), by_id(model["conduits"], "conduit_id")
+    assert not [k for k in n if k.startswith("X") and k != "X"]            # no per-pipe placeholders
+    assert sorted(n) == ["A", "B", "E1", "J1", "J2", "X"]
+    assert rep.counts["junction_nodes"] == 2 and rep.counts["dangling_ends"] == 1
+    assert n["J1"]["notes"].startswith("segment junction") and n["E1"]["notes"].startswith("dangling end")
+    assert n["X"]["node_type"] == "ms" and n["A"]["node_type"] == "ac"
+    assert [(c[k]["us_node_id"], c[k]["ds_node_id"]) for k in ("S1", "S2", "S3", "BR1", "BR2")] == [
+        ("A", "J1"), ("J1", "J2"), ("J2", "B"), ("X", "J1"), ("E1", "J2")]
+    # S2 and BR1 were digitised against the flow and are reversed; the others are untouched
+    assert c["S2"]["geom"][0] == [100, 0] and c["BR1"]["geom"][0] == [100, 80] and c["S1"]["geom"][0] == [0, 0]
+    assert rep.counts["reversed"] == 2
+    assert sorted(w.object_id for w in rep.warnings if w.code == "direction_reversed") == ["BR1", "S2"]
+    # segment levels are used as is after orientation
+    assert (c["S2"]["us_invert"], c["S2"]["ds_invert"]) == (9.7, 9.4)
+    # node invert: lowest outgoing us invert, else lowest incoming ds invert
+    assert n["A"]["invert_level"] == 10.0 and n["J1"]["invert_level"] == 9.7 and n["J2"]["invert_level"] == 9.4
+    assert n["X"]["invert_level"] == 9.9 and n["B"]["invert_level"] == 9.1 and n["E1"]["invert_level"] == 9.6
+    assert "incoming" in n["B"]["notes"] and "outgoing" in n["J1"]["notes"]
+    # the inspection shaft is skipped silently (counted), ids are not required for it
+    codes = codes_of(rep)
+    assert "ac_no_id" not in codes and rep.counts["inspection_shafts_skipped"] == 1
+    assert "skipped 1 inspection shaft(s)" in "\n".join(rep.summary_lines()).lower()
+    assert "id_mismatch" not in codes and "end_far_from_node" not in codes
+    assert codes.count("direction_unknown") == 1      # BR2 has no usable id and only a dangling end
+
+
+def test_segmented_run_passes_model_check(tmp_path):
+    native = pytest.importorskip("wwnet_native")
+    if not hasattr(native, "write_model"):
+        pytest.skip("wwnet_native too old (no write_model)")
+    acs, sew = segmented_world()
+    model, _ = build_model(acs, [], sew)
+    out = tmp_path / "seg.gpkg"
+    native.write_model(str(out), imp.model_json(model))
+    issues = native.check(str(out), False)
+    assert [i for i in issues if i["severity"] == "error"] == [], issues
+    got = {i["code"] for i in issues}
+    assert not got & {"INVERT_MISMATCH", "BIFURCATION", "GEOM_ENDPOINT_MISMATCH", "ORPHAN_NODE"}, issues
+
+
+def test_chamber_type_codes():
+    acs = [chamber("M1", 0, 0, "M- standard manhole"), chamber("J1x", 10, 0, "J- maintenance shaft"),
+           chamber("I1", 20, 0, "I- inspection shaft"), chamber("Q1", 30, 0, "Q- strange"),
+           {"PACID": "", "CHAMBER_TY": "I- inspection shaft", GEOM: (40, 0)},
+           {"PACID": "", "CHAMBER_TY": "M- standard manhole", GEOM: (50, 0)}]
+    model, rep = build_model(acs, [], [])
+    n = by_id(model["nodes"], "node_id")
+    assert sorted(n) == ["J1x", "M1", "Q1"]
+    assert (n["M1"]["node_type"], n["J1x"]["node_type"], n["Q1"]["node_type"]) == ("ac", "ms", "ac")
+    assert rep.counts["inspection_shafts_skipped"] == 2
+    assert rep.unknown_codes == {"CHAMBER_TY": {"Q": 1}}
+    assert codes_of(rep).count("unknown_code") == 1 and codes_of(rep).count("ac_no_id") == 1
+    # field role unmapped: everything is an access chamber, no warnings about types
+    model, rep = build_model(acs[:4], [], [], FieldMap(chamber_type=""))
+    assert {x["node_type"] for x in model["nodes"]} == {"ac"} and "unknown_code" not in codes_of(rep)
+    assert FieldMap.from_config().chamber_type == "CHAMBER_TY"
+
+
+def test_id_mismatch_warned_once_per_segment():
+    acs = [ac("A", 0, 0), ac("B", 10, 0), ac("C", 20, 0)]
+    p = seg("P", [(0, 0), (10, 0)], "A", "C", 5.0, 4.9)      # ends at A and B; B is neither US nor DS id
+    model, rep = build_model(acs, [], [p])
+    mm = [w for w in rep.warnings if w.code == "id_mismatch"]
+    assert len(mm) == 1 and mm[0].object_id == "P"
+    c = model["conduits"][0]
+    assert (c["us_node_id"], c["ds_node_id"]) == ("A", "B")        # geometry wins
+
+
+def test_direction_from_neighbours_and_unknown():
+    acs = [ac("A", 0, 0), ac("B", 100, 0)]
+    # middle segment has no ids at all, digitised against the flow; neighbours give the hint
+    sew = [seg("P1", [(0, 0), (50, 0)], "A", "B", 5.0, 4.5), seg("P3", [(75, 0), (100, 0)], "A", "B", 4.2, 4.0),
+           seg("P2", [(75, 0), (50, 0)], None, None, 4.5, 4.2)]
+    model, rep = build_model(acs, [], sew)
+    c = by_id(model["conduits"], "conduit_id")
+    assert c["P2"]["geom"][0] == [50, 0] and "direction from neighbouring" in c["P2"]["notes"]
+    assert "direction_unknown" not in codes_of(rep) and rep.counts["reversed"] == 1
+    # isolated segment without ids: digitised direction kept with a warning
+    model, rep = build_model([], [], [seg("Z", [(0, 0), (10, 0)], None, None, 5.0, 4.0)])
+    assert model["conduits"][0]["geom"][0] == [0, 0] and "direction_unknown" in codes_of(rep)
+    assert "reversed" not in rep.counts
+
+
+def test_maintype_e_is_assumed_not_unknown():
+    acs = [ac("A", 0, 0), ac("B", 10, 0)]
+    rows = [pipe(f"P{i}", [(0, 0), (10, 0)], "A", "B", MAINTYPE="E- ?") for i in range(3)]
+    model, rep = build_model(acs, [], rows)
+    assert {c["sewer_type"] for c in model["conduits"]} == {"reticulation"}
+    assert not rep.unknown_codes and "unknown_code" not in codes_of(rep)
+    assert rep.assumed_codes == {"MAINTYPE": {"E": 3}}
+    lines = [x for x in rep.summary_lines() if x.startswith("Assumed MAINTYPE")]
+    assert len(lines) == 1 and "'E' x3" in lines[0]
+
+
+def test_warning_summary_spread_across_codes():
+    rep = imp.ImportReport()
+    for i in range(28):
+        rep.warn("end_far_from_node", "conduit", f"P{i}", "far")
+    for i in range(3):
+        rep.warn("grade_mismatch", "conduit", f"G{i}", "grade")
+    rep.warn("dn_not_mapped", "import", "", "no dn")
+    lines = rep.summary_lines(max_warnings=40)
+    text = "\n".join(lines)
+    assert "32 warning(s): dn_not_mapped x1, end_far_from_node x28, grade_mismatch x3" in text
+    ex = rep.example_warnings(40)
+    assert len(ex) == 5 + 3 + 1 and [w.code for w in ex].count("end_far_from_node") == 5
+    assert ex[0].code == "dn_not_mapped"
+    assert "... 23 more warning(s)" in text
+    many = imp.ImportReport()
+    for k in range(12):
+        for i in range(9):
+            many.warn(f"code{k}", "conduit", str(i), "m")
+    assert len(many.example_warnings(40)) == 40
+    assert max(sum(w.code == f"code{k}" for w in many.example_warnings(40)) for k in range(12)) <= 5

@@ -35,6 +35,7 @@ its fields with the Water Corporation names that exist in it; change any of them
 | Role | Layer | Default field | Used for |
 |---|---|---|---|
 | ac_id / ac_surface_level | access chambers | `PACID` / `TOPLEV` | `node_id`, `surface_level` (lid, m AHD) |
+| chamber_type | access chambers | `CHAMBER_TY` | `M` -> `ac`, `J` -> `ms`, `I` -> skipped; optional (missing field: all `ac`) |
 | cp_id | connection points | `ID` | node id when referenced by a sewer |
 | pipe_id | sewers | `ID` | `conduit_id`, `asset_id` |
 | us_node / ds_node | sewers | `US_MANHOLE_ID` / `DS_MANHOLE_ID` | end nodes (id match first) |
@@ -47,14 +48,32 @@ its fields with the Water Corporation names that exist in it; change any of them
 
 **Rules and assumptions**
 - Coded values use the text before the first `-` (`A- actual` -> `A`); maps are in the TOML. Unknown codes fall back
-  (status `existing`, type `reticulation`, material `other`) with a warning and are listed with counts.
-- Nodes: every access chamber (status `existing`, data_source `gis`). Chambers have no invert, so
-  `invert_level` = lowest connected sewer end level (noted "invert derived from connected pipes").
-- Connection points become nodes only when a sewer references them (by id or snapping): `io_end` if an `io` sewer
-  touches them, else `junction`. Unreferenced ones are not imported (counted).
-- Blank/unmatched manhole ids: the end snaps to the nearest node within the tolerance, else a placeholder
-  junction `X<sewer id>_US|_DS` (data_source `assumed`) is created, with a warning.
-- A sewer digitised against its US/DS ids (US node nearer the last vertex) is reversed, with a warning.
+  (status `existing`, type `reticulation`, material `other`, chamber `ac`) with a warning and are listed with counts.
+  `MAINTYPE` `E` (meaning unconfirmed) is *assumed* reticulation: one "Assumed MAINTYPE codes" summary line, no
+  per-sewer warning.
+- Chambers: `CHAMBER_TY` `M` = standard manhole -> `ac`, `J` = maintenance shaft -> `ms`, `I` = inspection shaft ->
+  **skipped silently** (they sit at sewer ends and have no `PACID`; only counted: "skipped N inspection shaft(s)").
+  A non-`I` chamber without an id warns (`ac_no_id`).
+- **Connectivity is by geometry.** Gravity sewers are segmented between chambers (split at junctions and
+  connections) and every segment of a run carries the run's `US_MANHOLE_ID` / `DS_MANHOLE_ID`, so the ids are only
+  used for direction and validation. A segment end within the snap tolerance (0.5 m) of a chamber connects to it,
+  else of a connection point; remaining coincident ends share a junction node `J<n>` ("segment junction"); a lone end
+  becomes a dangling end node `E<n>`. No per-sewer placeholders are created.
+- Direction: for each (US id, DS id) run the chain of segments is oriented from the end at the US chamber (or the
+  DS chamber) through the shared junctions; leftovers take the direction of already oriented neighbours, else the
+  digitised direction is kept (`direction_unknown`). Only segments really flipped are reversed
+  (`direction_reversed`). A segment end at a chamber that is neither its US nor DS id warns `id_mismatch`.
+- Each segment keeps its own `UPSTREAM`/`DOWNSTREAM` levels as `us_invert`/`ds_invert`. Node `invert_level` = lowest
+  `us_invert` of the outgoing segments, else the lowest `ds_invert` of the incoming ones (noted on the node).
+  Falls into a node (incoming invert above the node invert, e.g. falls through manholes) are normal and not
+  reported; the model check only flags an incoming invert below the node (warning), a fall of more than 5 cm into a
+  maintenance shaft (info `FALL_THROUGH_MS`) and an outgoing invert off the node invert (info).
+- Connection points become nodes only when a sewer end touches them (or names them by id and is within 2 m):
+  `io_end` if an `io` sewer touches them, else `junction`. **The connection point layer is never read in full**:
+  only points whose id appears as a sewer US/DS id not matched by a chamber (`ID IN (...)`, 900 ids per query) and
+  points intersecting the sewer extent + 2 m (`SearchCursor` spatial filter; where-clause only if the installed
+  arcpy rejects it) are read. A selection in the layer is honoured with *Use selected features only*. With sewers
+  selected and no chambers selected, chambers are read the same way (extent + 2 m).
 - Grade from levels is compared with `FLOW_GRADE`; a difference over 10 % warns with both values. Grade source
   `field` derives a missing invert from the other invert, length and `FLOW_GRADE` (data_source `assumed`); it never
   overrides levels that are present.
@@ -63,8 +82,13 @@ its fields with the Water Corporation names that exist in it; change any of them
   loud warning is printed: capacity results are meaningless until real diameters are supplied.**
 - Location is left at the schema default (`road_reserve`); `PURPOSE`/`PLANSET` go to notes.
 - Coordinates are read with `spatial_reference` EPSG:7850. If a source is GDA94 (28348-28358, 4283 or a GDA 1994
-  name) `arcpy.env.geographicTransformations` is set to `GDA_1994_To_GDA2020_NTv2_Cons_Conf` (a failure only warns).
-  Curved segments are read as their vertices.
+  name) `arcpy.env.geographicTransformations` is set to a **direct** GDA94 -> GDA2020 transformation chosen from
+  `arcpy.ListTransformations`: the name must contain `GDA_1994_To_GDA2020` and neither `AGD` nor `+` (composites via
+  AGD66 are wrong); preference NTv2 conformal-and-distortion, then NTv2 conformal, then any other direct one. None
+  listed (or a failure to set it) only warns. Curved segments are read as their vertices.
+- Messages: counts, then a warning summary by code, then up to 40 example warnings (max 5 per code). Model-check
+  findings are never `AddError` (Pro would mark a finished tool "Failed"): error-severity ones are warnings prefixed
+  `ERROR:`; `AddError` is only for real failures (exceptions). The same applies to Check Model.
 - After writing, `wwnet_native.check` runs; counts and the first 50 issues are printed, then the layers are added.
 
 ## Install

@@ -1,5 +1,5 @@
 //! Structural and data-quality validation of a model.
-use crate::model::{Model, Node};
+use crate::model::{Model, Node, NodeType};
 use crate::network::{EdgeKind, Network};
 use petgraph::algo::tarjan_scc;
 use petgraph::Direction;
@@ -36,6 +36,7 @@ pub struct Issue {
 
 const ENDPOINT_TOL_M: f64 = 0.5;
 const INVERT_TOL_M: f64 = 0.01;
+const MS_FALL_TOL_M: f64 = 0.05;
 
 struct Sink(Vec<Issue>);
 
@@ -209,20 +210,53 @@ pub fn validate(model: &Model, net: &Network) -> Vec<Issue> {
             }
             if let Some(ni) = n.invert_level {
                 let diff = inv - ni;
-                if diff < -INVERT_TOL_M {
+                if end == "ds" {
+                    // incoming conduit: a fall into the node (ds invert above node invert) is normal
+                    if diff < -INVERT_TOL_M {
+                        o.add(
+                            Severity::Warning,
+                            "INVERT_BELOW_NODE",
+                            "conduit",
+                            id,
+                            format!(
+                                "ds invert {inv:.3} is {:.3} m below invert {ni:.3} of node '{}' (adverse step)",
+                                -diff, n.node_id
+                            ),
+                        );
+                    } else if diff > MS_FALL_TOL_M && n.node_type == NodeType::Ms {
+                        o.add(
+                            Severity::Info,
+                            "FALL_THROUGH_MS",
+                            "conduit",
+                            id,
+                            format!(
+                                "fall through maintenance shaft '{}': ds invert {inv:.3} is {diff:.3} m above node invert {ni:.3}",
+                                n.node_id
+                            ),
+                        );
+                    }
+                } else if diff < -INVERT_TOL_M {
                     o.add(
                         Severity::Warning,
                         "INVERT_BELOW_NODE",
                         "conduit",
                         id,
                         format!(
-                            "{end} invert {inv:.3} is {:.3} m below invert {ni:.3} of node '{}'",
+                            "us invert {inv:.3} is {:.3} m below invert {ni:.3} of node '{}'",
                             -diff, n.node_id
                         ),
                     );
                 } else if diff > INVERT_TOL_M {
-                    o.add(Severity::Info, "INVERT_MISMATCH", "conduit", id,
-                        format!("{end} invert {inv:.3} is {diff:.3} m above invert {ni:.3} of node '{}'", n.node_id));
+                    o.add(
+                        Severity::Info,
+                        "INVERT_MISMATCH",
+                        "conduit",
+                        id,
+                        format!(
+                            "us invert {inv:.3} is {diff:.3} m above invert {ni:.3} of node '{}'",
+                            n.node_id
+                        ),
+                    );
                 }
             }
         }

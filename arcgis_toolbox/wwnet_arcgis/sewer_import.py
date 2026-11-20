@@ -2,19 +2,23 @@
 pure-Python importer (``wwnet_shared.core.importer``) and write a GeoPackage via ``wwnet_native``."""
 from __future__ import annotations
 
-from . import shared
+import re
+
+from . import gpkg, shared
 
 TARGET_EPSG = 7850
-# Preference order when choosing a GDA94 -> GDA2020 transformation from the ones ArcGIS lists.
-# Names are matched as substrings; the actual name always comes from arcpy.ListTransformations.
-TRANSFORM_PREFERENCE = ("NTV2_CONFORMAL_AND_DISTORTION", "NTV2_CD", "NTV2_CONFORMAL", "NTV2", "")
 MAX_ISSUE_LINES = 50
-MAX_WARNING_LINES = 60
+MAX_WARNING_LINES = 40
+EXTENT_BUFFER_M = 2.0           # sewer extent is grown by this much when reading chambers / connection points
+ID_CHUNK = 900                  # ids per `ID IN (...)` query
+MAX_ID_LOOKUP = 5000            # more referenced-but-unmatched ids than this are not looked up in the CP layer
+_NUMERIC_TYPES = ("Integer", "SmallInteger", "BigInteger", "Double", "Single", "OID")
 
 #: (field role, layer key, parameter label, required)  -- one Field parameter per role, in this order
 FIELD_ROLES = [
     ("ac_id", "ac", "Access chamber ID field", True),
     ("ac_surface_level", "ac", "Access chamber lid level field (m AHD)", False),
+    ("chamber_type", "ac", "Access chamber type field (M / J / I)", False),
     ("cp_id", "cp", "Connection point ID field", False),
     ("pipe_id", "sewer", "Sewer ID field", True),
     ("us_node", "sewer", "Sewer upstream chamber ID field", False),
@@ -128,9 +132,7 @@ def _line_coords(shape):
     return pts
 
 
-def read_features(arcpy, src, roles_fields: dict, kind: str, label: str, use_selected: bool, msgs) -> list:
-    """List of {source field: value, GEOM: coords} read with spatial_reference EPSG:7850."""
-    GEOM = importer().GEOM
+def _columns(arcpy, src, roles_fields: dict, label: str):
     names = layer_field_names(arcpy, src)
     lower = {n.lower(): n for n in names}
     cols, seen = [], set()
@@ -144,11 +146,15 @@ def read_features(arcpy, src, roles_fields: dict, kind: str, label: str, use_sel
         if actual not in seen:
             seen.add(actual)
             cols.append(actual)
+    return cols
+
+
+def _rows(arcpy, cursor_src, cols, kind: str, **kw) -> list:
+    GEOM = importer().GEOM
     token = "SHAPE@XY" if kind == "point" else "SHAPE@"
-    cursor_src = _cursor_source(arcpy, src, use_selected, msgs, label)
     out = []
     sr = arcpy.SpatialReference(TARGET_EPSG)
-    with arcpy.da.SearchCursor(cursor_src, cols + [token], spatial_reference=sr) as cur:
+    with arcpy.da.SearchCursor(cursor_src, cols + [token], spatial_reference=sr, **kw) as cur:
         for row in cur:
             d = dict(zip(cols, row[:-1]))
             shape = row[-1]
@@ -159,7 +165,120 @@ def read_features(arcpy, src, roles_fields: dict, kind: str, label: str, use_sel
             else:
                 d[GEOM] = _line_coords(shape)
             out.append(d)
+    return out
+
+
+def selection_count(src) -> int:
+    try:
+        sel = src.getSelectionSet() if hasattr(src, "getSelectionSet") else None
+    except Exception:  # noqa: BLE001
+        sel = None
+    return len(sel) if sel else 0
+
+
+def read_features(arcpy, src, roles_fields: dict, kind: str, label: str, use_selected: bool, msgs) -> list:
+    """List of {source field: value, GEOM: coords} read with spatial_reference EPSG:7850."""
+    cols = _columns(arcpy, src, roles_fields, label)
+    cursor_src = _cursor_source(arcpy, src, use_selected, msgs, label)
+    out = _rows(arcpy, cursor_src, cols, kind)
     msgs.info(f"{label}: read {len(out)} feature(s).")
+    return out
+
+
+def rows_extent(rows: list, buffer_m: float = EXTENT_BUFFER_M):
+    """(xmin, ymin, xmax, ymax) of the geometry of `rows` (points or lines) grown by `buffer_m`, or None."""
+    GEOM = importer().GEOM
+    xs, ys = [], []
+    for r in rows:
+        g = r.get(GEOM)
+        if not g:
+            continue
+        pts = [g] if isinstance(g[0], (int, float)) else g
+        for p in pts:
+            xs.append(p[0])
+            ys.append(p[1])
+    if not xs:
+        return None
+    return (min(xs) - buffer_m, min(ys) - buffer_m, max(xs) + buffer_m, max(ys) + buffer_m)
+
+
+def extent_polygon(arcpy, ext):
+    sr = arcpy.SpatialReference(TARGET_EPSG)
+    x0, y0, x1, y1 = ext
+    pts = [arcpy.Point(x, y) for x, y in ((x0, y0), (x0, y1), (x1, y1), (x1, y0), (x0, y0))]
+    return arcpy.Polygon(arcpy.Array(pts), sr)
+
+
+def read_in_extent(arcpy, src, roles_fields: dict, kind: str, label: str, ext, msgs, where=None):
+    """Read only the features intersecting `ext` (spatial filter on the data source). Returns None, after a
+    message, when the installed arcpy cannot do that (caller decides on a fallback)."""
+    cols = _columns(arcpy, src, roles_fields, label)
+    cursor_src = _cursor_source(arcpy, src, False, msgs, label)
+    try:
+        return _rows(arcpy, cursor_src, cols, kind, where_clause=where,
+                     spatial_filter=extent_polygon(arcpy, ext), spatial_relationship="INTERSECTS")
+    except TypeError:
+        msgs.warn(f"{label}: this ArcGIS version does not support a spatial filter on SearchCursor.")
+        return None
+
+
+def _id_literals(arcpy, src, id_field: str, ids) -> list:
+    """SQL literals for `ids`, matching the id field's type (text is quoted, numbers are not)."""
+    ftype = ""
+    for f in arcpy.ListFields(src):
+        if f.name.lower() == id_field.lower():
+            ftype = getattr(f, "type", "")
+    if ftype in _NUMERIC_TYPES:
+        return [i for i in ids if re.fullmatch(r"-?\d+", i)]
+    return [gpkg.sql_quote(i) for i in ids]
+
+
+def read_connection_points(arcpy, src, roles_fields: dict, id_field: str, ref_ids, ext, use_selected: bool,
+                           msgs, label: str = "Connection points") -> list:
+    """Connection points are never read in full (the layer can hold ~1e6 features). Reads (a) those whose id
+    is in `ref_ids` (sewer end ids not matched by a chamber) and (b) those within `ext` (sewer extent grown
+    by 2 m). A selection in the layer is honoured when `use_selected`."""
+    GEOM = importer().GEOM
+    if use_selected and selection_count(src):
+        return read_features(arcpy, src, roles_fields, "point", label, True, msgs)
+    cols = _columns(arcpy, src, roles_fields, label)
+    cursor_src = _cursor_source(arcpy, src, False, msgs, label)
+    actual_id = next(c for c in cols if c.lower() == id_field.lower())
+    out, seen = [], set()
+
+    def add(rows):
+        n = 0
+        for r in rows:
+            k = str(r.get(actual_id))
+            if k not in seen:
+                seen.add(k)
+                out.append(r)
+                n += 1
+        return n
+
+    ids = sorted(set(ref_ids or ()))
+    n_id = 0
+    if len(ids) > MAX_ID_LOOKUP:
+        msgs.warn(f"{label}: {len(ids)} referenced ids are not chambers; not looking them up by id "
+                  f"(limit {MAX_ID_LOOKUP}), using the sewer extent only.")
+        ids = []
+    lits = _id_literals(arcpy, src, actual_id, ids)
+    delim = arcpy.AddFieldDelimiters(cursor_src, actual_id)
+    for i in range(0, len(lits), ID_CHUNK):
+        where = f"{delim} IN ({', '.join(lits[i:i + ID_CHUNK])})"
+        n_id += add(_rows(arcpy, cursor_src, cols, "point", where_clause=where))
+    n_ext = 0
+    if ext is not None:
+        got = read_in_extent(arcpy, src, roles_fields, "point", label, ext, msgs)
+        if got is None:
+            msgs.warn(f"{label}: read by id only; connection points that are only located by geometry "
+                      "will be missing.")
+        else:
+            n_ext = add(got)
+    msgs.info(f"{label}: read {len(out)} feature(s) by query (not the whole layer): {n_id} matching "
+              f"{len(lits)} sewer end id(s), {n_ext} more within the sewer extent +{EXTENT_BUFFER_M:g} m.")
+    for r in out:
+        r.setdefault(GEOM, None)
     return out
 
 
@@ -168,13 +287,15 @@ def roles_for(layer_key: str, fields: dict) -> dict:
 
 
 def report_to_messages(msgs, rep, max_warnings: int = MAX_WARNING_LINES):
+    """Summary by code first (info), then example warnings spread over the codes (max 5 per code)."""
     for line in rep.summary_lines(max_warnings=0):
         msgs.info(line)
-    ordered = sorted(rep.warnings, key=lambda w: (w.object_type != "import", w.code))
-    for w in ordered[:max_warnings]:
+    ex = rep.example_warnings(max_warnings)
+    for w in ex:
         msgs.warn(str(w))
-    if len(ordered) > max_warnings:
-        msgs.warn(f"... {len(ordered) - max_warnings} more import warning(s) not shown.")
+    if len(rep.warnings) > len(ex):
+        msgs.warn(f"... {len(rep.warnings) - len(ex)} more import warning(s) not shown (see the counts by code "
+                  "above).")
     if rep.infos:
         msgs.info(f"{len(rep.infos)} diameter(s) mapped to the nearest standard DN (raw value kept as the "
                   f"internal diameter), e.g. {rep.infos[0]}")
@@ -191,15 +312,29 @@ def native_with_write():
     return native
 
 
+def _tnorm(name: str) -> str:
+    return str(name).upper().replace(" ", "_")
+
+
 def choose_gda_transformation(arcpy, from_sr) -> str:
-    """Pick a GDA94 -> GDA2020 transformation from those ArcGIS actually has, preferring the NTv2
-    conformal-and-distortion grid. Returns '' if none is listed."""
+    """Pick a DIRECT GDA94 -> GDA2020 transformation from those ArcGIS lists: the name must contain
+    GDA_1994_TO_GDA2020 and neither 'AGD' nor '+' (composites go via AGD66 and are wrong). Preference:
+    NTv2 conformal-and-distortion, then NTv2 conformal, then any other direct one. '' if none."""
     try:
         names = list(arcpy.ListTransformations(from_sr, arcpy.SpatialReference(TARGET_EPSG)) or [])
     except Exception:  # noqa: BLE001
         return ""
-    for pref in TRANSFORM_PREFERENCE:
-        for n in names:
-            if pref in n.upper().replace(" ", "_"):
+    direct = [n for n in names if "GDA_1994_TO_GDA2020" in _tnorm(n) and "AGD" not in _tnorm(n) and "+" not in n]
+
+    def ntv2(n):
+        return "NTV2" in _tnorm(n)
+
+    def cd(n):
+        u = _tnorm(n)
+        return "CONFORMAL_AND_DISTORTION" in u or re.search(r"(^|_)CD($|_)", u) is not None
+
+    for ok in (lambda n: ntv2(n) and cd(n), lambda n: ntv2(n) and "CONFORMAL" in _tnorm(n), lambda n: True):
+        for n in direct:
+            if ok(n):
                 return n
     return ""

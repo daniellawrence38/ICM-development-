@@ -64,10 +64,9 @@ def test_add_model_rejects_non_wwnet_file(fake_arcpy, tmp_path):
 def test_check_model_messages_and_table(fake_arcpy, wwnet_exe, demo_gpkg, tmp_path):
     a, _ = mk(fake_arcpy, demo_gpkg)
     issues = tools_impl.check_model(a, Messages(a), demo_gpkg, str(tmp_path / "o.gdb" / "issues"), wwnet_exe)
-    assert len(issues) == 1
-    assert ("info", "INVERT_MISMATCH conduit P05: ds invert 23.550 is 0.300 m above invert 23.250 of node 'N06'") in a.log
-    assert any("0 error(s), 0 warning(s), 1 info" in t for _, t in a.log)
-    assert len(a.inserted) == 1 and a.inserted[0][1] == "INVERT_MISMATCH"
+    assert issues == []                      # P05 falls into N06 (normal): no INVERT_MISMATCH any more
+    assert any("0 error(s), 0 warning(s), 0 info" in t for _, t in a.log)
+    assert a.inserted == []
     assert ("table", str(tmp_path / "o.gdb"), "issues") in a.added
 
 
@@ -77,7 +76,9 @@ def test_report_issues_routes_severity(fake_arcpy):
            dict(severity="warning", code="W", object_type="node", object_id="2", clause="c", message="m")]
     c = tools_impl.report_issues(Messages(a), iss)
     assert c == {"error": 1, "warning": 1, "info": 0}
-    assert [lv for lv, _ in a.log] == ["error", "warn"]
+    # error-severity data issues are warnings with an ERROR: prefix: AddError would fail the tool in Pro
+    assert a.log == [("warn", "ERROR: E node 1: m"), ("warn", "W node 2 (c): m")]
+    assert not [lv for lv, _ in a.log if lv == "error"]
 
 
 def test_run_design_selects_failed(fake_arcpy, wwnet_exe, demo_gpkg):

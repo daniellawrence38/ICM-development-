@@ -115,6 +115,21 @@ class _SrcCursor(_MemCursor):
             yield out
 
 
+def _in_bbox(g, x0, y0, x1, y1):
+    pts = [g] if isinstance(g[0], (int, float)) else g
+    if isinstance(g[0], (int, float)):
+        return x0 <= g[0] <= x1 and y0 <= g[1] <= y1
+    xs, ys = [p[0] for p in pts], [p[1] for p in pts]
+    return not (max(xs) < x0 or min(xs) > x1 or max(ys) < y0 or min(ys) > y1)
+
+
+class FakePolygon:
+    def __init__(self, pts, sr=None):
+        self.pts, self.spatialReference = list(pts), sr
+        xs, ys = [p.X for p in self.pts], [p.Y for p in self.pts]
+        self.bbox = (min(xs), min(ys), max(xs), max(ys))
+
+
 class FakeEditor:
     instances: list = []
 
@@ -174,6 +189,9 @@ def make_fake(layers=None, map_name="Map"):
     a.AddError = lambda t: a.log.append(("error", t))
     a.AddFieldDelimiters = lambda ds, f: f'"{f}"'
     a.Parameter = FakeParameter
+    a.Point = lambda x, y: NS(X=x, Y=y)
+    a.Array = lambda pts=None: list(pts or [])
+    a.Polygon = FakePolygon
 
     a.sources = {}   # data source path -> {"fields": [(name, type)], "rows": [dict], "sr": NS(...)}
     a.env = NS(overwriteOutput=False, geographicTransformations=None)
@@ -231,12 +249,35 @@ def make_fake(layers=None, map_name="Map"):
         def __exit__(self, *e):
             return False
 
-    def search(ds, f, where_clause=None, spatial_reference=None):
+    a.cursor_log = []                  # one dict per synthetic-source read: where / spatial filter / count
+    a.spatial_filter_supported = True  # False: SearchCursor raises TypeError for spatial_filter
+
+    def where_match(where, row):
+        """Only `"F" IN (...)` (as built by the tool) is understood; anything else matches every row."""
+        m = re.fullmatch(r'\s*"?(\w+)"?\s+IN\s*\((.*)\)\s*', where or "", re.S)
+        if not m:
+            return True
+        vals = [v.strip().strip("'").replace("''", "'") for v in re.findall(r"'(?:[^']|'')*'|[^,\s]+", m.group(2))]
+        return str(row.get(m.group(1))) in vals
+
+    def search(ds, f, where_clause=None, spatial_reference=None, spatial_filter=None,
+               spatial_relationship=None):
         src = src_of(ds)
         if src is not None:                       # synthetic source layer (Import Sewer Data tests)
+            if spatial_filter is not None and not a.spatial_filter_supported:
+                raise TypeError("SearchCursor() got an unexpected keyword argument 'spatial_filter'")
             a.cursor_calls.append((f, spatial_reference))
             sel = ds.getSelectionSet() if hasattr(ds, "getSelectionSet") else None
             rows = [r for i, r in enumerate(src["rows"], 1) if not sel or i in sel]
+            if where_clause:
+                rows = [r for r in rows if where_match(where_clause, r)]
+            if spatial_filter is not None:
+                x0, y0, x1, y1 = spatial_filter.bbox
+                rows = [r for r in rows if r.get("_geom") is not None and _in_bbox(r["_geom"], x0, y0, x1, y1)]
+            a.cursor_log.append({"source": getattr(ds, "dataSource", ds), "where": where_clause,
+                                 "spatial_filter": spatial_filter, "relationship": spatial_relationship,
+                                 "selected": bool(sel), "rows": len(rows),
+                                 "full_scan": not where_clause and spatial_filter is None and not sel})
             return _SrcCursor(rows, f)
         if ds in a.memory:
             return _MemCursor(a.memory[ds]["rows"], f)

@@ -4,7 +4,7 @@
 # An empty string means "not mapped" (the role is skipped / a default is assumed, with a warning).
 
 [options]
-snap_tolerance_m = 0.5          # snap a pipe end with no/unknown manhole id to a node within this distance
+snap_tolerance_m = 0.5          # a sewer segment end within this distance of a chamber / connection point / another end is connected
 grade_source = "levels"         # "levels" | "field": field = derive a missing invert from FLOW_GRADE and length
 grade_tolerance_pct = 10.0      # warn when the grade from levels differs from FLOW_GRADE by more than this
 default_dn = 150                # assumed DN when no (valid) diameter is available
@@ -16,6 +16,7 @@ list = [100, 150, 225, 300, 375, 450, 525, 600, 675, 750, 825, 900, 1050, 1200]
 [fields.access_chambers]
 id = "PACID"
 surface_level = "TOPLEV"        # lid level, m AHD (there is no invert field)
+chamber_type = "CHAMBER_TY"     # optional: "M- standard manhole" / "J- maintenance shaft" / "I- inspection shaft"
 
 [fields.connection_points]
 id = "ID"
@@ -40,11 +41,23 @@ planset = "PLANSET"
 [codes.status]
 A = "existing"
 
+# Chamber type -> node_type ("ac" access chamber, "ms" maintenance shaft) or "skip" (not imported:
+# inspection shafts sit at sewer ends and have no PACID). Unknown codes -> "ac" with a warning.
+[codes.chamber_type]
+M = "ac"
+J = "ms"
+I = "skip"
+
 [codes.sewer_type]
 R = "reticulation"
 M = "main"
 IO = "io"
 IS = "is"
+E = "reticulation"              # E: meaning unconfirmed (treated as reticulation)
+
+# Codes whose mapping is an assumption: no per-feature warning, one "assumed" line in the summary.
+[assumed.sewer_type]
+E = "meaning unconfirmed; treated as reticulation"
 
 [codes.material]
 PVC = "pvc"

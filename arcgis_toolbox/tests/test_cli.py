@@ -38,8 +38,9 @@ def test_find_exe_order(tmp_path, monkeypatch):
 def test_run_check_real(no_native, wwnet_exe, demo_gpkg):
     issues, rc = cli.run_check(demo_gpkg, wwnet_exe)
     assert rc == 0
-    assert issues and issues[0]["code"] == "INVERT_MISMATCH"
-    assert issues[0]["table"] == "wwn_conduits" and issues[0]["severity"] == "info"
+    # falls into nodes are normal: the demo model has no errors, warnings or infos
+    assert [i for i in issues if i["severity"] in ("error", "warning")] == []
+    assert not [i for i in issues if i["code"] == "INVERT_MISMATCH"]
 
 
 def test_run_design_real(no_native, wwnet_exe, demo_gpkg):

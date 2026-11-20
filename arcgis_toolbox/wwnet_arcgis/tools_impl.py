@@ -57,16 +57,37 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
     sources = [("Access chambers", ac_layer), ("Gravity sewers", sewer_layer)]
     if cp_layer is not None:
         sources.insert(1, ("Connection points", cp_layer))
+    if fmap.chamber_type and fmap.chamber_type.lower() not in {
+            n.lower() for n in si.layer_field_names(arcpy, ac_layer)}:
+        msgs.warn(f"Access chambers have no field {fmap.chamber_type!r}: every chamber is imported as an "
+                  "access chamber (inspection shafts are not skipped).")
+        fmap = fmap.with_overrides(chamber_type="")
     si.prepare_projection(arcpy, msgs, sources)
     roles = {k: si.roles_for(k, {r: getattr(fmap, r) for r, *_ in si.FIELD_ROLES})
              for k in ("ac", "cp", "sewer")}
-    acs = si.read_features(arcpy, ac_layer, roles["ac"], "point", "Access chambers", use_selected, msgs)
-    cps = (si.read_features(arcpy, cp_layer, roles["cp"], "point", "Connection points", use_selected, msgs)
-           if cp_layer is not None else [])
     sewers = si.read_features(arcpy, sewer_layer, roles["sewer"], "line", "Gravity sewers",
                               use_selected, msgs)
     if not sewers:
         raise RuntimeError("No gravity sewers were read (nothing selected / empty layer?).")
+    ext = si.rows_extent(sewers)
+    sewers_selected = use_selected and si.selection_count(sewer_layer) > 0
+    acs = None
+    if sewers_selected and not si.selection_count(ac_layer) and ext is not None:
+        acs = si.read_in_extent(arcpy, ac_layer, roles["ac"], "point", "Access chambers", ext, msgs)
+        if acs is None:
+            msgs.warn("Access chambers: reading all features instead.")
+        else:
+            msgs.info(f"Access chambers: nothing selected; read {len(acs)} feature(s) within the selected "
+                      f"sewers' extent +{si.EXTENT_BUFFER_M:g} m.")
+    if acs is None:
+        acs = si.read_features(arcpy, ac_layer, roles["ac"], "point", "Access chambers", use_selected, msgs)
+    cps = []
+    if cp_layer is not None:
+        ac_ids = {imp.to_id(r.get(fmap.ac_id)) for r in acs}
+        refs = {imp.to_id(r.get(f)) for r in sewers for f in (fmap.us_node, fmap.ds_node) if f}
+        refs.discard("")
+        cps = si.read_connection_points(arcpy, cp_layer, roles["cp"], fmap.cp_id, sorted(refs - ac_ids), ext,
+                                        use_selected, msgs)
     model, rep = imp.build_model(acs, cps, sewers, fmap, opts, cfg)
     si.report_to_messages(msgs, rep)
     native.write_model(out_path, imp.model_json(model), exists and overwrite)
@@ -103,7 +124,14 @@ def report_issues(msgs: Messages, issues: list):
             continue
         line = f"{i['code']} {i['object_type']} {i['object_id']}" + \
                (f" ({i['clause']})" if i["clause"] else "") + f": {i['message']}"
-        {"error": msgs.error, "warning": msgs.warn}.get(sev, msgs.info)(line)
+        # model-check findings are data issues, not tool failures: never AddError (Pro would mark the
+        # tool as failed even though it finished)
+        if sev == "error":
+            msgs.warn(f"ERROR: {line}")
+        elif sev == "warning":
+            msgs.warn(line)
+        else:
+            msgs.info(line)
     if len(issues) > MAX_LINES:
         msgs.info(f"... {len(issues) - MAX_LINES} more issue(s) not shown; use the output table.")
     return counts
