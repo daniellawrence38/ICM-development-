@@ -492,7 +492,13 @@ def trace(arcpy, msgs: Messages, nodes_layer, node_id: str, direction: str = "Up
     conduits = gpkg.conduits_between(path, traced)
     msgs.info(f"{len(conduits)} conduit(s) on the traced path.")
     if select:
-        _select(arcpy, nodes_layer, sorted(traced), "node_id")
+        # the parameter may be a dataset path rather than a map layer: select on the map layer
+        nl = maplayers.find_layer_for(arcpy, path, "wwn_nodes")
+        if nl is not None:
+            _select(arcpy, nl, sorted(traced), "node_id")
+        else:
+            msgs.warn("The nodes layer is not in the active map; nothing selected (add the model with "
+                      "'Add Model To Map').")
         cl = maplayers.find_layer_for(arcpy, path, "wwn_conduits")
         if cl is not None:
             _select(arcpy, cl, conduits, "conduit_id")

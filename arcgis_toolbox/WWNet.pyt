@@ -41,16 +41,32 @@ def _text(p):
 
 
 def _layer_obj(param):
-    """Resolve a layer parameter to the map Layer (has .name / .dataSource)."""
-    v = param.value
-    if hasattr(v, "dataSource"):
-        return v
-    name = param.valueAsText
+    """Resolve a layer parameter to a map Layer (has .name / .dataSource). Accepts a map layer, a
+    layer name, or a dataset path (e.g. C:\\m.gpkg\\main.wwn_nodes): a path is matched to the map
+    layer showing it, else returned as a lightweight stand-in so tools can still read the table."""
+    import types
     from wwnet_arcgis import maplayers as _ml
-    for lyr in arcpy.mp.ArcGISProject("CURRENT").activeMap.listLayers():
-        if _ml.layer_name(lyr) == name:
+    v = param.value
+    if _ml.layer_source(v):
+        return v
+    text = param.valueAsText
+    layers = list(arcpy.mp.ArcGISProject("CURRENT").activeMap.listLayers())
+    for lyr in layers:
+        if _ml.layer_name(lyr) == text:
             return lyr
-    raise RuntimeError(f"Layer {name!r} not found in the active map.")
+    norm = (text or "").replace("/", "\\").lower()
+    for lyr in layers:
+        if _ml.layer_source(lyr).replace("/", "\\").lower() == norm:
+            return lyr
+    if ".gpkg" in norm:
+        return types.SimpleNamespace(name=os.path.basename(text), dataSource=text, isFeatureLayer=True,
+                                     isGroupLayer=False, isBroken=False, supports=lambda prop: True)
+    raise RuntimeError(f"Layer {text!r} not found in the active map.")
+
+
+def _ml_name(lyr):
+    from wwnet_arcgis import maplayers as _ml
+    return _ml.layer_name(lyr)
 
 
 class Toolbox(object):
@@ -353,7 +369,7 @@ class AskWWNetAssistant(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        lyr = _layer_obj(parameters[1]).name if parameters[1].value else None
+        lyr = _ml_name(_layer_obj(parameters[1])) if parameters[1].value else None
         impl.ask_assistant(arcpy, Messages(arcpy), parameters[0].valueAsText, lyr,
                            bool(parameters[2].value), parameters[3].valueAsText,
                            parameters[4].valueAsText, bool(parameters[5].value),

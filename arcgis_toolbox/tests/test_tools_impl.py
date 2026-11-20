@@ -476,3 +476,36 @@ def test_run_simulation_tolerates_layers_without_name(fake_arcpy, demo_gpkg, mon
     # second run replaces the layer, still tolerating the odd layer
     tools_impl.run_simulation(a, Messages(a), demo_gpkg, 12.0, 6.0, "manning", 0.013, 1.0, True, None)
     assert [maplayers.layer_name(l) for l in layers].count(SIM_NAME) == 1
+
+
+def test_trace_from_dataset_path_uses_map_layer_or_warns(fake_arcpy, wwnet_exe, demo_gpkg):
+    """Real Pro: the Nodes parameter can arrive as 'C:\\...\\m.gpkg\\main.wwn_nodes' (a path, not a layer)."""
+    import types
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    layers.insert(0, _ProBasemapLayer())
+    stand_in = types.SimpleNamespace(name="main.wwn_nodes", dataSource=gpkg.table_path(demo_gpkg, "wwn_nodes"))
+    r = tools_impl.trace(a, Messages(a), stand_in, "N03", "Downstream", True, wwnet_exe)
+    assert "OUT1" in r["nodes"]
+    assert [s[0] for s in a.selections] == ["Nodes", "Gravity sewers"]     # selected on the MAP layers
+    # model not on the map: trace still runs, warns instead of selecting
+    layers[:] = [_ProBasemapLayer()]
+    a.selections.clear()
+    r = tools_impl.trace(a, Messages(a), stand_in, "N03", "Upstream", True, wwnet_exe)
+    assert a.selections == [] and any("not in the active map" in t for lv, t in a.log if lv == "warn")
+
+
+def test_pyt_layer_obj_accepts_path_and_skips_unsupported_layers(fake_arcpy, demo_gpkg):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    layers.insert(0, _ProBasemapLayer())
+    loader = importlib.machinery.SourceFileLoader("wwnet_pyt_lo", str(TOOLBOX / "WWNet.pyt"))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("wwnet_pyt_lo", loader))
+    loader.exec_module(mod)
+    p = fa.FakeParameter(name="nodes", datatype="GPFeatureLayer")
+    p.value = gpkg.table_path(demo_gpkg, "wwn_nodes")          # a path string, like Pro passes
+    got = mod._layer_obj(p)
+    assert maplayers.layer_name(got) == "Nodes"               # matched to the map layer by data source
+    p.value = "Nodes"
+    assert maplayers.layer_name(mod._layer_obj(p)) == "Nodes"
+    layers[:] = [_ProBasemapLayer()]
+    p.value = gpkg.table_path(demo_gpkg, "wwn_nodes")
+    assert mod._layer_obj(p).dataSource.endswith("wwn_nodes")  # stand-in when not on the map
