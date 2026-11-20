@@ -490,3 +490,13 @@ def test_context_chambers_counted_and_unused_dropped():
     assert rep.counts["access_chambers"] == 1 and rep.counts["context_chambers"] == 1
     assert rep.counts["context_chambers_unused"] == 1
     assert "1 context chamber(s)" in rep.summary_lines(0)[0]
+
+
+def test_grade_ratio_ignores_shape_length_in_degrees():
+    """Real data: GDA94 geographic layers give Shape_Length in degrees (13.99 m pipe -> 0.000142)."""
+    acs = [ac("A", 0, 0), ac("B", 14, 0)]
+    sew = [pipe("565141650", [(0, 0), (14, 0)], "A", "B", UPSTREAM=31.0, DOWNSTREAM=30.72, LENGTH=13.99,
+                FLOW_GRADE=44.64, Shape_Length=0.000142)]
+    _m, rep = build_model(acs, [], sew)
+    line = next(x for x in rep.summary_lines(0) if x.startswith("Grade check"))
+    assert "LENGTH: 1.119" in line and "Shape_Length ignored (source layer in degrees)" in line

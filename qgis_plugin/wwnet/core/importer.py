@@ -648,7 +648,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     outgoing: dict = {}              # node_id -> [us inverts]
     incoming: dict = {}              # node_id -> [ds inverts]
     dn_unmapped = 0
-    ratios = {"field": [], "geom": [], "shape": [], "len_vs_geom": []}     # levels grade / FLOW_GRADE variants
+    ratios = {"field": [], "geom": [], "shape": [], "len_vs_geom": [], "shape_vs_len": []}     # levels grade / FLOW_GRADE variants
 
     for si, s in enumerate(segs):
         pid, row, line = s["pid"], s["row"], s["line"]
@@ -718,6 +718,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 shp = to_float(get(row, "shape_length")) if fm.shape_length else None
                 if shp and shp > 0:
                     ratios["shape"].append(shp / drop / fgrade)
+                    ratios["shape_vs_len"].append(shp / length)
                 lg = length / drop
                 if abs(lg - fgrade) / fgrade * 100.0 > opt.grade_tolerance_pct:
                     rep.warn("grade_mismatch", "conduit", pid, f"grade from levels 1 in {lg:.1f} vs "
@@ -784,8 +785,12 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     if ratios["field"]:
         parts = [f"{fm.length or 'length field'}: {med(ratios['field']):.3f}",
                  f"geometry length: {med(ratios['geom']):.3f}" if ratios["geom"] else ""]
-        if ratios["shape"]:
+        # Shape_Length is in the source layer's units: degrees for geographic (e.g. GDA94 4283) layers,
+        # where it is ~1e-5 of the metre length and meaningless here.
+        if ratios["shape"] and med(ratios["shape_vs_len"]) > 0.5:
             parts.append(f"{fm.shape_length}: {med(ratios['shape']):.3f}")
+        elif ratios["shape"]:
+            parts.append(f"{fm.shape_length} ignored (source layer in degrees)")
         rep.diagnostics.append(
             f"Grade check ({len(ratios['field'])} sewer(s) with levels and {fm.flow_grade}): median ratio "
             f"levels grade / {fm.flow_grade} (1 in x values; 1.0 = agree) using " + ", ".join(p for p in parts if p)
