@@ -137,6 +137,7 @@ fn check_conduit<'py>(
                 CheckResult::Pass => "pass",
                 CheckResult::Warn => "warn",
                 CheckResult::Fail => "fail",
+                CheckResult::Info => "info",
             },
         )?;
         d.set_item("message", c.message)?;

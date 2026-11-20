@@ -182,3 +182,75 @@ fn demo_end_to_end() {
     let n = Model::read_issue_count(&f).unwrap();
     assert_eq!((n - before) as usize, o.issues.len());
 }
+
+fn graded(dn: i64, grade: f64) -> Model {
+    let mut m = Model::default();
+    let fall = 60.0 / grade;
+    m.nodes.push(node("A", 0.0, 10.0));
+    let mut o = node("OUT", 60.0, 10.0 - fall);
+    o.node_type = NodeType::Outfall;
+    m.nodes.push(o);
+    m.conduits
+        .push(conduit("C1", "A", "OUT", dn, 10.0, 10.0 - fall));
+    m
+}
+
+#[test]
+fn capacity_is_governed_by_table_44() {
+    let rs = RuleSet::ds50();
+    let o = run_design(&graded(150, 29.0), &rs).unwrap();
+    let c = conduit_of(&o, "C1");
+    assert_relative_eq!(c.capacity_lps.unwrap(), 8.0, epsilon = 1e-9);
+    assert_relative_eq!(c.table44_lps.unwrap(), 8.0, epsilon = 1e-9);
+    assert_relative_eq!(c.hydraulic_capacity_lps.unwrap(), 15.4, epsilon = 0.3);
+
+    let o = run_design(&graded(150, 150.0), &rs).unwrap();
+    let c = conduit_of(&o, "C1");
+    assert_relative_eq!(c.table44_lps.unwrap(), 6.0, epsilon = 1e-9);
+    assert_relative_eq!(
+        c.capacity_lps.unwrap(),
+        6.0f64.min(c.hydraulic_capacity_lps.unwrap()),
+        epsilon = 1e-9
+    );
+
+    // DN225 at 1:250 is in the 201-300 band (22 L/s).
+    let o = run_design(&graded(225, 250.0), &rs).unwrap();
+    let c = conduit_of(&o, "C1");
+    assert_relative_eq!(c.table44_lps.unwrap(), 22.0, epsilon = 1e-9);
+    assert!(c.capacity_lps.unwrap() <= 22.0);
+
+    // Flatter than the last band: no Table 4.4 value, hydraulic capacity governs.
+    let o = run_design(&graded(150, 300.0), &rs).unwrap();
+    let c = conduit_of(&o, "C1");
+    assert!(c.table44_lps.is_none());
+    assert_eq!(c.capacity_lps, c.hydraulic_capacity_lps);
+
+    // Stored messages carry the extra capacities.
+    let rows = to_conduit_results(&run_design(&graded(150, 29.0), &rs).unwrap(), &rs).unwrap();
+    let v: serde_json::Value = serde_json::from_str(rows[0].messages.as_ref().unwrap()).unwrap();
+    assert_eq!(v["table44_lps"], 8.0);
+    assert!(v["hydraulic_capacity_lps"].as_f64().unwrap() > 15.0);
+    assert!(v["checks"].is_array());
+}
+
+#[test]
+fn missing_surface_level_is_info_not_warn() {
+    let mut m = graded(150, 200.0);
+    m.nodes[0].surface_level = None;
+    m.nodes[1].surface_level = None;
+    let o = run_design(&m, &RuleSet::ds50()).unwrap();
+    let c = conduit_of(&o, "C1");
+    assert_eq!(c.result, CheckResult::Pass, "{:#?}", c.checks);
+    let infos: Vec<_> = c
+        .checks
+        .iter()
+        .filter(|k| k.result == CheckResult::Info)
+        .collect();
+    assert_eq!(infos.len(), 2);
+    assert!(infos[0]
+        .message
+        .contains("cover not checked (no surface level at A)"));
+    assert_eq!(o.summary.cover_not_checked_ends, 2);
+    assert_eq!(o.summary.warn, 0);
+    assert!(o.issues.iter().all(|i| i.code != "design_missing_data"));
+}

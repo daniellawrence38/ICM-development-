@@ -12,6 +12,9 @@ pub enum CheckResult {
     Pass,
     Warn,
     Fail,
+    /// Informational only (e.g. a check that could not be run for lack of data); never
+    /// affects a conduit's overall result.
+    Info,
 }
 
 /// One clause-referenced check result, suitable for a design report.

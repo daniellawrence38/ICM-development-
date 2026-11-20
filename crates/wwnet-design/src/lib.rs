@@ -27,8 +27,14 @@ pub struct ConduitDesign {
     /// Pumped inflow from upstream pump stations (L/s).
     pub pumped_lps: f64,
     pub total_lps: f64,
-    /// Capacity at the d/D limit (L/s).
+    /// Governing capacity (L/s): the lesser of the Table 4.4 maximum allowable flow for the
+    /// grade band and the hydraulic capacity at the d/D limit.
     pub capacity_lps: Option<f64>,
+    /// Colebrook-White part-full capacity at the d/D limit (L/s).
+    pub hydraulic_capacity_lps: Option<f64>,
+    /// DS50 Table 4.4 maximum allowable flow for the grade band (L/s); `None` when the
+    /// grade is unknown or outside the bands.
+    pub table44_lps: Option<f64>,
     /// d/D at the total flow (`None` if the pipe cannot carry it part-full or grade unknown).
     pub d_over_d: Option<f64>,
     pub velocity_mps: Option<f64>,
@@ -70,6 +76,8 @@ pub struct DesignSummary {
     pub pass: usize,
     pub warn: usize,
     pub fail: usize,
+    /// Conduit ends where the cover check could not be run (no surface/invert level).
+    pub cover_not_checked_ends: usize,
     /// Sum of local GSDF over all sub-catchments (L/s).
     pub total_local_gsdf_lps: f64,
     /// Gravity GSDF reaching terminal nodes (outfalls / sinks, excluding wet wells).
@@ -398,19 +406,33 @@ fn design_conduit(
         missing.push("length; AC spacing check skipped".into());
     }
 
-    // Cover at each end (NaN if unknown).
+    // Cover at each end (NaN if unknown). Missing levels only produce an info note.
     let cover = |n: Option<&&Node>, inv: Option<f64>| match (n.and_then(|n| n.surface_level), inv) {
         (Some(s), Some(i)) => s - i - id_mm / 1000.0,
         _ => f64::NAN,
     };
     let (us_cover, ds_cover) = (cover(us_n, us_inv), cover(ds_n, ds_inv));
-    if us_cover.is_nan() || ds_cover.is_nan() {
-        missing.push(if us_cover.is_nan() && ds_cover.is_nan() {
-            "cover (surface or invert levels missing); cover check skipped".into()
-        } else {
-            "cover at one end (surface or invert level missing); checked at the other end only"
-                .into()
-        });
+    let mut cover_info: Vec<Check> = Vec::new();
+    for (cv, n, node_id, inv) in [
+        (us_cover, us_n, &c.us_node_id, us_inv),
+        (ds_cover, ds_n, &c.ds_node_id, ds_inv),
+    ] {
+        if cv.is_nan() {
+            let why = if n.and_then(|n| n.surface_level).is_none() {
+                "no surface level"
+            } else {
+                debug_assert!(inv.is_none());
+                "no invert level"
+            };
+            cover_info.push(Check {
+                rule: "cover_not_checked".into(),
+                clause: "DS50 4.9".into(),
+                value: 0.0,
+                limit: 0.0,
+                result: CheckResult::Info,
+                message: format!("cover not checked ({why} at {node_id})"),
+            });
+        }
     }
 
     let input = ConduitDesignInput {
@@ -434,6 +456,7 @@ fn design_conduit(
         })
         .collect();
     checks.extend(extra);
+    checks.extend(cover_info);
     for m in &missing {
         issues.push(issue(
             Severity::Warning,
@@ -447,13 +470,18 @@ fn design_conduit(
     }
 
     // Hydraulics at the conduit's own ID and ks.
-    let (mut capacity, mut dod, mut vel) = (None, None, None);
+    let (mut capacity, mut hyd_cap, mut t44, mut dod, mut vel) = (None, None, None, None, None);
     if let Some(g) = grade {
         let d = id_mm / 1000.0;
         let slope = hyd::slope_from_1in(g);
         let ks = c.ks_mm.unwrap_or(rules.hydraulics.ks_mm) / 1000.0;
         let lim = rules.max_d_over_d(c.dn.max(0) as u32);
-        capacity = Some(hyd::part_full_flow(d, slope, lim, ks) * 1000.0);
+        let h = hyd::part_full_flow(d, slope, lim, ks) * 1000.0;
+        t44 = rules
+            .max_allowable_flow(c.dn.max(0) as u32, g)
+            .map(|(q, _)| q);
+        hyd_cap = Some(h);
+        capacity = Some(t44.map_or(h, |q| q.min(h)));
         dod = hyd::depth_ratio_for_flow(total / 1000.0, d, slope, ks);
         vel = hyd::velocity_at_flow(total / 1000.0, d, slope, ks);
     }
@@ -463,6 +491,7 @@ fn design_conduit(
             CheckResult::Pass => continue,
             CheckResult::Warn => Severity::Warning,
             CheckResult::Fail => Severity::Error,
+            CheckResult::Info => continue,
         };
         if k.rule == "missing_data" {
             continue;
@@ -485,6 +514,8 @@ fn design_conduit(
         pumped_lps: flow.p,
         total_lps: total,
         capacity_lps: capacity,
+        hydraulic_capacity_lps: hyd_cap,
+        table44_lps: t44,
         d_over_d: dod,
         velocity_mps: vel,
         land_use_class: flow.class,
@@ -713,6 +744,11 @@ pub fn run_design(model: &Model, rules: &RuleSet) -> Result<DesignOutput> {
         pass: count(CheckResult::Pass),
         warn: count(CheckResult::Warn),
         fail: count(CheckResult::Fail),
+        cover_not_checked_ends: conduit_results
+            .iter()
+            .flat_map(|c| &c.checks)
+            .filter(|k| k.rule == "cover_not_checked")
+            .count(),
         total_local_gsdf_lps: node_flows.iter().map(|n| n.local_gsdf_lps).sum(),
         terminal_gsdf_lps: terminal,
     };
@@ -730,8 +766,12 @@ pub fn to_conduit_results(out: &DesignOutput, rules: &RuleSet) -> Result<Vec<Con
     out.conduit_results
         .iter()
         .map(|c| {
-            let messages = serde_json::to_string(&c.checks)
-                .map_err(|e| Error::Other(format!("cannot encode messages: {e}")))?;
+            let messages = serde_json::to_string(&serde_json::json!({
+                "checks": c.checks,
+                "hydraulic_capacity_lps": c.hydraulic_capacity_lps,
+                "table44_lps": c.table44_lps,
+            }))
+            .map_err(|e| Error::Other(format!("cannot encode messages: {e}")))?;
             Ok(ConduitResult {
                 conduit_id: c.conduit_id.clone(),
                 ruleset: Some(label.clone()),
@@ -744,6 +784,7 @@ pub fn to_conduit_results(out: &DesignOutput, rules: &RuleSet) -> Result<Vec<Con
                     CheckResult::Pass => "pass",
                     CheckResult::Warn => "warn",
                     CheckResult::Fail => "fail",
+                    CheckResult::Info => "info",
                 }
                 .into(),
                 messages: Some(messages),

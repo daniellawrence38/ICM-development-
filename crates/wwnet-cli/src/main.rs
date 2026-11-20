@@ -152,8 +152,8 @@ fn design(file: &std::path::Path, json: bool, ruleset: Option<&std::path::Path>)
         println!("{}", service::design_json(&out)?);
     } else {
         println!(
-            "{:<10} {:>4} {:>9} {:>8} {:>8} {:>8} {:>5} {:>5} {:<6} WORST MESSAGE",
-            "CONDUIT", "DN", "GRADE", "GSDF", "PUMPED", "CAP", "D/D", "V", "RESULT"
+            "{:<10} {:>4} {:>9} {:>8} {:>8} {:>7} {:>6} {:>6} {:>5} {:>5} {:<6} WORST MESSAGE",
+            "CONDUIT", "DN", "GRADE", "GSDF", "PUMPED", "Cap", "T4.4", "Hyd", "D/D", "V", "RESULT"
         );
         for c in &out.conduit_results {
             let grade = c
@@ -161,13 +161,15 @@ fn design(file: &std::path::Path, json: bool, ruleset: Option<&std::path::Path>)
                 .map(|g| format!("1:{g:.0}"))
                 .unwrap_or_else(|| "-".into());
             println!(
-                "{:<10} {:>4} {:>9} {:>8.2} {:>8.2} {:>8} {:>5} {:>5} {:<6} {}",
+                "{:<10} {:>4} {:>9} {:>8.2} {:>8.2} {:>7} {:>6} {:>6} {:>5} {:>5} {:<6} {}",
                 c.conduit_id,
                 c.dn,
                 grade,
                 c.gsdf_lps,
                 c.pumped_lps,
                 opt(c.capacity_lps, 1),
+                opt(c.table44_lps, 1),
+                opt(c.hydraulic_capacity_lps, 1),
                 opt(c.d_over_d, 2),
                 opt(c.velocity_mps, 2),
                 format!("{:?}", c.result).to_uppercase(),
@@ -187,6 +189,12 @@ fn design(file: &std::path::Path, json: bool, ruleset: Option<&std::path::Path>)
             s.fail,
             out.issues.len()
         );
+        if s.cover_not_checked_ends > 0 {
+            println!(
+                "cover not checked at {} conduit end(s): no surface level",
+                s.cover_not_checked_ends
+            );
+        }
     }
     Ok(if out.summary.fail > 0 { 1 } else { 0 })
 }
