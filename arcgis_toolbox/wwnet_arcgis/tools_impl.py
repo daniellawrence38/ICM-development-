@@ -31,7 +31,7 @@ def add_model_to_map(arcpy, msgs: Messages, gpkg_path: str, symbolize: bool = Tr
 def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, out_path: str,
                       fields: dict | None = None, snap_tolerance: float | None = None,
                       grade_source: str | None = None, use_selected: bool = False,
-                      add_to_map: bool = True, native=None) -> dict:
+                      add_to_map: bool = True, native=None, tee_tolerance: float | None = None) -> dict:
     """Water Corporation gravity sewer layers -> new WWNet GeoPackage (see arcgis_toolbox/README.md).
 
     `*_layer` are map layers / paths / names; `fields` maps role -> source field name (missing roles
@@ -49,7 +49,8 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
     cfg = imp.load_template()
     fmap = imp.FieldMap.from_config(cfg).with_overrides(**{k: (v or "") for k, v in (fields or {}).items()
                                                            if k in si.ROLE_LAYER})
-    opts = imp.ImportOptions.from_config(cfg, snap_tolerance_m=snap_tolerance, grade_source=grade_source)
+    opts = imp.ImportOptions.from_config(cfg, snap_tolerance_m=snap_tolerance, grade_source=grade_source,
+                                       tee_tolerance_m=tee_tolerance)
     if cp_layer is not None and not fmap.cp_id:
         raise RuntimeError("Choose the connection point ID field.")
     if not fmap.ac_id or not fmap.pipe_id:

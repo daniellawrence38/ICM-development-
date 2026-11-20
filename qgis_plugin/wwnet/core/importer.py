@@ -86,12 +86,14 @@ class ImportOptions:
     grade_source: str = "levels"            # "levels" | "field"
     grade_tolerance_pct: float = 10.0
     default_dn: int = 150
+    tee_tolerance_m: float = 0.5            # a lone sewer end this close to another sewer's mid-line is a T-junction
 
     @classmethod
     def from_config(cls, cfg: dict | None = None, **overrides) -> "ImportOptions":
         o = (cfg or load_template()).get("options", {})
         out = cls(float(o.get("snap_tolerance_m", 0.5)), str(o.get("grade_source", "levels")),
-                  float(o.get("grade_tolerance_pct", 10.0)), int(o.get("default_dn", 150)))
+                  float(o.get("grade_tolerance_pct", 10.0)), int(o.get("default_dn", 150)),
+                  float(o.get("tee_tolerance_m", 0.5)))
         for k, v in overrides.items():
             if v is not None:
                 setattr(out, k, v)
@@ -151,7 +153,8 @@ class ImportReport:
         ctx = f" + {c['context_chambers']} context chamber(s)" if c.get("context_chambers") else ""
         lines = [f"Imported {c.get('nodes', 0)} node(s) ({c.get('access_chambers', 0)} chamber(s){ctx}, "
                  f"{c.get('connection_points_used', 0)} connection point(s), "
-                 f"{c.get('junction_nodes', 0)} segment junction(s), {c.get('dangling_ends', 0)} dangling "
+                 f"{c.get('junction_nodes', 0)} segment junction(s), {c.get('tee_junctions', 0)} tee junction(s), "
+                 f"{c.get('dangling_ends', 0)} dangling "
                  f"end(s)) and {c.get('conduits', 0)} conduit(s).",
                  f"Skipped: {c.get('connection_points_skipped', 0)} unreferenced connection point(s), "
                  f"{c.get('conduits_skipped', 0)} sewer(s), {c.get('access_chambers_skipped', 0)} chamber(s)."]
@@ -277,6 +280,54 @@ class _Grid:
                     if d <= tol and (bd is None or d < bd):
                         best, bd = ref, d
         return best, bd
+
+
+class _SegGrid:
+    """Polyline pieces indexed by bounding box (expanded by a tolerance) in a uniform grid."""
+
+    def __init__(self, cell: float, pad: float):
+        self.cell = max(cell, 1e-6)
+        self.pad = pad
+        self.cells: dict = {}
+
+    def add(self, ref, a, b):
+        c, p = self.cell, self.pad
+        x0, x1 = math.floor((min(a[0], b[0]) - p) / c), math.floor((max(a[0], b[0]) + p) / c)
+        y0, y1 = math.floor((min(a[1], b[1]) - p) / c), math.floor((max(a[1], b[1]) + p) / c)
+        for kx in range(x0, x1 + 1):
+            for ky in range(y0, y1 + 1):
+                self.cells.setdefault((kx, ky), []).append((ref, a, b))
+
+    def candidates(self, p):
+        return self.cells.get((math.floor(p[0] / self.cell), math.floor(p[1] / self.cell)), ())
+
+
+def _project(p, a, b):
+    """Nearest point of segment a-b to p: (distance, t in [0, 1], point)."""
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L2 = dx * dx + dy * dy
+    t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2))
+    q = (a[0] + t * dx, a[1] + t * dy)
+    return _dist(p, q), t, q
+
+
+def _cut_line(coords, cuts):
+    """Split a polyline at the given (chainage, point) cuts (ascending). Returns the pieces (point lists)."""
+    cum = [0.0]
+    for a, b in zip(coords, coords[1:]):
+        cum.append(cum[-1] + _dist(a, b))
+    pieces, cur, k = [], [coords[0]], 0
+    for ch, pt in cuts:
+        while k + 1 < len(coords) - 1 and cum[k + 1] < ch:
+            k += 1
+            cur.append(coords[k])
+        # vertices strictly before the cut chainage are in `cur`; add the cut point and start the next piece
+        cur.append(pt)
+        pieces.append(cur)
+        cur = [pt]
+    cur.extend(coords[k + 1:])
+    pieces.append(cur)
+    return pieces
 
 
 def _clean(d: dict) -> dict:
@@ -495,6 +546,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             clusters[k]["pts"].append(pt)
             clusters[k]["members"].append((si, e))
     jn, en = 0, 0
+    singles: list = []               # lone sewer ends: (node id, segment index, end, point)
     for cl in clusters:
         pts = cl["pts"]
         c = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
@@ -506,12 +558,116 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             en += 1
             nid, note = new_id(f"E{en}"), "dangling end"
             rep.count("dangling_ends")
+            singles.append((nid, cl["members"][0][0], cl["members"][0][1], pts[0]))
         nodes[nid] = _clean({"node_id": nid, "geom": list(c), "node_type": "junction",
                              "status": "existing", "data_source": "gis", "notes": note})
         node_pos[nid] = c
         node_ref[nid] = None
         for si, e in cl["members"]:
             segs[si]["ends"][e] = nid
+    # 3b. T-junctions: a lone end that lies on another sewer's interior (junction fitting, the main is not
+    # split in the GIS) is joined there. The main is split at the tee point into pieces (digitised order,
+    # the upstream piece keeps the original id, further pieces get "~2", "~3", ...), a junction node is
+    # created at the tee and the branch end attaches to it.
+    sewer_codes = codes.get("sewer_type", {})
+
+    def stype_of(row):
+        raw = get(row, "sewer_type")
+        if blank(raw):
+            return ""
+        return sewer_codes.get(code_of(raw)) or sewer_codes.get(str(raw).strip().upper()) or ""
+
+    for si, s in enumerate(segs):
+        s["parent"], s["part"], s["full"] = si, 0, s["line"]
+    tee_tol = float(opt.tee_tolerance_m)
+    tee_ends: list = []              # (segment index, end) of branch ends joined at a tee (flow into the main)
+    tee_nodes: set = set()
+    tees: list = []
+    if tee_tol > 0 and singles:
+        sgrid = _SegGrid(10.0, tee_tol)
+        cums: dict = {}
+        for si, s in enumerate(segs):
+            cum = [0.0]
+            for k, (a, b) in enumerate(zip(s["line"], s["line"][1:])):
+                sgrid.add((si, k), a, b)
+                cum.append(cum[-1] + _dist(a, b))
+            cums[si] = cum
+        for nid, si, e, pt in singles:
+            if stype_of(segs[si]["row"]) in ("is", "io") and segs[si]["ends"][1 - e] in ac_ids:
+                continue                 # IS / IO upstream end: free by design
+            best = None
+            for (tj, k), a, b in sgrid.candidates(pt):
+                if tj == si:
+                    continue
+                d, t, q = _project(pt, a, b)
+                if d > tee_tol or (best is not None and d >= best[0]):
+                    continue
+                tl = segs[tj]["line"]
+                if _dist(q, tl[0]) <= tol or _dist(q, tl[-1]) <= tol:
+                    continue             # near the main's own end: an endpoint case
+                best = (d, tj, cums[tj][k] + t * _dist(a, b), q)
+            if best is not None:
+                tees.append((si, e, nid, best[1], best[2], best[3], best[0]))
+    if tees:
+        by_t: dict = {}
+        for t in tees:
+            by_t.setdefault(t[3], []).append(t)
+        assign: list = []
+        split_of: dict = {}
+        tn = 0
+        for tj, lst in by_t.items():
+            lst.sort(key=lambda t: t[4])
+            groups: list = []
+            for t in lst:
+                if groups and t[4] - groups[-1][0][4] <= tol:
+                    groups[-1].append(t)
+                else:
+                    groups.append([t])
+            cuts, tids = [], []
+            for g in groups:
+                tn += 1
+                tid = new_id(f"T{tn}")
+                q = g[0][5]
+                nodes[tid] = _clean({"node_id": tid, "geom": list(q), "node_type": "junction",
+                                     "status": "existing", "data_source": "gis", "notes": "tee (mid-line junction)"})
+                node_pos[tid] = q
+                node_ref[tid] = None
+                tee_nodes.add(tid)
+                cuts.append((g[0][4], q))
+                tids.append(tid)
+                rep.count("tee_junctions")
+                for t in g:
+                    assign.append((t[0], t[1], t[2], tid))
+                    rep.count("tee_branch_ends")
+                    rep.warn("tee_joined", "conduit", segs[t[0]]["pid"], f"end joined mid-line to sewer "
+                             f"{segs[tj]['pid']} at chainage {_fmt(t[4], 2)} m ({_fmt(t[6], 2)} m from the line); "
+                             f"flow assumed into the main")
+            main = segs[tj]
+            pieces = _cut_line(main["full"], cuts)
+            chain = [main["ends"][0]] + tids + [main["ends"][1]]
+            main["tee_for"] = [segs[t[0]]["pid"] for t in lst]
+            main["line"], main["ends"] = pieces[0], [chain[0], chain[1]]
+            split_of[tj] = [tj]
+            for r in range(1, len(pieces)):
+                segs.append({"pid": main["pid"], "row": main["row"], "line": pieces[r], "us_id": main["us_id"],
+                             "ds_id": main["ds_id"], "ends": [chain[r], chain[r + 1]], "parent": tj, "part": r,
+                             "full": main["full"]})
+                split_of[tj].append(len(segs) - 1)
+        for si, e, old, tid in assign:
+            idx = si if si not in split_of or e == 0 else split_of[si][-1]
+            segs[idx]["ends"][e] = tid
+            tee_ends.append((idx, e))
+            if old in nodes:
+                del nodes[old], node_pos[old], node_ref[old]
+                rep.count("dangling_ends", -1)
+        rep.count("tee_mains", len(by_t))
+        rep.diagnostics.append(f"Tees: {len(tees)} branch end(s) joined mid-line to {len(by_t)} sewer(s).")
+    parents: dict = {}
+    for si, s in enumerate(segs):
+        parents.setdefault(s["parent"], []).append(si)
+    tee_by_seg: dict = {}
+    for si, e in tee_ends:
+        tee_by_seg.setdefault(si, set()).add(e)
     node_segs: dict = {}
     for si, s in enumerate(segs):
         for e in (0, 1):
@@ -555,14 +711,6 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                         queue.append(sj)
     for si in up_end:
         segs[si]["why"] = "ids"
-
-    sewer_codes = codes.get("sewer_type", {})
-
-    def stype_of(row):
-        raw = get(row, "sewer_type")
-        if blank(raw):
-            return ""
-        return sewer_codes.get(code_of(raw)) or sewer_codes.get(str(raw).strip().upper()) or ""
 
     def attached(si, e):
         node = segs[si]["ends"][e]
@@ -620,27 +768,56 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 ch = True
         return ch
 
+    def tee_rule() -> bool:
+        """A branch end joined mid-line to another sewer is the branch's downstream end."""
+        ch = False
+        for si, es in tee_by_seg.items():
+            if si not in up_end and len(es) == 1:
+                up_end[si] = 1 - next(iter(es))
+                segs[si]["why"] = "tee"
+                ch = True
+        return ch
+
+    def split_rule() -> bool:
+        """The pieces of a split sewer share one orientation (digitised direction of the parent)."""
+        ch = False
+        for idxs in parents.values():
+            known = next((i for i in idxs if i in up_end), None)
+            if known is None:
+                continue
+            for i in idxs:
+                if i not in up_end:
+                    up_end[i], segs[i]["why"] = up_end[known], segs[known]["why"]
+                    ch = True
+        return ch
+
     changed = True
     while changed:
-        changed = neighbour_hints()
+        changed = split_rule()
+        changed = tee_rule() or changed
+        changed = neighbour_hints() or changed
         changed = dead_end_rule() or changed
         changed = is_io_rule() or changed
-    why_notes = {"neighbours": "direction from neighbouring sewers",
+    why_notes = {"tee": "direction from tee rule (branch end joined mid-line is downstream)",
+                 "neighbours": "direction from neighbouring sewers",
                  "dead_end": "direction from dead-end rule (dangling end is upstream)",
                  "is_io": "direction from IS/IO rule (end not at a chamber is upstream)"}
-    why_counts = {"ids": 0, "neighbours": 0, "dead_end": 0, "is_io": 0, "unknown": 0}
-    for si, s in enumerate(segs):
-        if si not in up_end:
-            up_end[si] = 0
-            s["why"] = "unknown"
-            rep.warn("direction_unknown", "conduit", s["pid"], "flow direction could not be determined from "
-                     "manhole ids, neighbouring sewers or dead-end / IS rules; digitised direction kept")
-        why_counts[s["why"]] += 1
+    why_counts = {"ids": 0, "neighbours": 0, "tee": 0, "dead_end": 0, "is_io": 0, "unknown": 0}
+    for idxs in parents.values():
+        for si in idxs:
+            if si not in up_end:
+                up_end[si] = 0
+                segs[si]["why"] = "unknown"
+        s0 = segs[idxs[0]]
+        if s0["why"] == "unknown":
+            rep.warn("direction_unknown", "conduit", s0["pid"], "flow direction could not be determined from "
+                     "manhole ids, neighbouring sewers, tee, dead-end / IS rules; digitised direction kept")
+        why_counts[s0["why"]] += 1
     for k, v in why_counts.items():
         rep.count(f"direction_{k}", v)
     rep.diagnostics.append(
         f"Direction: {why_counts['ids']} from manhole ids, {why_counts['neighbours']} from neighbouring sewers, "
-        f"{why_counts['dead_end']} by dead-end rule, {why_counts['is_io']} by IS/IO rule, "
+        f"{why_counts['tee']} by tee rule, {why_counts['dead_end']} by dead-end rule, {why_counts['is_io']} by IS/IO rule, "
         f"{why_counts['unknown']} unknown (digitised direction kept).")
 
     # ---- conduits --------------------------------------------------------------------------------
@@ -650,17 +827,23 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     dn_unmapped = 0
     ratios = {"field": [], "geom": [], "shape": [], "len_vs_geom": [], "shape_vs_len": []}     # levels grade / FLOW_GRADE variants
 
-    for si, s in enumerate(segs):
-        pid, row, line = s["pid"], s["row"], s["line"]
+    cond_ids = set(pipe_ids)
+    tee_inv: dict = {}               # tee node -> interpolated invert of the main
+    branch_ds: list = []             # (conduit id, ds node, ds invert) of conduits ending at a tee node
+    for idxs in parents.values():
+        s = segs[idxs[0]]
+        pid, row = s["pid"], s["row"]
         notes: list = []
         data_source = "gis"
-        flipped = up_end[si] == 1
+        flipped = up_end[idxs[0]] == 1
+        line, pieces = s["full"], [segs[i]["line"] for i in idxs]
+        nchain = [s["ends"][0]] + [segs[i]["ends"][1] for i in idxs]
         if flipped:
-            line = line[::-1]
+            line, pieces, nchain = line[::-1], [q[::-1] for q in pieces[::-1]], nchain[::-1]
             rep.count("reversed")
             rep.warn("direction_reversed", "conduit", pid, "digitised against flow; geometry reversed")
             notes.append("geometry reversed")
-        us, ds = s["ends"][up_end[si]], s["ends"][1 - up_end[si]]
+        us, ds = nchain[0], nchain[-1]
         if s["why"] in why_notes:
             notes.append(why_notes[s["why"]])
 
@@ -723,10 +906,6 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 if abs(lg - fgrade) / fgrade * 100.0 > opt.grade_tolerance_pct:
                     rep.warn("grade_mismatch", "conduit", pid, f"grade from levels 1 in {lg:.1f} vs "
                              f"{fm.flow_grade} 1 in {_fmt(fgrade, 1)} (>{_fmt(opt.grade_tolerance_pct, 1)}%)")
-        if ui is not None:
-            outgoing.setdefault(us, []).append(ui)
-        if di is not None:
-            incoming.setdefault(ds, []).append(di)
 
         # diameter
         dn, internal = opt.default_dn, None
@@ -765,12 +944,52 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
 
         if sewer_type == "io":
             cp_has_io.update(cp_by_node[n] for n in (us, ds) if n in cp_by_node)
-        conduits.append(_clean({
-            "conduit_id": pid, "geom": [list(p) for p in line], "us_node_id": us, "ds_node_id": ds,
-            "dn": dn, "internal_diameter_mm": internal, "material": material, "us_invert": ui,
-            "ds_invert": di, "length_m": length, "sewer_type": sewer_type, "status": status,
-            "data_source": data_source, "install_year": year_of(get(row, "install_date")),
-            "asset_id": pid, "notes": "; ".join(notes) or None}))
+        if len(pieces) > 1:
+            notes.append("split at tee for " + ", ".join(s.get("tee_for", ())))
+
+        def inv_at(x):
+            """Invert interpolated by chainage x along the oriented original line."""
+            if ui is None or di is None:
+                return None
+            return round(ui + (di - ui) * (x / glen if glen > 0 else 0.0), 6)
+
+        pos = 0.0
+        for j, piece in enumerate(pieces):
+            pl = _length(piece)
+            a, b = pos, pos + pl
+            pos = b
+            last = j == len(pieces) - 1
+            pui = ui if j == 0 else inv_at(a)
+            pdi = di if last else inv_at(b)
+            plen = length if len(pieces) == 1 else (length * pl / glen if glen > 0 else length / len(pieces))
+            cid = pid
+            if j:
+                cid, k = f"{pid}~{j + 1}", 0
+                while cid in cond_ids:
+                    k += 1
+                    cid = f"{pid}~{j + 1}_{k}"
+                cond_ids.add(cid)
+            pus, pds = nchain[j], nchain[j + 1]
+            if pui is not None:
+                outgoing.setdefault(pus, []).append(pui)
+            if pdi is not None:
+                incoming.setdefault(pds, []).append(pdi)
+            if not last:
+                tee_inv[pds] = pdi
+            if last and pds in tee_nodes:
+                branch_ds.append((cid, pds, pdi))
+            conduits.append(_clean({
+                "conduit_id": cid, "geom": [list(p) for p in piece], "us_node_id": pus, "ds_node_id": pds,
+                "dn": dn, "internal_diameter_mm": internal, "material": material, "us_invert": pui,
+                "ds_invert": pdi, "length_m": plen, "sewer_type": sewer_type, "status": status,
+                "data_source": data_source, "install_year": year_of(get(row, "install_date")),
+                "asset_id": pid, "notes": "; ".join(notes) or None}))
+
+    for cid, nid, di in branch_ds:
+        inv = tee_inv.get(nid)
+        if inv is not None and di is not None and di < inv - 0.01:
+            rep.warn("tee_adverse", "conduit", cid, f"ds invert {di:.3f} is below the main's interpolated invert "
+                     f"{inv:.3f} at the tee ({nid}): data quality")
 
     if dn_unmapped:
         rep.count("dn_assumed", dn_unmapped)

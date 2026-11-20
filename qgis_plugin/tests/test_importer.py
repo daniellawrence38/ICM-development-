@@ -1,5 +1,6 @@
 import datetime
 import json
+import math
 import sqlite3
 
 import pytest
@@ -500,3 +501,119 @@ def test_grade_ratio_ignores_shape_length_in_degrees():
     _m, rep = build_model(acs, [], sew)
     line = next(x for x in rep.summary_lines(0) if x.startswith("Grade check"))
     assert "LENGTH: 1.119" in line and "Shape_Length ignored (source layer in degrees)" in line
+
+
+# ---------------------------------------------------------------- T-junction (tee) snapping
+
+def seg(pid, line, us, ds, ui, di, **kw):
+    kw.setdefault("LENGTH", None)
+    return pipe(pid, line, us, ds, UPSTREAM=ui, DOWNSTREAM=di, FLOW_GRADE=None, **kw)
+
+
+def tee_world(branch_line, branch_levels=(21.0, 20.5), tee_at=40.0, off=0.3):
+    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("C", tee_at, 20)]
+    main = seg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)
+    line = branch_line(tee_at, off)
+    branch = seg("BR", line, None, None, *branch_levels, LENGTH=19.7)
+    return acs, [main, branch]
+
+
+def _check_clean(model, tmp_path):
+    native = pytest.importorskip("wwnet_native")
+    if not hasattr(native, "write_model"):
+        pytest.skip("wwnet_native too old (no write_model)")
+    out = tmp_path / "tee.gpkg"
+    native.write_model(str(out), imp.model_json(model))
+    issues = native.check(str(out), False)
+    assert [i for i in issues if i["severity"] in ("error", "warning")] == [], issues
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_tee_splits_main_and_orients_branch(reverse, tmp_path):
+    def bl(x, off):
+        line = [(x, 20), (x, off)]            # digitised from the chamber to the tee, or the other way
+        return line[::-1] if reverse else line
+    acs, sew = tee_world(bl)
+    model, rep = build_model(acs, [], sew)
+    c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
+    assert sorted(c) == ["BR", "M", "M~2"]
+    assert c["M"]["length_m"] == pytest.approx(40) and c["M~2"]["length_m"] == pytest.approx(60)
+    assert c["M"]["us_node_id"] == "A" and c["M"]["ds_node_id"] == c["M~2"]["us_node_id"] == "T1"
+    assert c["M~2"]["ds_node_id"] == "B" and c["M"]["asset_id"] == c["M~2"]["asset_id"] == "M"
+    assert "split at tee for BR" in c["M"]["notes"]
+    assert (c["M"]["us_invert"], c["M"]["ds_invert"]) == (20.0, pytest.approx(19.6))
+    assert (c["M~2"]["us_invert"], c["M~2"]["ds_invert"]) == (pytest.approx(19.6), 19.0)
+    t = n["T1"]
+    assert t["node_type"] == "junction" and t["notes"].startswith("tee (mid-line junction)")
+    assert t["invert_level"] == pytest.approx(19.6) and t["geom"] == [40.0, 0.0]
+    assert c["BR"]["ds_node_id"] == "T1" and c["BR"]["us_node_id"] == "C"
+    assert c["BR"]["us_invert"] == 21.0 and c["BR"]["ds_invert"] == 20.5
+    assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 1
+    assert rep.counts.get("dangling_ends", 0) == 0 and rep.counts["dangling_other"] == 0
+    assert rep.counts["direction_tee"] == 1 and rep.counts["conduits"] == 3
+    assert "tee_joined" in codes_of(rep) and "tee_adverse" not in codes_of(rep)
+    assert "direction_unknown" not in codes_of(rep)
+    assert any(x.startswith("Tees: 1 branch end(s) joined mid-line to 1 sewer(s)") for x in rep.summary_lines(0))
+    _check_clean(model, tmp_path)
+
+
+def test_tee_adverse_branch_invert_warns():
+    acs, sew = tee_world(lambda x, off: [(x, 20), (x, off)], branch_levels=(19.5, 19.0))
+    _m, rep = build_model(acs, [], sew)
+    assert "tee_adverse" in codes_of(rep)
+
+
+def test_two_tees_on_one_main_and_reversed_main(tmp_path):
+    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("C", 25, 20), ac("D", 70, -20)]
+    main = seg("M", [(100, 0), (0, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)    # digitised against flow
+    sew = [main, seg("B1", [(25, 20), (25, 0.2)], None, None, 22.0, 21.0, LENGTH=20.0),
+           seg("B2", [(70, -0.1), (70, -20)], None, None, 20.0, 21.0, LENGTH=20.0)]
+    model, rep = build_model(acs, [], sew)
+    c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
+    assert sorted(c) == ["B1", "B2", "M", "M~2", "M~3"] and rep.counts["tee_junctions"] == 2
+    # the upstream piece keeps the id; orientation is from A (us) to B (ds)
+    assert c["M"]["us_node_id"] == "A" and c["M~3"]["ds_node_id"] == "B"
+    assert [c[k]["length_m"] for k in ("M", "M~2", "M~3")] == pytest.approx([25, 45, 30])
+    assert c["M"]["ds_invert"] == pytest.approx(19.75) and c["M~2"]["ds_invert"] == pytest.approx(19.3)
+    assert c["B1"]["ds_node_id"] == c["M"]["ds_node_id"] and c["B2"]["us_node_id"] == "D"
+    assert c["B2"]["ds_node_id"] == c["M~2"]["ds_node_id"]
+    assert rep.counts["tee_mains"] == 1 and rep.counts["direction_ids"] == 1
+    assert any("Tees: 2 branch end(s) joined mid-line to 1 sewer(s)" in x for x in rep.summary_lines(0))
+    assert rep.counts["reversed"] == 1
+    _check_clean(model, tmp_path)
+
+
+def test_tee_near_endpoint_is_endpoint_case_and_far_end_stays_dangling():
+    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("C", 0.2, 20)]
+    main = seg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0)
+    # within snap tolerance of the main's end A: connects to chamber A, no split
+    model, rep = build_model(acs, [], [main, seg("BR", [(0.2, 20), (0.3, 0.2)], None, None, 21.0, 20.5)])
+    assert rep.counts.get("tee_junctions", 0) == 0 and len(model["conduits"]) == 2
+    assert by_id(model["conduits"], "conduit_id")["BR"]["ds_node_id"] == "A"
+    # 0.8 m off the line (tee tolerance 0.5): stays dangling
+    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("C", 40, 20)]
+    model, rep = build_model(acs, [], [main, seg("BR", [(40, 20), (40, 0.8)], None, None, 21.0, 20.5)])
+    assert rep.counts.get("tee_junctions", 0) == 0 and len(model["conduits"]) == 2
+    assert rep.counts["dangling_ends"] == 1
+    _m, rep = build_model(acs, [], [main, seg("BR", [(40, 20), (40, 0.8)], None, None, 21.0, 20.5)],
+                          options=ImportOptions(tee_tolerance_m=1.0))
+    assert rep.counts["tee_junctions"] == 1 and rep.counts.get("dangling_ends", 0) == 0
+    _m, rep = build_model(acs, [], [main, seg("BR", [(40, 20), (40, 0.3)], None, None, 21.0, 20.5)],
+                          options=ImportOptions(tee_tolerance_m=0))
+    assert rep.counts.get("tee_junctions", 0) == 0
+    assert ImportOptions.from_config(imp.load_template()).tee_tolerance_m == 0.5
+
+
+def test_tee_performance_5000_segments():
+    import random
+    import time
+    rnd = random.Random(7)
+    sew = []
+    for i in range(5000):
+        x, y = rnd.uniform(0, 3000), rnd.uniform(0, 3000)
+        a = rnd.uniform(0, 6.28)
+        sew.append(seg(f"S{i}", [(x, y), (x + 40 * math.cos(a), y + 40 * math.sin(a))], None, None, 5.0, 4.0))
+    t0 = time.time()
+    model, rep = build_model([], [], sew)
+    assert time.time() - t0 < 5.0
+    assert len(model["conduits"]) >= 5000

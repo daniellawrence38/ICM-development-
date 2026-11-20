@@ -5,6 +5,7 @@
 
 [options]
 snap_tolerance_m = 0.5          # a sewer segment end within this distance of a chamber / connection point / another end is connected
+tee_tolerance_m = 0.5           # a lone sewer end this close to another sewer's mid-line is a T-junction: the main is split there
 grade_source = "levels"         # "levels" | "field": field = derive a missing invert from FLOW_GRADE and length
 grade_tolerance_pct = 10.0      # warn when the grade from levels differs from FLOW_GRADE by more than this
 default_dn = 150                # assumed DN when no (valid) diameter is available
