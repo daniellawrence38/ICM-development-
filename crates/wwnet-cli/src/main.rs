@@ -43,9 +43,33 @@ enum Cmd {
         #[arg(long)]
         ruleset: Option<PathBuf>,
     },
+    /// Diurnal profile tools
+    Profile {
+        #[command(subcommand)]
+        cmd: ProfileCmd,
+    },
     /// Write a synthetic demo catchment
     #[command(hide = true)]
     Demo { file: PathBuf },
+}
+
+#[derive(Subcommand)]
+enum ProfileCmd {
+    /// Import a diurnal profile from a CSV / tab-separated file (time as hh:mm or minutes, factor).
+    /// Upgrades the model to schema v2 if needed; the profile becomes the default unless --no-default.
+    Import {
+        file: PathBuf,
+        profile_id: String,
+        csv: PathBuf,
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Do not set the profile as the model's default profile
+        #[arg(long)]
+        no_default: bool,
+        /// Divide the factors by their mean so the mean is exactly 1
+        #[arg(long)]
+        normalise: bool,
+    },
 }
 
 fn main() {
@@ -136,6 +160,40 @@ fn run() -> Result<i32> {
             json,
             ruleset,
         } => return design(&file, json, ruleset.as_deref()),
+        Cmd::Profile {
+            cmd:
+                ProfileCmd::Import {
+                    file,
+                    profile_id,
+                    csv,
+                    description,
+                    no_default,
+                    normalise,
+                },
+        } => {
+            let text = std::fs::read_to_string(&csv)
+                .map_err(|e| anyhow::anyhow!("reading {}: {e}", csv.display()))?;
+            let r = service::import_profile(
+                &file,
+                &profile_id,
+                &text,
+                &description,
+                !no_default,
+                normalise,
+            )?;
+            println!(
+                "imported profile {} ({} rows, interval {} min, mean {:.4}, min {:.3}, max {:.3}{}{})",
+                r.profile_id,
+                r.points,
+                r.interval_min.map(|i| i.to_string()).unwrap_or_else(|| "-".into()),
+                r.mean_factor,
+                r.min_factor,
+                r.max_factor,
+                if r.normalised { ", normalised" } else { "" },
+                if r.is_default { ", default" } else { "" }
+            );
+            r.warnings.iter().for_each(|w| eprintln!("warning: {w}"));
+        }
     }
     Ok(0)
 }
@@ -152,8 +210,8 @@ fn design(file: &std::path::Path, json: bool, ruleset: Option<&std::path::Path>)
         println!("{}", service::design_json(&out)?);
     } else {
         println!(
-            "{:<10} {:>4} {:>9} {:>8} {:>8} {:>7} {:>6} {:>6} {:>5} {:>5} {:<6} WORST MESSAGE",
-            "CONDUIT", "DN", "GRADE", "GSDF", "PUMPED", "Cap", "T4.4", "Hyd", "D/D", "V", "RESULT"
+            "{:<10} {:>4} {:>9} {:>8} {:>8} {:>8} {:>7} {:>6} {:>6} {:>5} {:>5} {:<6} WORST MESSAGE",
+            "CONDUIT", "DN", "GRADE", "ADWF", "GSDF", "PUMPED", "Cap", "T4.4", "Hyd", "D/D", "V", "RESULT"
         );
         for c in &out.conduit_results {
             let grade = c
@@ -161,10 +219,11 @@ fn design(file: &std::path::Path, json: bool, ruleset: Option<&std::path::Path>)
                 .map(|g| format!("1:{g:.0}"))
                 .unwrap_or_else(|| "-".into());
             println!(
-                "{:<10} {:>4} {:>9} {:>8.2} {:>8.2} {:>7} {:>6} {:>6} {:>5} {:>5} {:<6} {}",
+                "{:<10} {:>4} {:>9} {:>8.2} {:>8.2} {:>8.2} {:>7} {:>6} {:>6} {:>5} {:>5} {:<6} {}",
                 c.conduit_id,
                 c.dn,
                 grade,
+                c.adwf_lps,
                 c.gsdf_lps,
                 c.pumped_lps,
                 opt(c.capacity_lps, 1),
@@ -189,6 +248,12 @@ fn design(file: &std::path::Path, json: bool, ruleset: Option<&std::path::Path>)
             s.fail,
             out.issues.len()
         );
+        if s.total_local_adwf_lps > 0.0 {
+            println!(
+                "ADWF from node loads: {:.3} L/s total ({:.3} L/s at terminals); GSDF = ADWF x {} peaking factor",
+                s.total_local_adwf_lps, s.terminal_adwf_lps, s.peaking_factor
+            );
+        }
         if s.cover_not_checked_ends > 0 {
             println!(
                 "cover not checked at {} conduit end(s): no surface level",

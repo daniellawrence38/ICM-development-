@@ -1,0 +1,7 @@
+EPA SWMM 5.2.4 (https://github.com/USEPA/Stormwater-Management-Model, tag v5.2.4)
+
+SWMM is a dynamic hydrology-hydraulic water quality simulation model developed by the
+US Environmental Protection Agency. Its source code is written in C and is released in the
+PUBLIC DOMAIN (per the upstream README). The upstream repository ships no separate
+LICENSE file; this notice preserves that provenance. Only src/solver/*.c, *.h and
+include/swmm5.h are vendored, unmodified.

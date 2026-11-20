@@ -311,6 +311,94 @@ fn default_rcode() -> String {
     "R20".into()
 }
 
+/// Default average dry weather flow per connection (L/connection/day).
+pub const DEFAULT_ADWF_PER_CONNECTION_LPD: f64 = 630.0;
+/// Default ADWF -> GSDF peaking factor (DS 50 gives GSDF = 1.5 x ADWF at DS50 loading rates).
+pub const DEFAULT_PEAKING_FACTOR: f64 = 1.5;
+
+fn default_adwf_per_connection() -> f64 {
+    DEFAULT_ADWF_PER_CONNECTION_LPD
+}
+fn default_peaking() -> f64 {
+    DEFAULT_PEAKING_FACTOR
+}
+
+/// Loading settings stored in `wwn_meta` (`adwf_per_connection_lpd`, `peaking_factor`,
+/// `default_profile`). Missing keys take the defaults.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoadSettings {
+    #[serde(default = "default_adwf_per_connection")]
+    pub adwf_per_connection_lpd: f64,
+    #[serde(default = "default_peaking")]
+    pub peaking_factor: f64,
+    #[serde(default)]
+    pub default_profile: Option<String>,
+}
+
+impl Default for LoadSettings {
+    fn default() -> Self {
+        LoadSettings {
+            adwf_per_connection_lpd: DEFAULT_ADWF_PER_CONNECTION_LPD,
+            peaking_factor: DEFAULT_PEAKING_FACTOR,
+            default_profile: None,
+        }
+    }
+}
+
+/// A dry weather load attached to a node (`wwn_node_loads`). The ADWF is `adwf_lps` when set,
+/// otherwise `connections` x the per-connection allowance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeLoad {
+    pub load_id: String,
+    pub node_id: String,
+    #[serde(default)]
+    pub connections: Option<i64>,
+    #[serde(default)]
+    pub adwf_lps: Option<f64>,
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// `connection_points` | `manual` | ...
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+impl NodeLoad {
+    /// ADWF (L/s) given the per-connection allowance (L/connection/day).
+    pub fn effective_adwf_lps(&self, per_connection_lpd: f64) -> f64 {
+        match (self.adwf_lps, self.connections) {
+            (Some(a), _) => a,
+            (None, Some(n)) => n as f64 * per_connection_lpd / 86400.0,
+            (None, None) => 0.0,
+        }
+    }
+}
+
+/// One point of a diurnal profile: the factor applies from `minute_of_day` until the next point.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ProfilePoint {
+    pub minute_of_day: i64,
+    pub factor: f64,
+}
+
+/// A diurnal flow profile (`wwn_profiles` + `wwn_profile_info`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Profile {
+    pub profile_id: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub interval_min: Option<i64>,
+    #[serde(default)]
+    pub mean_factor: Option<f64>,
+    #[serde(default)]
+    pub points: Vec<ProfilePoint>,
+}
+
 /// The whole in-memory model.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -327,4 +415,10 @@ pub struct Model {
     pub rising_mains: Vec<RisingMain>,
     #[serde(default)]
     pub subcatchments: Vec<Subcatchment>,
+    #[serde(default)]
+    pub node_loads: Vec<NodeLoad>,
+    #[serde(default)]
+    pub profiles: Vec<Profile>,
+    #[serde(default)]
+    pub load_settings: LoadSettings,
 }

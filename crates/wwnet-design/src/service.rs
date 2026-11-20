@@ -6,6 +6,7 @@
 use crate::{run_design, to_conduit_results, DesignOutput};
 use serde::Serialize;
 use std::path::Path;
+use wwnet_core::profile::{parse_profile, ProfileImport};
 use wwnet_core::{gpkg, validate, Error, Issue, Model, Network, Result, Severity};
 use wwnet_rules::RuleSet;
 
@@ -87,6 +88,37 @@ pub fn design_file(
 /// Pretty JSON exactly as `wwnet design --json` prints it.
 pub fn design_json(out: &DesignOutput) -> Result<String> {
     serde_json::to_string_pretty(out).map_err(|e| Error::Other(e.to_string()))
+}
+
+/// Import a diurnal profile (CSV / tab-separated `time,factor` text) into a model file, upgrading
+/// the file to schema v2 first if needed. An existing profile with the same id is replaced. With
+/// `set_default` the profile becomes `wwn_meta.default_profile`. The values are only normalised to
+/// mean 1 when `normalise` is set; otherwise a mean far from 1 is reported in `warnings`.
+pub fn import_profile(
+    path: impl AsRef<Path>,
+    profile_id: &str,
+    csv_text: &str,
+    description: &str,
+    set_default: bool,
+    normalise: bool,
+) -> Result<ProfileImport> {
+    let path = path.as_ref();
+    let (profile, mut info) = parse_profile(profile_id, csv_text, description, normalise)?;
+    gpkg::upgrade(path)?;
+    let mut c = gpkg::open(path)?;
+    let tx = c.transaction()?;
+    gpkg::put_profile(&tx, &profile)?;
+    if set_default {
+        gpkg::set_default_profile(&tx, Some(&profile.profile_id))?;
+    }
+    tx.commit()?;
+    info.is_default = set_default;
+    Ok(info)
+}
+
+/// Pretty JSON of a profile import result.
+pub fn profile_import_json(p: &ProfileImport) -> Result<String> {
+    serde_json::to_string_pretty(p).map_err(|e| Error::Other(e.to_string()))
 }
 
 /// Trace result; a direction that was not requested is omitted from the JSON.

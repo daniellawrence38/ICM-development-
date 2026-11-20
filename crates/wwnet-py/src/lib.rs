@@ -227,6 +227,54 @@ fn write_model(py: Python<'_>, gpkg_path: &str, model_json: &str, overwrite: boo
         })
 }
 
+/// Import a diurnal profile from CSV / tab-separated text (time as hh:mm or minutes, factor; header
+/// optional) into a model GeoPackage, upgrading it to schema v2 if needed. Returns a dict
+/// (profile_id, points, interval_min, mean_factor, input_mean_factor, min_factor, max_factor,
+/// normalised, is_default, warnings). ValueError for unreadable / non-monotonic / out-of-range rows.
+/// The values are not normalised unless `normalise`; a mean far from 1 is returned in `warnings`.
+#[pyfunction]
+#[pyo3(signature = (gpkg_path, profile_id, csv_text, description="", set_default=true, normalise=false))]
+fn import_profile<'py>(
+    py: Python<'py>,
+    gpkg_path: &str,
+    profile_id: &str,
+    csv_text: &str,
+    description: &str,
+    set_default: bool,
+    normalise: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    let text = py
+        .allow_threads(|| {
+            let r = service::import_profile(
+                gpkg_path,
+                profile_id,
+                csv_text,
+                description,
+                set_default,
+                normalise,
+            )?;
+            service::profile_import_json(&r)
+        })
+        .map_err(|e| match &e {
+            wwnet_core::Error::Other(m)
+                if m.starts_with("line ")
+                    || m.starts_with("profile ")
+                    || m.starts_with("cannot normalise") =>
+            {
+                PyValueError::new_err(m.clone())
+            }
+            _ => lib_err(e),
+        })?;
+    loads(py, &text)
+}
+
+/// Upgrade a model GeoPackage to the current schema (creates missing v2 tables).
+#[pyfunction]
+fn upgrade_model(py: Python<'_>, gpkg_path: &str) -> PyResult<()> {
+    py.allow_threads(|| wwnet_core::gpkg::upgrade(gpkg_path))
+        .map_err(lib_err)
+}
+
 /// Version of the native module.
 #[pyfunction]
 fn version() -> &'static str {
@@ -245,6 +293,8 @@ fn wwnet_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(trace, m)?)?;
     m.add_function(wrap_pyfunction!(new_model, m)?)?;
     m.add_function(wrap_pyfunction!(write_model, m)?)?;
+    m.add_function(wrap_pyfunction!(import_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(upgrade_model, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     Ok(())
 }

@@ -766,6 +766,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "wwnet-sim"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "wwnet-core",
+ "wwnet-hydraulics",
+ "wwnet-swmm-sys",
+]
+
+[[package]]
+name = "wwnet-swmm-sys"
+version = "0.1.0"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "zerocopy"
 version = "0.8.63"
 source = "registry+https://github.com/rust-lang/crates.io-index"

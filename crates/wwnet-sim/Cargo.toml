@@ -1,0 +1,19 @@
+[package]
+name = "wwnet-sim"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Dynamic-wave hydraulic simulation of WWNet gravity networks via embedded EPA SWMM"
+
+[dependencies]
+wwnet-core = { path = "../wwnet-core" }
+wwnet-swmm-sys = { path = "../wwnet-swmm-sys" }
+wwnet-hydraulics = { path = "../wwnet-hydraulics" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+approx.workspace = true

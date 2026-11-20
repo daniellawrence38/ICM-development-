@@ -1,4 +1,4 @@
--- WWNet GeoPackage schema v1. Single source of truth for wwnet-core (Rust) and the QGIS plugin.
+-- WWNet GeoPackage schema v2 (v2 adds node loads, diurnal profiles and loading settings; v1 files are upgraded by `gpkg::upgrade`). Single source of truth for wwnet-core (Rust) and the QGIS plugin.
 -- CRS: EPSG:7850 (GDA2020 / MGA zone 50). Levels in m AHD, diameters in mm, flows in L/s.
 -- Enumerations (TEXT, lower_snake):
 --   node_type:   ac | ms | drop_ac | junction | wet_well | outfall | io_end | is_end
@@ -35,7 +35,8 @@ INSERT OR IGNORE INTO gpkg_spatial_ref_sys VALUES
  ('GDA2020 / MGA zone 50', 7850, 'EPSG', 7850, 'PROJCS["GDA2020 / MGA zone 50",GEOGCS["GDA2020",DATUM["Geocentric_Datum_of_Australia_2020",SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",117],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",10000000],UNIT["metre",1]]', 'GDA2020 / MGA zone 50');
 
 CREATE TABLE IF NOT EXISTS wwn_meta (key TEXT PRIMARY KEY, value TEXT);
-INSERT OR IGNORE INTO wwn_meta VALUES ('schema_version','1'), ('ruleset','ds50_v2r4'), ('crs','EPSG:7850');
+INSERT OR IGNORE INTO wwn_meta VALUES ('schema_version','2'), ('ruleset','ds50_v2r4'), ('crs','EPSG:7850'),
+ ('adwf_per_connection_lpd','630'), ('peaking_factor','1.5');  -- default_profile: absent = none
 
 CREATE TABLE IF NOT EXISTS wwn_nodes (
   fid INTEGER PRIMARY KEY AUTOINCREMENT, geom POINT,
@@ -96,12 +97,26 @@ CREATE TABLE IF NOT EXISTS wwn_issues (
   fid INTEGER PRIMARY KEY AUTOINCREMENT, run_at TEXT, severity TEXT, code TEXT,
   object_type TEXT, object_id TEXT, clause TEXT, message TEXT);
 
+-- Schema v2: dry weather loads and diurnal profiles.
+CREATE TABLE IF NOT EXISTS wwn_node_loads (
+  load_id TEXT PRIMARY KEY, node_id TEXT NOT NULL,
+  connections INTEGER, adwf_lps REAL,        -- ADWF = adwf_lps, else connections x adwf_per_connection_lpd / 86400
+  profile_id TEXT, source TEXT,              -- source: connection_points | manual | ...
+  notes TEXT);
+CREATE TABLE IF NOT EXISTS wwn_profiles (
+  profile_id TEXT NOT NULL, minute_of_day INTEGER NOT NULL, factor REAL NOT NULL,
+  PRIMARY KEY (profile_id, minute_of_day));
+CREATE TABLE IF NOT EXISTS wwn_profile_info (
+  profile_id TEXT PRIMARY KEY, description TEXT, interval_min INTEGER, mean_factor REAL);
+
 INSERT OR IGNORE INTO gpkg_contents (table_name, data_type, identifier, srs_id) VALUES
  ('wwn_nodes','features','Nodes',7850), ('wwn_conduits','features','Gravity sewers',7850),
  ('wwn_pump_stations','features','Pump stations',7850), ('wwn_rising_mains','features','Rising mains',7850),
  ('wwn_subcatchments','features','Sub-catchments',7850),
  ('wwn_pumps','attributes','Pumps',NULL), ('wwn_meta','attributes','Model metadata',NULL),
- ('wwn_results_conduits','attributes','Design results',NULL), ('wwn_issues','attributes','Validation issues',NULL);
+ ('wwn_results_conduits','attributes','Design results',NULL), ('wwn_issues','attributes','Validation issues',NULL),
+ ('wwn_node_loads','attributes','Node loads',NULL), ('wwn_profiles','attributes','Profile values',NULL),
+ ('wwn_profile_info','attributes','Profiles',NULL);
 INSERT OR IGNORE INTO gpkg_geometry_columns VALUES
  ('wwn_nodes','geom','POINT',7850,0,0), ('wwn_conduits','geom','LINESTRING',7850,0,0),
  ('wwn_pump_stations','geom','POINT',7850,0,0), ('wwn_rising_mains','geom','LINESTRING',7850,0,0),

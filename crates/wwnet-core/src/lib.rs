@@ -4,6 +4,7 @@ pub mod geom;
 pub mod gpkg;
 pub mod model;
 pub mod network;
+pub mod profile;
 pub mod validate;
 
 pub use error::{Error, Result};

@@ -279,6 +279,26 @@ pub fn create(path: impl AsRef<Path>) -> Result<()> {
     Ok(())
 }
 
+/// Bring a model file up to the current schema (v2): creates any missing tables and meta
+/// defaults and sets `schema_version` to 2. Idempotent; existing data is never modified.
+pub fn upgrade(path: impl AsRef<Path>) -> Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute_batch(SCHEMA_SQL)?;
+    conn.execute(
+        "UPDATE wwn_meta SET value='2' WHERE key='schema_version' AND CAST(value AS INTEGER) < 2",
+        [],
+    )?;
+    Ok(())
+}
+
+fn has_table(c: &Connection, name: &str) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
+        [name],
+        |r| r.get::<_, i64>(0),
+    )? > 0)
+}
+
 pub fn open(path: impl AsRef<Path>) -> Result<Connection> {
     Ok(Connection::open(path)?)
 }
@@ -353,6 +373,45 @@ pub fn insert_subcatchment(c: &Connection, s: &Subcatchment) -> Result<()> {
             s.net_area_ha, s.gross_area_ha, s.broadacre as i64, s.land_use.as_str(), s.rcode,
             s.ground.as_str(), s.region.as_str(), s.extra_flow_lps, s.status.as_str(), s.notes],
     )?;
+    Ok(())
+}
+
+pub fn insert_node_load(c: &Connection, l: &NodeLoad) -> Result<()> {
+    c.execute(
+        "INSERT INTO wwn_node_loads (load_id,node_id,connections,adwf_lps,profile_id,source,notes) VALUES (?,?,?,?,?,?,?)",
+        params![l.load_id, l.node_id, l.connections, l.adwf_lps, l.profile_id, l.source, l.notes],
+    )?;
+    Ok(())
+}
+
+/// Insert or replace a profile (values and info row).
+pub fn put_profile(c: &Connection, p: &Profile) -> Result<()> {
+    c.execute(
+        "DELETE FROM wwn_profiles WHERE profile_id=?",
+        [&p.profile_id],
+    )?;
+    for pt in &p.points {
+        c.execute(
+            "INSERT INTO wwn_profiles (profile_id,minute_of_day,factor) VALUES (?,?,?)",
+            params![p.profile_id, pt.minute_of_day, pt.factor],
+        )?;
+    }
+    c.execute(
+        "INSERT OR REPLACE INTO wwn_profile_info (profile_id,description,interval_min,mean_factor) VALUES (?,?,?,?)",
+        params![p.profile_id, p.description, p.interval_min, p.mean_factor],
+    )?;
+    Ok(())
+}
+
+/// Set (or clear, with `None`) the default profile in `wwn_meta`.
+pub fn set_default_profile(c: &Connection, id: Option<&str>) -> Result<()> {
+    match id {
+        Some(id) => c.execute(
+            "INSERT OR REPLACE INTO wwn_meta (key,value) VALUES ('default_profile',?)",
+            [id],
+        )?,
+        None => c.execute("DELETE FROM wwn_meta WHERE key='default_profile'", [])?,
+    };
     Ok(())
 }
 
@@ -436,6 +495,23 @@ impl Model {
         self.subcatchments
             .iter()
             .try_for_each(|x| insert_subcatchment(&tx, x))?;
+        self.node_loads
+            .iter()
+            .try_for_each(|x| insert_node_load(&tx, x))?;
+        self.profiles.iter().try_for_each(|x| put_profile(&tx, x))?;
+        let ls = &self.load_settings;
+        for (k, v) in [
+            ("adwf_per_connection_lpd", ls.adwf_per_connection_lpd),
+            ("peaking_factor", ls.peaking_factor),
+        ] {
+            tx.execute(
+                "INSERT OR REPLACE INTO wwn_meta (key,value) VALUES (?,?)",
+                params![k, v.to_string()],
+            )?;
+        }
+        if let Some(d) = &ls.default_profile {
+            set_default_profile(&tx, Some(d))?;
+        }
         update_extents(&tx)?;
         tx.commit()?;
         Ok(())
@@ -596,6 +672,88 @@ impl Model {
                 status: en(r.get(11)?)?,
                 notes: r.get(12)?,
             });
+        }
+
+        // Schema v2 tables: absent in v1 files (treated as empty).
+        if has_table(&c, "wwn_node_loads")? {
+            let mut st = c.prepare("SELECT load_id,node_id,connections,adwf_lps,profile_id,source,notes FROM wwn_node_loads ORDER BY rowid")?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                m.node_loads.push(NodeLoad {
+                    load_id: r.get(0)?,
+                    node_id: r.get(1)?,
+                    connections: r.get(2)?,
+                    adwf_lps: r.get(3)?,
+                    profile_id: r.get(4)?,
+                    source: r.get(5)?,
+                    notes: r.get(6)?,
+                });
+            }
+        }
+        if has_table(&c, "wwn_profiles")? {
+            let mut info: std::collections::HashMap<
+                String,
+                (Option<String>, Option<i64>, Option<f64>),
+            > = Default::default();
+            if has_table(&c, "wwn_profile_info")? {
+                let mut st = c.prepare(
+                    "SELECT profile_id,description,interval_min,mean_factor FROM wwn_profile_info",
+                )?;
+                let mut rows = st.query([])?;
+                while let Some(r) = rows.next()? {
+                    info.insert(r.get(0)?, (r.get(1)?, r.get(2)?, r.get(3)?));
+                }
+            }
+            let mut st = c.prepare(
+                "SELECT profile_id,minute_of_day,factor FROM wwn_profiles ORDER BY profile_id,minute_of_day",
+            )?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                let id: String = r.get(0)?;
+                let pt = ProfilePoint {
+                    minute_of_day: r.get(1)?,
+                    factor: r.get(2)?,
+                };
+                match m.profiles.last_mut() {
+                    Some(p) if p.profile_id == id => p.points.push(pt),
+                    _ => {
+                        let (description, interval_min, mean_factor) =
+                            info.get(&id).cloned().unwrap_or((None, None, None));
+                        m.profiles.push(Profile {
+                            profile_id: id,
+                            description,
+                            interval_min,
+                            mean_factor,
+                            points: vec![pt],
+                        });
+                    }
+                }
+            }
+        }
+        if has_table(&c, "wwn_meta")? {
+            let get = |k: &str| -> Result<Option<String>> {
+                Ok(
+                    c.query_row("SELECT value FROM wwn_meta WHERE key=?", [k], |r| r.get(0))
+                        .optional()?
+                        .flatten(),
+                )
+            };
+            let num = |k: &str, d: f64| -> Result<f64> {
+                Ok(get(k)?
+                    .and_then(|v| v.trim().parse::<f64>().ok())
+                    .filter(|v| v.is_finite())
+                    .unwrap_or(d))
+            };
+            m.load_settings = LoadSettings {
+                adwf_per_connection_lpd: num(
+                    "adwf_per_connection_lpd",
+                    DEFAULT_ADWF_PER_CONNECTION_LPD,
+                )?,
+                peaking_factor: num("peaking_factor", DEFAULT_PEAKING_FACTOR)?,
+                default_profile: get("default_profile")?
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty() && !v.eq_ignore_ascii_case("none")),
+            };
         }
         Ok(m)
     }
