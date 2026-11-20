@@ -58,11 +58,20 @@ its fields with the Water Corporation names that exist in it; change any of them
   connections) and every segment of a run carries the run's `US_MANHOLE_ID` / `DS_MANHOLE_ID`, so the ids are only
   used for direction and validation. A segment end within the snap tolerance (0.5 m) of a chamber connects to it,
   else of a connection point; remaining coincident ends share a junction node `J<n>` ("segment junction"); a lone end
-  becomes a dangling end node `E<n>`. No per-sewer placeholders are created.
+  that lies within `tee_tolerance_m` (template `[options]`, default 0.5 m) of another sewer's mid-line is a
+  **T-junction** (junction fitting; mains are not split in the GIS): the main is split there into conduits
+  `<id>` (upstream piece, keeps the id), `<id>~2`, ... (downstream), all with `asset_id` = original id and note
+  "split at tee for <branch>"; lengths are split by chainage and inverts interpolated linearly along the oriented
+  main; a junction node `T<n>` ("tee (mid-line junction)", invert = interpolated main invert) is created and the
+  branch end attaches to it (warning `tee_joined`; `tee_adverse` when the branch ds invert is >0.01 m below the
+  main's invert). Points within the snap tolerance of the main's own ends are endpoint cases, not tees. Any other
+  lone end becomes a dangling end node `E<n>`. No per-sewer placeholders are created.
 - Direction: for each (US id, DS id) run the chain of segments is oriented from the end at the US chamber (or the
   DS chamber) through the shared junctions; leftovers take the direction of already oriented neighbours, else the
   digitised direction is kept (`direction_unknown`). Remaining unknowns are resolved in this order, to a fixed
-  point (each counted as `Direction: ... N by dead-end rule, N by IS/IO rule` and noted on the conduit):
+  point (each counted as `Direction: ... N by tee rule, N by dead-end rule, N by IS/IO rule` and noted on the conduit):
+  (0) tee rule (first): a branch end joined at a tee is its downstream end, so an IS sewer with both ends free is
+  oriented into the main and its other end becomes the `is_end` upstream; split pieces share their sewer's direction;
   (a) dead-end rule: exactly one end attached to the network (chamber, connection point, or a junction shared with
   another segment) and the other dangling -> the dangling end is upstream; (b) IS/IO sewers (`MAINTYPE` `E`/`IS`/`IO`):
   the end not at a chamber is upstream (covers a blank US id); (c) neighbour propagation again through junctions.
