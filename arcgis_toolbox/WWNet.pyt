@@ -56,7 +56,7 @@ class Toolbox(object):
     def __init__(self):
         self.label = "WWNet"
         self.alias = "wwnet"
-        self.tools = [NewModel, AddModelToMap, CheckModel, RunDesign, Trace, PipeCapacity,
+        self.tools = [NewModel, ImportSewerData, AddModelToMap, CheckModel, RunDesign, Trace, PipeCapacity,
                       SetAssistantApiKey, AskWWNetAssistant, VerifySetup]
 
 
@@ -75,6 +75,74 @@ class NewModel(object):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl.new_model(arcpy, Messages(arcpy), parameters[0].valueAsText,
                        bool(parameters[1].value), bool(parameters[2].value))
+
+
+def _source(param):
+    """Layer object when the value is a map layer, else its text (path / layer name); None if empty."""
+    if param.value is None:
+        return None
+    return param.value if hasattr(param.value, "dataSource") else param.valueAsText
+
+
+class ImportSewerData(object):
+    # fixed parameter positions: 0 ACs, 1 connection points, 2 sewers, 3 output, 4 snap, 5 grade source,
+    # 6 selected only, 7 add to map, 8.. one Field parameter per role in sewer_import.FIELD_ROLES
+    _LAYER_PARAM = {"ac": 0, "cp": 1, "sewer": 2}
+
+    def __init__(self):
+        self.label = "Import Sewer Data"
+        self.description = ("Convert Water Corporation (WA) gravity sewer GIS layers (access chambers, "
+                            "connection points, gravity sewers) into a new WWNet GeoPackage (EPSG:7850), "
+                            "validate it and add it to the map. Source field roles are selectable.")
+        self.category = "Data"
+
+    def getParameterInfo(self):
+        from wwnet_arcgis import sewer_import as si
+        ac = _p("ac_layer", "Sewer access chambers", "GPFeatureLayer")
+        ac.filter.list = ["Point"]
+        cp = _p("cp_layer", "Sewer connection points (optional)", "GPFeatureLayer", required=False)
+        cp.filter.list = ["Point"]
+        sw = _p("sewer_layer", "Gravity sewers", "GPFeatureLayer")
+        sw.filter.list = ["Polyline"]
+        params = [ac, cp, sw,
+                  _p("out_gpkg", "Output GeoPackage", "DEFile", "Output", filetype=["gpkg"]),
+                  _p("snap", "Snap tolerance (m)", "GPDouble", required=False, default=0.5),
+                  _p("grade_source", "Grade source", "GPString", required=False, default="levels",
+                     values=["levels", "field"]),
+                  _p("use_selected", "Use selected features only", "GPBoolean", required=False, default=False),
+                  _p("add_to_map", "Add to map", "GPBoolean", required=False, default=True)]
+        for role, layer_key, label, required in si.FIELD_ROLES:
+            f = _p("f_" + role, label, "Field", required=required)
+            f.parameterDependencies = [self._LAYER_PARAM[layer_key]]
+            f.category = "Source fields"
+            params.append(f)
+        return params
+
+    def updateParameters(self, parameters):
+        from wwnet_arcgis import sewer_import as si
+        for layer_key, idx in self._LAYER_PARAM.items():
+            p = parameters[idx]
+            if p.value is None or p.hasBeenValidated:
+                continue
+            try:
+                found = impl.sewer_field_defaults(arcpy, _source(p))
+            except Exception:
+                continue
+            for n, (role, k, _l, _q) in enumerate(si.FIELD_ROLES):
+                if k == layer_key:
+                    parameters[8 + n].value = found.get(role) or None
+        return
+
+    def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        from wwnet_arcgis import sewer_import as si
+        fields = {role: (parameters[8 + n].valueAsText or "")
+                  for n, (role, _k, _l, _q) in enumerate(si.FIELD_ROLES)}
+        impl.import_sewer_data(arcpy, Messages(arcpy), _source(parameters[0]), _source(parameters[1]),
+                               _source(parameters[2]), parameters[3].valueAsText, fields,
+                               parameters[4].value if parameters[4].value is not None else 0.5,
+                               parameters[5].valueAsText or "levels", bool(parameters[6].value),
+                               bool(parameters[7].value))
 
 
 class AddModelToMap(object):

@@ -1,0 +1,65 @@
+# Import template: Water Corporation (WA) gravity-sewer GIS layers -> WWNet model.
+# Used by qgis_plugin/wwnet/core/importer.py (QGIS and ArcGIS Pro front ends).
+# Every [fields.*] value is a SOURCE FIELD NAME; the front end lets the user override each one.
+# An empty string means "not mapped" (the role is skipped / a default is assumed, with a warning).
+
+[options]
+snap_tolerance_m = 0.5          # snap a pipe end with no/unknown manhole id to a node within this distance
+grade_source = "levels"         # "levels" | "field": field = derive a missing invert from FLOW_GRADE and length
+grade_tolerance_pct = 10.0      # warn when the grade from levels differs from FLOW_GRADE by more than this
+default_dn = 150                # assumed DN when no (valid) diameter is available
+
+# Standard DN list (mm). Other source diameters map to the nearest, raw value kept as internal diameter.
+[standard_dn]
+list = [100, 150, 225, 300, 375, 450, 525, 600, 675, 750, 825, 900, 1050, 1200]
+
+[fields.access_chambers]
+id = "PACID"
+surface_level = "TOPLEV"        # lid level, m AHD (there is no invert field)
+
+[fields.connection_points]
+id = "ID"
+
+[fields.sewers]
+id = "ID"
+us_node = "US_MANHOLE_ID"
+ds_node = "DS_MANHOLE_ID"
+us_invert = "UPSTREAM"          # believed invert levels, m AHD
+ds_invert = "DOWNSTREAM"
+flow_grade = "FLOW_GRADE"       # believed "1 in x"
+length = "LENGTH"               # m
+diameter = ""                   # NOT confirmed (HEIGHT? DIAMETER? SIZE?) -- choose it in the tool
+status = "STATUS"
+sewer_type = "MAINTYPE"
+purpose = "PURPOSE"
+material = "MATERIAL"
+install_date = "DATEINST"
+planset = "PLANSET"
+
+# Coded values: the text before the first "-" is the code ("A- actual" -> "A"). Codes are upper-cased.
+[codes.status]
+A = "existing"
+
+[codes.sewer_type]
+R = "reticulation"
+M = "main"
+IO = "io"
+IS = "is"
+
+[codes.material]
+PVC = "pvc"
+UPVC = "pvc"
+MPVC = "pvc"
+VC = "vc"
+AC = "ac_pipe"
+DI = "di"
+DICL = "di"
+CI = "other"
+PE = "pe"
+HDPE = "pe"
+PP = "pe"
+GRP = "grp"
+RC = "rcpl"
+RCP = "rcpl"
+RCPL = "rcpl"
+CONC = "rcpl"

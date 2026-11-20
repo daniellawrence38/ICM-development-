@@ -18,6 +18,25 @@ pub fn new_model(path: impl AsRef<Path>) -> Result<()> {
     gpkg::create(path)
 }
 
+/// Build a new model GeoPackage from JSON (the serde form of [`Model`]: nodes, conduits,
+/// subcatchments, pump_stations, pumps, rising_mains; geometry as `[x, y]` / `[[x, y], ...]`).
+/// Fails if the file exists and is not empty unless `overwrite`. On any failure after the
+/// file was created it is removed again, so no half-written model is left behind.
+pub fn write_model_json(path: impl AsRef<Path>, model_json: &str, overwrite: bool) -> Result<()> {
+    let path = path.as_ref();
+    let model: Model = serde_json::from_str(model_json)
+        .map_err(|e| Error::Other(format!("invalid model JSON: {e}")))?;
+    if overwrite && path.is_file() {
+        std::fs::remove_file(path)?;
+    }
+    gpkg::create(path)?;
+    if let Err(e) = model.write(path) {
+        let _ = std::fs::remove_file(path);
+        return Err(e);
+    }
+    Ok(())
+}
+
 /// Validate a model. With `write`, replaces `wwn_issues` in the file.
 pub fn check_file(path: impl AsRef<Path>, write: bool) -> Result<Vec<Issue>> {
     let path = path.as_ref();

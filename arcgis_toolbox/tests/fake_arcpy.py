@@ -83,6 +83,38 @@ class _MemCursor:
         return False
 
 
+class _Part(list):
+    pass
+
+
+class FakeShape:
+    """Polyline stand-in: partCount / getPart(i) -> points with .X .Y (like arcpy.Polyline)."""
+
+    def __init__(self, coords):
+        self.coords = coords
+        self.partCount = 1
+
+    def getPart(self, i):
+        return _Part(NS(X=x, Y=y) for x, y in self.coords)
+
+
+class _SrcCursor(_MemCursor):
+    """Rows of dicts; 'SHAPE@XY' -> (x, y), 'SHAPE@' -> FakeShape built from the row's '_geom'."""
+
+    def __iter__(self):
+        for r in self.rows:
+            g = r.get("_geom")
+            out = []
+            for f in self.fields:
+                if f == "SHAPE@XY":
+                    out.append(tuple(g) if g is not None else None)
+                elif f == "SHAPE@":
+                    out.append(FakeShape(g) if g is not None else None)
+                else:
+                    out.append(r.get(f))
+            yield out
+
+
 class FakeEditor:
     instances: list = []
 
@@ -130,7 +162,15 @@ def make_fake(layers=None, map_name="Map"):
     a.AddFieldDelimiters = lambda ds, f: f'"{f}"'
     a.Parameter = FakeParameter
 
+    a.sources = {}   # data source path -> {"fields": [(name, type)], "rows": [dict], "sr": NS(...)}
+    a.env = NS(overwriteOutput=False, geographicTransformations=None)
+
+    def src_of(ds):
+        return a.sources.get(getattr(ds, "dataSource", ds))
+
     def list_fields(ds):
+        if src_of(ds) is not None:
+            return [NS(name=n, type=t) for n, t in src_of(ds)["fields"]]
         path, table = split(ds)
         con = sqlite3.connect(path)
         try:
@@ -151,11 +191,16 @@ def make_fake(layers=None, map_name="Map"):
 
     a.ListFields = list_fields
 
+    a.cursor_calls = []
     a.memory = {}   # "memory\\name" -> {"fields": [(name, type)], "rows": [row], "sr": ..., "geom": ...}
     a.deleted = []
     a.Exists = lambda p: p in a.memory
     a.SpatialReference = lambda code: NS(factoryCode=code, name=f"EPSG:{code}")
-    a.Describe = lambda p: NS(spatialReference=NS(factoryCode=7850, name="GDA2020 / MGA zone 50"))
+    a.transformations = ["GDA_1994_To_GDA2020_1", "GDA_1994_To_GDA2020_NTv2_Conformal",
+                         "GDA_1994_To_GDA2020_NTv2_Conformal_and_Distortion"]
+    a.ListTransformations = lambda from_sr, to_sr, *args: list(a.transformations)
+    a.Describe = lambda p: NS(spatialReference=(src_of(p) or {}).get(
+        "sr", NS(factoryCode=7850, name="GDA2020 / MGA zone 50")))
 
     class Insert:
         def __init__(self, path, fields):
@@ -173,7 +218,13 @@ def make_fake(layers=None, map_name="Map"):
         def __exit__(self, *e):
             return False
 
-    def search(ds, f, where_clause=None):
+    def search(ds, f, where_clause=None, spatial_reference=None):
+        src = src_of(ds)
+        if src is not None:                       # synthetic source layer (Import Sewer Data tests)
+            a.cursor_calls.append((f, spatial_reference))
+            sel = ds.getSelectionSet() if hasattr(ds, "getSelectionSet") else None
+            rows = [r for i, r in enumerate(src["rows"], 1) if not sel or i in sel]
+            return _SrcCursor(rows, f)
         if ds in a.memory:
             return _MemCursor(a.memory[ds]["rows"], f)
         return _Cursor(a, ds, f, where_clause)

@@ -210,6 +210,22 @@ fn new_model(py: Python<'_>, gpkg_path: &str) -> PyResult<()> {
         .map_err(lib_err)
 }
 
+/// Write a new model GeoPackage from JSON text (nodes, conduits, subcatchments, pump_stations,
+/// pumps, rising_mains). Geometry is `[x, y]` for points and `[[x, y], ...]` for lines (EPSG:7850).
+/// ValueError for bad JSON / enum values; RuntimeError if the file exists (unless `overwrite`)
+/// or a constraint (e.g. duplicate id) fails; the partial file is removed on failure.
+#[pyfunction]
+#[pyo3(signature = (gpkg_path, model_json, overwrite=false))]
+fn write_model(py: Python<'_>, gpkg_path: &str, model_json: &str, overwrite: bool) -> PyResult<()> {
+    py.allow_threads(|| service::write_model_json(gpkg_path, model_json, overwrite))
+        .map_err(|e| match &e {
+            wwnet_core::Error::Other(m) if m.starts_with("invalid model JSON") => {
+                PyValueError::new_err(m.clone())
+            }
+            _ => lib_err(e),
+        })
+}
+
 /// Version of the native module.
 #[pyfunction]
 fn version() -> &'static str {
@@ -227,6 +243,7 @@ fn wwnet_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(design, m)?)?;
     m.add_function(wrap_pyfunction!(trace, m)?)?;
     m.add_function(wrap_pyfunction!(new_model, m)?)?;
+    m.add_function(wrap_pyfunction!(write_model, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     Ok(())
 }

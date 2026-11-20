@@ -1,9 +1,24 @@
-//! Minimal geometry types.
+//! Minimal geometry types. Serde form: a point is `[x, y]`, a line `[[x, y], ...]`,
+//! a multipolygon `[[ring, ...], ...]` (each ring a list of `[x, y]`).
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(from = "[f64; 2]", into = "[f64; 2]")]
 pub struct Point {
     pub x: f64,
     pub y: f64,
+}
+
+impl From<[f64; 2]> for Point {
+    fn from(a: [f64; 2]) -> Self {
+        Point { x: a[0], y: a[1] }
+    }
+}
+
+impl From<Point> for [f64; 2] {
+    fn from(p: Point) -> Self {
+        [p.x, p.y]
+    }
 }
 
 impl Point {
@@ -15,7 +30,7 @@ impl Point {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct LineString(pub Vec<Point>);
 
 impl LineString {
@@ -32,7 +47,7 @@ impl LineString {
 }
 
 /// Polygons -> rings (first is exterior, rest are holes) -> points.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct MultiPolygon(pub Vec<Vec<Vec<Point>>>);
 
 fn ring_area(r: &[Point]) -> f64 {

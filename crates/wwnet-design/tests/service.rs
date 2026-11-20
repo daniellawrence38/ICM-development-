@@ -62,3 +62,51 @@ fn new_model_creates_loadable_file() {
     assert!(Model::load(&f).unwrap().nodes.is_empty());
     assert!(service::new_model(&f).is_err(), "must not overwrite");
 }
+
+#[test]
+fn write_model_json_round_trips_and_cleans_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("m.gpkg");
+    let json = r#"{
+      "nodes": [
+        {"node_id": "A", "geom": [0.0, 0.0], "node_type": "ac", "surface_level": 10.0, "invert_level": 8.0,
+         "status": "existing", "data_source": "gis"},
+        {"node_id": "B", "geom": [10.0, 0.0], "invert_level": 7.9}
+      ],
+      "conduits": [
+        {"conduit_id": "P1", "geom": [[0.0, 0.0], [10.0, 0.0]], "us_node_id": "A", "ds_node_id": "B",
+         "dn": 150, "material": "vc", "us_invert": 8.0, "ds_invert": 7.9, "sewer_type": "main"}
+      ]
+    }"#;
+    service::write_model_json(&f, json, false).unwrap();
+    let m = Model::load(&f).unwrap();
+    assert_eq!(m.nodes.len(), 2);
+    assert_eq!(m.nodes[0].status.as_str(), "existing");
+    assert_eq!(m.nodes[1].node_type.as_str(), "ac");
+    assert_eq!(m.conduits[0].material.as_str(), "vc");
+    assert_eq!(m.conduits[0].geom.as_ref().unwrap().0.len(), 2);
+    assert_eq!(
+        service::error_count(&service::check_file(&f, false).unwrap()),
+        0
+    );
+    // exists -> refused unless overwrite
+    assert!(service::write_model_json(&f, json, false).is_err());
+    service::write_model_json(&f, json, true).unwrap();
+    // bad enum / unknown field: nothing created
+    let g = dir.path().join("bad.gpkg");
+    let e = service::write_model_json(
+        &g,
+        r#"{"nodes":[{"node_id":"A","node_type":"zzz"}]}"#,
+        false,
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("invalid model JSON"), "{e}");
+    assert!(
+        service::write_model_json(&g, r#"{"nodes":[{"node_id":"A","bogus":1}]}"#, false).is_err()
+    );
+    assert!(!g.exists());
+    // duplicate ids fail at insert and the partial file is removed
+    let dup = r#"{"nodes":[{"node_id":"A"},{"node_id":"A"}]}"#;
+    assert!(service::write_model_json(&g, dup, false).is_err());
+    assert!(!g.exists());
+}

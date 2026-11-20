@@ -9,6 +9,7 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
 
 | Tool | What it does |
 |---|---|
+| Import Sewer Data | (category Data) Converts Water Corporation gravity-sewer layers into a new WWNet GeoPackage, checks it and adds it to the map; see [Import Sewer Data](#import-sewer-data) |
 | New Model | Creates a GeoPackage from `schema.sql` (sqlite3) and adds the layers to the active map in a `WWNet` group layer |
 | Add Model To Map | Adds the `wwn_*` layers (`<file>.gpkg\main.<table>`) of an existing model and applies symbology: nodes by `node_type`, conduits by DN with an Arcade label `DN225 1:300`. Symbology failures only warn |
 | Check Model | `wwnet_native.check` (same output as `wwnet check --json`); messages via AddMessage/AddWarning/AddError; optional output issues table |
@@ -18,6 +19,53 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
 | Set Assistant API Key | Stores the Anthropic key (`GPEncryptedString`) with Windows DPAPI; default model / effort; optional fallback CLI path |
 | Verify Setup | Prints where `wwnet_native` / `anthropic` / dependencies are loaded from and whether they import; optional live API test (tiny request, key never shown) |
 | Ask WWNet Assistant | DS 50 assistant with tools `list_layers`, `get_selected_features`, `query_features`, `get_feature`, `pipe_capacity`, `check_conduit`, `residential_gsdf`, `lookup_ds50`, `propose_edits` |
+
+## Import Sewer Data
+
+Converts the Water Corporation (WA) layers *Sewer access chambers* (points), *Sewer connection points* (points,
+optional) and *Gravity sewers* (polylines) into a new WWNet GeoPackage. Needs a `wwnet_native` that has
+`write_model` (rebuild the wheel / use the current bundle). Logic: `qgis_plugin/wwnet/core/importer.py` (pure
+Python, shared with QGIS); defaults and code maps: `templates/import/watercorp_sewer.toml`.
+
+**Parameters**: the three layers, output `.gpkg` (an existing file needs *Overwrite the outputs of geoprocessing
+operations*), snap tolerance (0.5 m), grade source (`levels` | `field`), *Use selected features only* (off; a layer
+with no selection is read in full), *Add to map* (on), then one **Field** parameter per role. Picking a layer fills
+its fields with the Water Corporation names that exist in it; change any of them.
+
+| Role | Layer | Default field | Used for |
+|---|---|---|---|
+| ac_id / ac_surface_level | access chambers | `PACID` / `TOPLEV` | `node_id`, `surface_level` (lid, m AHD) |
+| cp_id | connection points | `ID` | node id when referenced by a sewer |
+| pipe_id | sewers | `ID` | `conduit_id`, `asset_id` |
+| us_node / ds_node | sewers | `US_MANHOLE_ID` / `DS_MANHOLE_ID` | end nodes (id match first) |
+| us_invert / ds_invert | sewers | `UPSTREAM` / `DOWNSTREAM` | invert levels, m AHD |
+| flow_grade | sewers | `FLOW_GRADE` | "1 in x", cross-check (and fallback with grade source `field`) |
+| length | sewers | `LENGTH` | `length_m` (else geometry length) |
+| diameter | sewers | *none (unconfirmed: `HEIGHT`? `DIAMETER`?)* | `dn` |
+| status / sewer_type / material | sewers | `STATUS` / `MAINTYPE` / `MATERIAL` | coded values |
+| purpose / planset / install_date | sewers | `PURPOSE` / `PLANSET` / `DATEINST` | notes; `install_year` |
+
+**Rules and assumptions**
+- Coded values use the text before the first `-` (`A- actual` -> `A`); maps are in the TOML. Unknown codes fall back
+  (status `existing`, type `reticulation`, material `other`) with a warning and are listed with counts.
+- Nodes: every access chamber (status `existing`, data_source `gis`). Chambers have no invert, so
+  `invert_level` = lowest connected sewer end level (noted "invert derived from connected pipes").
+- Connection points become nodes only when a sewer references them (by id or snapping): `io_end` if an `io` sewer
+  touches them, else `junction`. Unreferenced ones are not imported (counted).
+- Blank/unmatched manhole ids: the end snaps to the nearest node within the tolerance, else a placeholder
+  junction `X<sewer id>_US|_DS` (data_source `assumed`) is created, with a warning.
+- A sewer digitised against its US/DS ids (US node nearer the last vertex) is reversed, with a warning.
+- Grade from levels is compared with `FLOW_GRADE`; a difference over 10 % warns with both values. Grade source
+  `field` derives a missing invert from the other invert, length and `FLOW_GRADE` (data_source `assumed`); it never
+  overrides levels that are present.
+- Diameter: a standard DN (100-1200) is used as is; any other value maps to the nearest standard DN and the raw
+  value is kept in `internal_diameter_mm`. **If no diameter field is mapped every sewer gets DN 150 (assumed) and a
+  loud warning is printed: capacity results are meaningless until real diameters are supplied.**
+- Location is left at the schema default (`road_reserve`); `PURPOSE`/`PLANSET` go to notes.
+- Coordinates are read with `spatial_reference` EPSG:7850. If a source is GDA94 (28348-28358, 4283 or a GDA 1994
+  name) `arcpy.env.geographicTransformations` is set to `GDA_1994_To_GDA2020_NTv2_Cons_Conf` (a failure only warns).
+  Curved segments are read as their vertices.
+- After writing, `wwnet_native.check` runs; counts and the first 50 issues are printed, then the layers are added.
 
 ## Install
 

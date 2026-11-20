@@ -1,8 +1,10 @@
 """Tool bodies for WWNet.pyt. Plain-value arguments in, messages out; arcpy injected."""
 from __future__ import annotations
 
+import os
+
 from . import (arcpy_tools, assistant_run, capacity, cli, dpapi, gpkg, issues_table, maplayers,
-               settings, shared, symbology, vendor)
+               settings, shared, sewer_import, symbology, vendor)
 from .messages import Messages
 
 MAX_LINES = 300
@@ -24,6 +26,72 @@ def add_model_to_map(arcpy, msgs: Messages, gpkg_path: str, symbolize: bool = Tr
     layers = maplayers.add_model(arcpy, gpkg_path, msgs, symbolize=symbolize)
     msgs.info(f"Added {len(layers)} layer(s) to the active map.")
     return layers
+
+
+def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, out_path: str,
+                      fields: dict | None = None, snap_tolerance: float | None = None,
+                      grade_source: str | None = None, use_selected: bool = False,
+                      add_to_map: bool = True, native=None) -> dict:
+    """Water Corporation gravity sewer layers -> new WWNet GeoPackage (see arcgis_toolbox/README.md).
+
+    `*_layer` are map layers / paths / names; `fields` maps role -> source field name (missing roles
+    use the template defaults)."""
+    si = sewer_import
+    imp = si.importer()
+    native = native or si.native_with_write()
+    if not out_path.lower().endswith(".gpkg"):
+        out_path += ".gpkg"
+    exists = os.path.exists(out_path)
+    overwrite = bool(getattr(getattr(arcpy, "env", None), "overwriteOutput", False))
+    if exists and not overwrite:
+        raise RuntimeError(f"{out_path} already exists. Choose a new name or enable 'Overwrite the outputs "
+                           "of geoprocessing operations' in the Geoprocessing options / Environments.")
+    cfg = imp.load_template()
+    fmap = imp.FieldMap.from_config(cfg).with_overrides(**{k: (v or "") for k, v in (fields or {}).items()
+                                                           if k in si.ROLE_LAYER})
+    opts = imp.ImportOptions.from_config(cfg, snap_tolerance_m=snap_tolerance, grade_source=grade_source)
+    if cp_layer is not None and not fmap.cp_id:
+        raise RuntimeError("Choose the connection point ID field.")
+    if not fmap.ac_id or not fmap.pipe_id:
+        raise RuntimeError("The access chamber ID field and the sewer ID field are required.")
+    sources = [("Access chambers", ac_layer), ("Gravity sewers", sewer_layer)]
+    if cp_layer is not None:
+        sources.insert(1, ("Connection points", cp_layer))
+    si.prepare_projection(arcpy, msgs, sources)
+    roles = {k: si.roles_for(k, {r: getattr(fmap, r) for r, *_ in si.FIELD_ROLES})
+             for k in ("ac", "cp", "sewer")}
+    acs = si.read_features(arcpy, ac_layer, roles["ac"], "point", "Access chambers", use_selected, msgs)
+    cps = (si.read_features(arcpy, cp_layer, roles["cp"], "point", "Connection points", use_selected, msgs)
+           if cp_layer is not None else [])
+    sewers = si.read_features(arcpy, sewer_layer, roles["sewer"], "line", "Gravity sewers",
+                              use_selected, msgs)
+    if not sewers:
+        raise RuntimeError("No gravity sewers were read (nothing selected / empty layer?).")
+    model, rep = imp.build_model(acs, cps, sewers, fmap, opts, cfg)
+    si.report_to_messages(msgs, rep)
+    native.write_model(out_path, imp.model_json(model), exists and overwrite)
+    msgs.info(f"Wrote WWNet model {out_path} (EPSG:7850).")
+    issues = native.check(out_path, True)
+    counts = {"error": 0, "warning": 0, "info": 0}
+    for i in issues:
+        counts[i["severity"] if i["severity"] in counts else "info"] += 1
+    report_issues(msgs, issues[:si.MAX_ISSUE_LINES])
+    if len(issues) > si.MAX_ISSUE_LINES:
+        msgs.info(f"... {len(issues) - si.MAX_ISSUE_LINES} more issue(s) stored in wwn_issues "
+                  "(run Check Model for the full table).")
+    msgs.info(f"Model check: {counts['error']} error(s), {counts['warning']} warning(s), {counts['info']} info.")
+    if add_to_map:
+        try:
+            add_model_to_map(arcpy, msgs, out_path, True)
+        except Exception as exc:  # noqa: BLE001
+            msgs.warn(f"Could not add the model to the active map: {exc}")
+    return {"path": out_path, "report": rep, "issues": issues, "model": model}
+
+
+def sewer_field_defaults(arcpy, layer) -> dict:
+    """role -> Water Corporation default field name that exists in `layer` ('' if absent)."""
+    return sewer_import.pick_defaults(sewer_import.layer_field_names(arcpy, layer),
+                                      sewer_import.template_defaults())
 
 
 def report_issues(msgs: Messages, issues: list):

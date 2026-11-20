@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bundle schema.sql and rulesets into the plugin package and zip it for QGIS.
+"""Bundle schema.sql, import templates and rulesets into the plugin package and zip it for QGIS.
 
 Usage:  python package.py [--no-zip]
 Output: dist/wwnet-<version>.zip  (install via Plugins > Manage and Install > Install from ZIP)
@@ -22,6 +22,9 @@ def copy_resources():
     src = REPO / "templates" / "schema.sql"
     shutil.copy2(src, RES / "schema.sql")
     n = 1
+    for toml in sorted((REPO / "templates" / "import").glob("*.toml")):
+        shutil.copy2(toml, RES / toml.name)
+        n += 1
     for toml in sorted((REPO / "rulesets").glob("*.toml")):
         shutil.copy2(toml, RES / toml.name)
         n += 1

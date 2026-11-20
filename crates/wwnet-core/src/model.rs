@@ -58,16 +58,20 @@ str_enum!(LandUse = Residential {
 str_enum!(Ground = Dry { Dry => "dry", Wet => "wet" });
 str_enum!(Region = South { South => "south", North => "north" });
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Node {
     pub node_id: String,
     pub geom: Option<Point>,
+    #[serde(default)]
     pub node_type: NodeType,
     pub surface_level: Option<f64>,
     pub invert_level: Option<f64>,
     pub chamber_diameter_mm: Option<i64>,
     pub flood_level: Option<f64>,
+    #[serde(default)]
     pub status: Status,
+    #[serde(default)]
     pub data_source: DataSource,
     pub asset_id: Option<String>,
     pub install_year: Option<i64>,
@@ -93,23 +97,30 @@ impl Node {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Conduit {
     pub conduit_id: String,
+    #[serde(default)]
     pub geom: Option<LineString>,
     pub us_node_id: String,
     pub ds_node_id: String,
     pub dn: i64,
     pub internal_diameter_mm: Option<f64>,
+    #[serde(default)]
     pub material: Material,
     pub pipe_class: Option<String>,
     pub us_invert: Option<f64>,
     pub ds_invert: Option<f64>,
     pub length_m: Option<f64>,
     pub ks_mm: Option<f64>,
+    #[serde(default)]
     pub location: Location,
+    #[serde(default)]
     pub sewer_type: SewerType,
+    #[serde(default)]
     pub status: Status,
+    #[serde(default)]
     pub data_source: DataSource,
     pub install_year: Option<i64>,
     pub condition_grade: Option<i64>,
@@ -163,7 +174,8 @@ impl Conduit {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PumpStation {
     pub ps_id: String,
     pub geom: Option<Point>,
@@ -177,7 +189,9 @@ pub struct PumpStation {
     pub stop_level: Option<f64>,
     pub overflow_level: Option<f64>,
     pub emergency_storage_m3: Option<f64>,
+    #[serde(default)]
     pub status: Status,
+    #[serde(default)]
     pub data_source: DataSource,
     pub notes: Option<String>,
 }
@@ -204,17 +218,21 @@ impl PumpStation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Pump {
     pub pump_id: String,
     pub ps_id: String,
+    #[serde(default = "default_role")]
     pub role: String,
     pub curve_json: Option<String>,
+    #[serde(default = "default_speed")]
     pub speed_pct: f64,
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RisingMain {
     pub rm_id: String,
     pub geom: Option<LineString>,
@@ -223,28 +241,39 @@ pub struct RisingMain {
     pub dn: Option<i64>,
     pub internal_diameter_mm: Option<f64>,
     pub material: Option<String>,
+    #[serde(default = "default_roughness_type")]
     pub roughness_type: String,
     pub roughness: Option<f64>,
     pub length_m: Option<f64>,
     pub profile_json: Option<String>,
+    #[serde(default)]
     pub status: Status,
+    #[serde(default)]
     pub data_source: DataSource,
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Subcatchment {
     pub subcatchment_id: String,
     pub geom: Option<MultiPolygon>,
     pub outlet_node_id: String,
     pub net_area_ha: Option<f64>,
     pub gross_area_ha: Option<f64>,
+    #[serde(default)]
     pub broadacre: bool,
+    #[serde(default)]
     pub land_use: LandUse,
+    #[serde(default = "default_rcode")]
     pub rcode: String,
+    #[serde(default)]
     pub ground: Ground,
+    #[serde(default)]
     pub region: Region,
+    #[serde(default)]
     pub extra_flow_lps: f64,
+    #[serde(default)]
     pub status: Status,
     pub notes: Option<String>,
 }
@@ -269,13 +298,33 @@ impl Subcatchment {
     }
 }
 
+fn default_role() -> String {
+    "duty".into()
+}
+fn default_speed() -> f64 {
+    100.0
+}
+fn default_roughness_type() -> String {
+    "ks".into()
+}
+fn default_rcode() -> String {
+    "R20".into()
+}
+
 /// The whole in-memory model.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Model {
+    #[serde(default)]
     pub nodes: Vec<Node>,
+    #[serde(default)]
     pub conduits: Vec<Conduit>,
+    #[serde(default)]
     pub pump_stations: Vec<PumpStation>,
+    #[serde(default)]
     pub pumps: Vec<Pump>,
+    #[serde(default)]
     pub rising_mains: Vec<RisingMain>,
+    #[serde(default)]
     pub subcatchments: Vec<Subcatchment>,
 }
