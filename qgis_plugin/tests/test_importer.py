@@ -381,15 +381,20 @@ def test_direction_from_neighbours_and_unknown():
     assert "reversed" not in rep.counts
 
 
-def test_maintype_e_is_assumed_not_unknown():
+def test_maintype_codes_e_is_branch_and_main():
+    """Water Corporation MAINTYPE: E = inspection shaft (IS) sewer, B = branch, M = main, R = retic."""
     acs = [ac("A", 0, 0), ac("B", 10, 0)]
-    rows = [pipe(f"P{i}", [(0, 0), (10, 0)], "A", "B", MAINTYPE="E- ?") for i in range(3)]
+    rows = [pipe("P1", [(0, 0), (10, 0)], "A", "B", MAINTYPE="B- branch"),
+            pipe("P2", [(10, 0), (20, 0)], "B", None, MAINTYPE="M- main"),
+            # IS sewer: no upstream chamber, discharges into B
+            seg("S1", [(10, 12), (10, 0)], None, "B", 21.0, 19.5, MAINTYPE="E- inspection shaft")]
     model, rep = build_model(acs, [], rows)
-    assert {c["sewer_type"] for c in model["conduits"]} == {"reticulation"}
-    assert not rep.unknown_codes and "unknown_code" not in codes_of(rep)
-    assert rep.assumed_codes == {"MAINTYPE": {"E": 3}}
-    lines = [x for x in rep.summary_lines() if x.startswith("Assumed MAINTYPE")]
-    assert len(lines) == 1 and "'E' x3" in lines[0]
+    c = by_id(model["conduits"], "conduit_id")
+    assert (c["P1"]["sewer_type"], c["P2"]["sewer_type"], c["S1"]["sewer_type"]) == ("reticulation", "main", "is")
+    assert not rep.unknown_codes and not rep.assumed_codes
+    up = by_id(model["nodes"], "node_id")[c["S1"]["us_node_id"]]
+    assert up["node_type"] == "is_end" and "inspection shaft" in up["notes"]
+    assert c["S1"]["ds_node_id"] == "B"
 
 
 def test_warning_summary_spread_across_codes():

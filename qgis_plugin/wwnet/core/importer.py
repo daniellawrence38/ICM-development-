@@ -692,6 +692,16 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     # ---- node finishing --------------------------------------------------------------------
     for cid in cp_has_io:
         nodes[cp_map[cid]]["node_type"] = "io_end"
+    # The upstream end of an IS / IO sewer has no chamber by design: type the dangling end as such
+    # (DS 50 4.2.2) instead of leaving it as an unexplained dangling junction.
+    end_types = {"is": ("is_end", "inspection shaft (IS sewer upstream end)"),
+                 "io": ("io_end", "inspection opening (IO sewer upstream end)")}
+    for c in conduits:
+        t = end_types.get(c.get("sewer_type"))
+        n = nodes.get(c.get("us_node_id"))
+        if t and n is not None and n.get("notes") == "dangling end":
+            n["node_type"], n["notes"] = t
+            rep.count("is_io_ends")
     for nid, n in nodes.items():
         if nid in outgoing:
             lv, how = min(outgoing[nid]), "lowest outgoing sewer us invert"

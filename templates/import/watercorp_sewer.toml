@@ -49,15 +49,15 @@ J = "ms"
 I = "skip"
 
 [codes.sewer_type]
-R = "reticulation"
-M = "main"
+R = "reticulation"              # R- retic
+B = "reticulation"              # B- branch
+M = "main"                      # M- main
+E = "is"                        # E- inspection shaft sewer: no upstream access chamber (DS 50 4.2.2)
 IO = "io"
 IS = "is"
-E = "reticulation"              # E: meaning unconfirmed (treated as reticulation)
 
 # Codes whose mapping is an assumption: no per-feature warning, one "assumed" line in the summary.
 [assumed.sewer_type]
-E = "meaning unconfirmed; treated as reticulation"
 
 [codes.material]
 PVC = "pvc"
