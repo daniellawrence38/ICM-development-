@@ -41,7 +41,7 @@ its fields with the Water Corporation names that exist in it; change any of them
 | us_invert / ds_invert | sewers | `UPSTREAM` / `DOWNSTREAM` | invert levels, m AHD |
 | flow_grade | sewers | `FLOW_GRADE` | "1 in x", cross-check (and fallback with grade source `field`) |
 | length | sewers | `LENGTH` | `length_m` (else geometry length) |
-| diameter | sewers | *none (unconfirmed: `HEIGHT`? `DIAMETER`?)* | `dn` |
+| diameter | sewers | `HEIGHT` (mm) | `dn` |
 | status / sewer_type / material | sewers | `STATUS` / `MAINTYPE` / `MATERIAL` | coded values |
 | purpose / planset / install_date | sewers | `PURPOSE` / `PLANSET` / `DATEINST` | notes; `install_year` |
 

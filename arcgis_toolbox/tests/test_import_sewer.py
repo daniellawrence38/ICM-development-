@@ -157,7 +157,7 @@ def test_missing_source_field_is_clear_error(world, tmp_path):
 
 def test_diameter_not_mapped_is_loud(world, tmp_path):
     a, lyr, _ = world
-    res = run(a, lyr, tmp_path, fields={})
+    res = run(a, lyr, tmp_path, fields={"diameter": ""})
     assert any(lv == "warn" and "NO DIAMETER FIELD MAPPED" in t for lv, t in a.log)
     assert {c["dn"] for c in res["model"]["conduits"]} == {150}
 
@@ -185,7 +185,7 @@ def test_old_native_gives_clear_error(world, tmp_path, monkeypatch):
 def test_field_defaults_from_layer(world):
     a, lyr, _ = world
     d = tools_impl.sewer_field_defaults(a, lyr["sew"])
-    assert d["pipe_id"] == "ID" and d["us_invert"] == "UPSTREAM" and d["diameter"] == ""
+    assert d["pipe_id"] == "ID" and d["us_invert"] == "UPSTREAM" and d["diameter"] == "HEIGHT"
     assert d["us_node"] == "US_MANHOLE_ID" and d["ac_id"] == "" and d["cp_id"] == "ID"
     d = tools_impl.sewer_field_defaults(a, lyr["ac"])
     assert d["ac_id"] == "PACID" and d["ac_surface_level"] == "TOPLEV" and d["us_invert"] == ""
@@ -219,7 +219,7 @@ def test_pyt_tool_parameters_and_execute(world, tmp_path):
     byn["ac_layer"].value, byn["sewer_layer"].value = lyr["ac"], lyr["sew"]
     t.updateParameters(params)
     assert byn["f_ac_id"].value == "PACID" and byn["f_us_invert"].value == "UPSTREAM"
-    assert byn["f_diameter"].value is None
+    assert byn["f_diameter"].value == "HEIGHT"
     # user picks the diameter field and runs
     byn["f_diameter"].value = "HEIGHT"
     byn["out_gpkg"].value = str(tmp_path / "pyt.gpkg")

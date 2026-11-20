@@ -52,7 +52,7 @@ def test_code_helpers():
 def test_template_defaults():
     cfg = imp.load_template()
     fm = FieldMap.from_config(cfg)
-    assert fm.ac_id == "PACID" and fm.us_node == "US_MANHOLE_ID" and fm.diameter == ""
+    assert fm.ac_id == "PACID" and fm.us_node == "US_MANHOLE_ID" and fm.diameter == "HEIGHT"
     o = ImportOptions.from_config(cfg)
     assert (o.snap_tolerance_m, o.grade_source, o.grade_tolerance_pct) == (0.5, "levels", 10.0)
     assert cfg["codes"]["material"]["CI"] == "other" and cfg["codes"]["sewer_type"]["IO"] == "io"
