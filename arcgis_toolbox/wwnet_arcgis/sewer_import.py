@@ -234,10 +234,10 @@ def _id_literals(arcpy, src, id_field: str, ids) -> list:
 
 
 def read_connection_points(arcpy, src, roles_fields: dict, id_field: str, ref_ids, ext, use_selected: bool,
-                           msgs, label: str = "Connection points") -> list:
+                           msgs, label: str = "Connection points", buffer_m: float = EXTENT_BUFFER_M) -> list:
     """Connection points are never read in full (the layer can hold ~1e6 features). Reads (a) those whose id
     is in `ref_ids` (sewer end ids not matched by a chamber) and (b) those within `ext` (sewer extent grown
-    by 2 m). A selection in the layer is honoured when `use_selected`."""
+    by `buffer_m`: 2 m, or the connection point load search radius when loads are imported). A selection in the layer is honoured when `use_selected`."""
     GEOM = importer().GEOM
     if use_selected and selection_count(src):
         return read_features(arcpy, src, roles_fields, "point", label, True, msgs)
@@ -276,7 +276,7 @@ def read_connection_points(arcpy, src, roles_fields: dict, id_field: str, ref_id
         else:
             n_ext = add(got)
     msgs.info(f"{label}: read {len(out)} feature(s) by query (not the whole layer): {n_id} matching "
-              f"{len(lits)} sewer end id(s), {n_ext} more within the sewer extent +{EXTENT_BUFFER_M:g} m.")
+              f"{len(lits)} sewer end id(s), {n_ext} more within the sewer extent +{buffer_m:g} m.")
     for r in out:
         r.setdefault(GEOM, None)
     return out

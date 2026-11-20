@@ -64,3 +64,9 @@ containing data you are not permitted to disclose. API keys are never logged.
 `wwnet/core/*`, `assistant/engine.py`, `client.py`, `prompt.py`, `tools.py`, `install.py` contain no
 qgis imports and are unit tested. `dock.py`, `qt_bridge.py`, `qgis_tools.py`, `secrets.py`,
 `settings_dialog.py`, `layers.py`, `check_dock.py`, `plugin.py` need QGIS.
+
+## Loading (schema v2)
+
+The importer (`core/importer.py`, options `load_connection_points` and `cp_load_search_m` in `templates/import/watercorp_sewer.toml`)
+assigns each connection point read to the nearest imported sewer within the search distance (default 10 m) and writes one
+`wwn_node_loads` row per upstream node. `core/schema.upgrade_model()` brings a v1 file up to schema v2.

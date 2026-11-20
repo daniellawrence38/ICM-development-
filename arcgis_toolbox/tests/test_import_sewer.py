@@ -88,7 +88,7 @@ def test_end_to_end_valid_gpkg_and_messages(world, tmp_path):
     assert all(sr.factoryCode == 7850 for _, sr in a.cursor_calls)
     assert {f[-1] for f, _ in a.cursor_calls} == {"SHAPE@XY", "SHAPE@"}
     # added to the map
-    assert len([k for k, _ in a.added if k == "data"]) == 5
+    assert len([k for k, _ in a.added if k == "data"]) == 6   # 5 layers + the node loads table
     assert a.env.geographicTransformations is None
 
 
@@ -213,7 +213,7 @@ def test_pyt_tool_parameters_and_execute(world, tmp_path):
     names = [p.name for p in params]
     assert names[:8] == ["ac_layer", "cp_layer", "sewer_layer", "out_gpkg", "snap", "grade_source",
                          "use_selected", "add_to_map"]
-    assert names[8:] == ["f_" + r for r, *_ in sewer_import.FIELD_ROLES]
+    assert names[8:] == ["f_" + r for r, *_ in sewer_import.FIELD_ROLES] + ["load_cps", "cp_radius"]
     byn = {p.name: p for p in params}
     assert byn["snap"].value == 0.5 and byn["grade_source"].value == "levels"
     assert byn["use_selected"].value is False and byn["add_to_map"].value is True
@@ -304,8 +304,8 @@ def test_cp_read_by_id_and_extent_never_full_scan(world, tmp_path):
     by_id, by_ext = reads
     assert by_id["where"] == "\"ID\" IN ('C7')" and by_id["spatial_filter"] is None
     assert by_ext["spatial_filter"] is not None and by_ext["relationship"] == "INTERSECTS"
-    x0, y0, x1, y1 = by_ext["spatial_filter"].bbox       # sewer extent grown by 2 m, EPSG:7850
-    assert (x0, y0, x1, y1) == pytest.approx((385000.0 - 2, 6460000.0 - 2, 385110.326591 + 2, 6460000.0 + 2))
+    x0, y0, x1, y1 = by_ext["spatial_filter"].bbox       # sewer extent grown by the 10 m load search radius
+    assert (x0, y0, x1, y1) == pytest.approx((385000.0 - 10, 6460000.0 - 10, 385110.326591 + 10, 6460000.0 + 10))
     assert by_ext["spatial_filter"].spatialReference.factoryCode == 7850
     assert by_id["rows"] == 1 and by_ext["rows"] == 1
     assert any("not the whole layer" in t and "1 matching 1 sewer end id" in t for _, t in a.log)
@@ -521,3 +521,61 @@ def test_all_pyt_parameter_dependencies_are_existing_earlier_names(fake_arcpy):
             for d in p.parameterDependencies:
                 assert d in names, f"{t().label}: {p.name} depends on {d!r}"
             names.append(p.name)
+
+
+def test_cp_loads_assigned_and_written(world, tmp_path):
+    a, lyr, _ = world
+    a.sources["C:/d/cp"]["rows"] = [
+        {"ID": "C1", GEOM: (385000.4, 6460004.0)},        # 4 m off sewer 22030208 (upstream node A1)
+        {"ID": "C2", GEOM: (385105.0, 6460006.0)},        # 6 m off sewer 22030223 (US node A3)
+        {"ID": "C3", GEOM: (385120.0, 6460009.9)},        # in the read extent but 13.9 m from the sewer
+        {"ID": "C9", GEOM: (385500.0, 6460000.0)}]        # never read
+    res = run(a, lyr, tmp_path)
+    c = con(res)
+    rows = c.execute("select load_id, node_id, connections, adwf_lps, source from wwn_node_loads "
+                     "order by load_id").fetchall()
+    assert rows == [("CP-A1", "A1", 1, None, "connection_points"), ("CP-A3", "A3", 1, None, "connection_points")]
+    c.close()
+    assert any(t.startswith("Loads: 2 connection point(s) assigned to 2 node(s); 1 unassigned") for _, t in a.log)
+    assert any("cp_not_assigned" in t for lv, t in a.log if lv == "warn")
+    assert not any(r["full_scan"] for r in cp_reads(a))
+    assert any(t.startswith("Connection points: read 2") or "within the sewer extent +10 m" in t
+               for _, t in a.log)
+
+
+def test_cp_loads_off_and_optional_layer(world, tmp_path):
+    a, lyr, _ = world
+    a.sources["C:/d/cp"]["rows"] = [{"ID": "C1", GEOM: (385000.4, 6460004.0)}]
+    res = run(a, lyr, tmp_path, load_connection_points=False)
+    c = con(res)
+    assert c.execute("select count(*) from wwn_node_loads").fetchone()[0] == 0
+    c.close()
+    assert not any(t.startswith("Loads:") for _, t in a.log)
+    ext = [r for r in cp_reads(a) if r["spatial_filter"] is not None][0]
+    assert ext["spatial_filter"].bbox[0] == pytest.approx(385000.0 - 2)
+
+
+def test_no_cp_layer_gives_no_loads(world, tmp_path):
+    a, lyr, _ = world
+    res = tools_impl.import_sewer_data(a, Messages(a), lyr["ac"], None, lyr["sew"], str(tmp_path / "n.gpkg"),
+                                       fields={"diameter": "HEIGHT"})
+    c = con(res)
+    assert c.execute("select count(*) from wwn_node_loads").fetchone()[0] == 0
+    c.close()
+    assert any("No connection point layer" in t for _, t in a.log)
+
+
+def test_pyt_import_params_pass_cp_options(world, tmp_path):
+    a, lyr, _ = world
+    mod = load_pyt()
+    t = mod.ImportSewerData()
+    params = t.getParameterInfo()
+    byn = {p.name: p for p in params}
+    assert byn["load_cps"].value is True and byn["cp_radius"].value == 10.0
+    byn["ac_layer"].value, byn["cp_layer"].value, byn["sewer_layer"].value = lyr["ac"], lyr["cp"], lyr["sew"]
+    byn["f_diameter"].value = "HEIGHT"
+    byn["f_ac_id"].value, byn["f_pipe_id"].value, byn["f_cp_id"].value = "PACID", "ID", "ID"
+    byn["load_cps"].value = False
+    byn["out_gpkg"].value = str(tmp_path / "o.gpkg")
+    t.execute(params, None)
+    assert not any(t_.startswith("Loads:") for _, t_ in a.log)

@@ -56,7 +56,7 @@ class Toolbox(object):
     def __init__(self):
         self.label = "WWNet"
         self.alias = "wwnet"
-        self.tools = [NewModel, ImportSewerData, AddModelToMap, CheckModel, RunDesign, Trace, PipeCapacity,
+        self.tools = [NewModel, ImportSewerData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, Trace, PipeCapacity,
                       SetAssistantApiKey, AskWWNetAssistant, VerifySetup]
 
 
@@ -117,7 +117,11 @@ class ImportSewerData(object):
             f.parameterDependencies = [self._LAYER_NAME[layer_key]]  # Pro requires parameter NAMES
             f.category = "Source fields"
             params.append(f)
-        return params
+        loads = _p("load_cps", "Create loads from connection points", "GPBoolean", required=False, default=True)
+        loads.category = "Connection point loads"
+        radius = _p("cp_radius", "Connection point search distance (m)", "GPDouble", required=False, default=10.0)
+        radius.category = "Connection point loads"
+        return params + [loads, radius]
 
     def updateParameters(self, parameters):
         from wwnet_arcgis import sewer_import as si
@@ -139,11 +143,42 @@ class ImportSewerData(object):
         from wwnet_arcgis import sewer_import as si
         fields = {role: (parameters[8 + n].valueAsText or "")
                   for n, (role, _k, _l, _q) in enumerate(si.FIELD_ROLES)}
+        k = 8 + len(si.FIELD_ROLES)       # first connection-point-load parameter
         impl.import_sewer_data(arcpy, Messages(arcpy), _source(parameters[0]), _source(parameters[1]),
                                _source(parameters[2]), parameters[3].valueAsText, fields,
                                parameters[4].value if parameters[4].value is not None else 0.5,
                                parameters[5].valueAsText or "levels", bool(parameters[6].value),
-                               bool(parameters[7].value))
+                               bool(parameters[7].value),
+                               load_connection_points=bool(parameters[k].value) if parameters[k].value is not None
+                               else True,
+                               cp_load_search_m=parameters[k + 1].value)
+
+
+class ImportDiurnalProfile(object):
+    def __init__(self):
+        self.label = "Import Diurnal Profile"
+        self.description = ("Import a diurnal flow profile (time as hh:mm or minutes, factor; any interval, "
+                            "header optional) from a CSV / TXT file, or from text pasted out of InfoWorks ICM "
+                            "(tab-separated Time / Factor), into a WWNet GeoPackage. Upgrades the model to "
+                            "schema v2 if needed. The mean factor is checked, not silently changed.")
+        self.category = "Data"
+
+    def getParameterInfo(self):
+        pasted = _p("pasted", "Or paste profile text (Time<TAB>Factor)", "GPString", required=False)
+        pasted.controlCLSID = MULTILINE
+        return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
+                _p("profile_id", "Profile id", "GPString"),
+                _p("csv", "Profile CSV / TXT file", "DEFile", required=False, filetype=["csv", "txt"]),
+                _p("description", "Description", "GPString", required=False),
+                _p("set_default", "Set as the model's default profile", "GPBoolean", required=False, default=True),
+                _p("normalise", "Normalise to mean 1", "GPBoolean", required=False, default=False),
+                pasted]
+
+    def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        impl.import_profile(Messages(arcpy), parameters[0].valueAsText, parameters[1].valueAsText,
+                            _text(parameters[2]), _text(parameters[3]) or "", bool(parameters[4].value),
+                            bool(parameters[5].value), _text(parameters[6]))
 
 
 class AddModelToMap(object):

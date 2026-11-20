@@ -8,6 +8,7 @@ Layout inside the zip (extract anywhere, then add WWNet.pyt as a toolbox in Pro)
     WWNet-ArcGIS/wwnet_shared/{core,assistant}/*.py   copy of the shared QGIS-free modules
     WWNet-ArcGIS/templates/schema.sql
     WWNet-ArcGIS/templates/import/*.toml       import templates (Import Sewer Data)
+    WWNet-ArcGIS/templates/profiles/*.csv      example diurnal profile (APPROXIMATE)
     WWNet-ArcGIS/rulesets/*.toml
     WWNet-ArcGIS/bin/wwnet.exe                only with --cli <path>
     WWNet-ArcGIS/vendor/...                   only with --vendor-dir <path> (no-install bundle: anthropic,
@@ -80,6 +81,8 @@ def collect(cli: Path | None = None, vendor_dir: Path | None = None) -> dict:
     files["templates/schema.sql"] = REPO / "templates" / "schema.sql"
     for p in sorted((REPO / "templates" / "import").glob("*.toml")):
         files[f"templates/import/{p.name}"] = p
+    for p in sorted((REPO / "templates" / "profiles").glob("*.*")):
+        files[f"templates/profiles/{p.name}"] = p
     for p in sorted((REPO / "rulesets").glob("*.toml")):
         files[f"rulesets/{p.name}"] = p
     if cli:

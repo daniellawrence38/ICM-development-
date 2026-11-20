@@ -34,7 +34,7 @@ def test_new_model_creates_valid_gpkg_and_adds_layers(fake_arcpy, tmp_path):
     added = [p for k, p in a.added if k == "data"]
     assert [os.path.basename(p) for p in added] == [
         f"main.{t}" for t in ("wwn_subcatchments", "wwn_rising_mains", "wwn_conduits",
-                              "wwn_pump_stations", "wwn_nodes")]
+                              "wwn_pump_stations", "wwn_nodes", "wwn_node_loads")]
     warns = [t for lv, t in a.log if lv == "warn"]
     assert any("Symbology" in w for w in warns)        # fake layers have no symbology -> warn, no raise
     with pytest.raises(FileExistsError):
@@ -149,7 +149,7 @@ def test_pyt_compiles_and_defines_tools(fake_arcpy):
     loader.exec_module(mod)
     tb = mod.Toolbox()
     labels = [t().label for t in tb.tools]
-    assert labels == ["New Model", "Import Sewer Data", "Add Model To Map", "Check Model", "Run Design", "Trace",
+    assert labels == ["New Model", "Import Sewer Data", "Import Diurnal Profile", "Add Model To Map", "Check Model", "Run Design", "Trace",
                       "Pipe Capacity", "Set Assistant API Key", "Ask WWNet Assistant", "Verify Setup"]
     for t in tb.tools:
         params = t().getParameterInfo()
@@ -239,3 +239,107 @@ def test_design_detail_lines_cap_and_exclude_info():
     assert tools_impl.design_info_lines({"summary": {"cover_not_checked_ends": 34}}) == [
         "Cover not checked at 34 conduit end(s): no surface level (IS ends / junctions)."]
     assert tools_impl.design_info_lines({"summary": {}}) == []
+
+
+# ---------------------------------------------------------------- profiles / loads (schema v2)
+
+PROFILE = "Time\tFactor\n" + "".join(f"{i * 5 // 60:02d}:{i * 5 % 60:02d}\t{0.5 if i < 144 else 1.5}\n"
+                                      for i in range(288))
+
+
+def test_import_profile_tool_file_and_paste(fake_arcpy, tmp_path, demo_gpkg):
+    a = fake_arcpy([])
+    csv = tmp_path / "p.txt"
+    csv.write_text(PROFILE)
+    m = Messages(a)
+    r = tools_impl.import_profile(m, demo_gpkg, "RES", str(csv), "desc", True, False)
+    assert r["points"] == 288 and r["interval_min"] == 5 and abs(r["mean_factor"] - 1) < 1e-9
+    con = sqlite3.connect(demo_gpkg)
+    assert con.execute("select count(*) from wwn_profiles where profile_id='RES'").fetchone() == (288,)
+    assert con.execute("select value from wwn_meta where key='default_profile'").fetchone() == ("RES",)
+    assert con.execute("select description, interval_min from wwn_profile_info").fetchone() == ("desc", 5)
+    con.close()
+    assert any("Imported profile RES" in t for _, t in a.log)
+    # pasted text, mean far from 1 -> warning; normalise fixes it
+    r = tools_impl.import_profile(m, demo_gpkg, "P2", None, "", False, False, pasted="0\t2\n720\t4\n")
+    assert any(lv == "warn" and "mean factor" in t for lv, t in a.log)
+    r = tools_impl.import_profile(m, demo_gpkg, "P2", None, "", False, True, pasted="0\t2\n720\t4\n")
+    assert r["normalised"] and abs(r["mean_factor"] - 1) < 1e-9
+    con = sqlite3.connect(demo_gpkg)
+    assert con.execute("select value from wwn_meta where key='default_profile'").fetchone() == ("RES",)
+    con.close()
+
+
+def test_import_profile_tool_errors(fake_arcpy, tmp_path, demo_gpkg):
+    a = fake_arcpy([])
+    m = Messages(a)
+    with pytest.raises(RuntimeError, match="profile id"):
+        tools_impl.import_profile(m, demo_gpkg, " ", None, pasted="0\t1\n")
+    with pytest.raises(RuntimeError, match="Choose a CSV"):
+        tools_impl.import_profile(m, demo_gpkg, "X")
+    with pytest.raises(RuntimeError, match="not found"):
+        tools_impl.import_profile(m, demo_gpkg, "X", str(tmp_path / "nope.csv"))
+    with pytest.raises(Exception, match="outside"):
+        tools_impl.import_profile(m, demo_gpkg, "X", None, pasted="0\t1\n24:00\t1\n")
+
+
+def test_import_profile_cli_fallback(fake_arcpy, no_native, wwnet_exe, tmp_path, demo_gpkg):
+    a = fake_arcpy([])
+    r = tools_impl.import_profile(Messages(a), demo_gpkg, "RES", None, "d", True, False, pasted=PROFILE,
+                                  exe=wwnet_exe)
+    assert r["points"] == 288 and r["is_default"] is True
+
+
+def test_pyt_import_profile_tool(fake_arcpy, tmp_path, demo_gpkg):
+    import importlib.machinery
+    import importlib.util
+    fake_arcpy([])
+    loader = importlib.machinery.SourceFileLoader("wwnet_pyt_prof", str(TOOLBOX / "WWNet.pyt"))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("wwnet_pyt_prof", loader))
+    loader.exec_module(mod)
+    t = mod.ImportDiurnalProfile()
+    assert t.category == "Data" and t.label == "Import Diurnal Profile"
+    params = t.getParameterInfo()
+    assert [p.name for p in params] == ["gpkg", "profile_id", "csv", "description", "set_default", "normalise",
+                                        "pasted"]
+    csv = tmp_path / "p.csv"
+    csv.write_text(PROFILE)
+    params[0].value, params[1].value, params[2].value = demo_gpkg, "RES", str(csv)
+    t.execute(params, None)
+    con = sqlite3.connect(demo_gpkg)
+    assert con.execute("select count(*) from wwn_profiles").fetchone() == (288,)
+    con.close()
+
+
+def test_run_design_reports_adwf_and_results_field(fake_arcpy, demo_gpkg):
+    a = fake_arcpy([])
+    con = sqlite3.connect(demo_gpkg)
+    node = con.execute("select us_node_id from wwn_conduits order by fid limit 1").fetchone()[0]
+    con.close()
+    from wwnet_arcgis import gpkg as g
+    g.upgrade_model(demo_gpkg)
+    con = sqlite3.connect(demo_gpkg)
+    con.execute("insert into wwn_node_loads (load_id,node_id,connections,source) values ('L1',?,86400,'manual')",
+                (node,))
+    con.commit()
+    con.close()
+    d = tools_impl.run_design(a, Messages(a), demo_gpkg, show_layer=False, select_failed=False)
+    assert d["summary"]["total_local_adwf_lps"] == pytest.approx(630.0)
+    assert any(t.startswith("Loads: ADWF 630.000 L/s") for _, t in a.log)
+    assert "ADWF L/s" in tools_impl.results_table_lines(d["conduit_results"])[0]
+    assert ("adwf_lps", "DOUBLE") in tools_impl.RESULT_FIELDS
+
+
+def test_add_model_upgrades_v1_file(fake_arcpy, demo_gpkg):
+    a = fake_arcpy([])
+    con = sqlite3.connect(demo_gpkg)
+    cols = [r[1] for r in con.execute("pragma table_info(wwn_subcatchments)")]
+    con.close()
+    tools_impl.add_model_to_map(a, Messages(a), demo_gpkg)
+    con = sqlite3.connect(demo_gpkg)
+    after = [r[1] for r in con.execute("pragma table_info(wwn_subcatchments)")]
+    assert "adwf_lps" in after and "profile_id" in after
+    assert con.execute("select value from wwn_meta where key='schema_version'").fetchone() == ("2",)
+    con.close()
+    assert any("node loads" in t.lower() for _, t in a.log)
+    assert cols is not None

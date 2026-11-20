@@ -7,7 +7,7 @@ import sqlite3
 
 from . import shared
 
-ATTRIBUTE_ORDER = ("wwn_node_loads", "wwn_profile_info")     # v2 tables worth showing in the map
+ATTRIBUTE_ORDER = ("wwn_node_loads",)     # v2 tables worth showing in the map
 FEATURE_ORDER = ("wwn_subcatchments", "wwn_rising_mains", "wwn_conduits",
                  "wwn_pump_stations", "wwn_nodes")      # bottom -> top
 

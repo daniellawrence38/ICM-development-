@@ -115,6 +115,36 @@ def run_design(gpkg: str, exe: str | None = None) -> dict:
     return data
 
 
+def run_import_profile(gpkg: str, profile_id: str, text: str, description: str = "", set_default: bool = True,
+                       normalise: bool = False, exe: str | None = None) -> dict:
+    """Import a diurnal profile; returns the result dict (profile_id, points, mean_factor, warnings ...)."""
+    nat = native_service()
+    if nat is not None and callable(getattr(nat, "import_profile", None)):
+        return _native_call(nat.import_profile, gpkg, profile_id, text, description, set_default, normalise)
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        f = os.path.join(d, "profile.csv")
+        with open(f, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        args = [exe or find_exe(), "profile", "import", gpkg, profile_id, f, "--description", description]
+        if not set_default:
+            args.append("--no-default")
+        if normalise:
+            args.append("--normalise")
+        proc = _run(args)
+    if proc.returncode != 0:
+        raise CliError((proc.stderr or proc.stdout).strip()[:500] or f"wwnet profile import failed ({proc.returncode})")
+    m = re.search(r"imported profile (\S+) \((\d+) rows, interval (\S+) min, mean ([\d.]+), min ([\d.]+), max ([\d.]+)",
+                  proc.stdout)
+    if not m:
+        raise CliError(f"Unexpected wwnet profile import output: {proc.stdout.strip()[:300]}")
+    return {"profile_id": m.group(1), "points": int(m.group(2)),
+            "interval_min": None if m.group(3) == "-" else int(m.group(3)), "mean_factor": float(m.group(4)),
+            "min_factor": float(m.group(5)), "max_factor": float(m.group(6)),
+            "normalised": ", normalised" in proc.stdout, "is_default": ", default" in proc.stdout,
+            "warnings": [ln[len("warning: "):] for ln in proc.stderr.splitlines() if ln.startswith("warning: ")]}
+
+
 _HEAD = re.compile(r"^(upstream|downstream) of (\S+) \((\d+)\):\s*$")
 
 

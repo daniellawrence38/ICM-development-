@@ -698,6 +698,7 @@ impl Model {
             });
         }
 
+        type ProfileInfo = (Option<String>, Option<i64>, Option<f64>);
         // Schema v2 tables: absent in v1 files (treated as empty).
         if has_table(&c, "wwn_node_loads")? {
             let mut st = c.prepare("SELECT load_id,node_id,connections,adwf_lps,profile_id,source,notes FROM wwn_node_loads ORDER BY rowid")?;
@@ -715,10 +716,7 @@ impl Model {
             }
         }
         if has_table(&c, "wwn_profiles")? {
-            let mut info: std::collections::HashMap<
-                String,
-                (Option<String>, Option<i64>, Option<f64>),
-            > = Default::default();
+            let mut info: std::collections::HashMap<String, ProfileInfo> = Default::default();
             if has_table(&c, "wwn_profile_info")? {
                 let mut st = c.prepare(
                     "SELECT profile_id,description,interval_min,mean_factor FROM wwn_profile_info",

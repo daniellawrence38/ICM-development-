@@ -31,7 +31,8 @@ def add_model_to_map(arcpy, msgs: Messages, gpkg_path: str, symbolize: bool = Tr
 def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, out_path: str,
                       fields: dict | None = None, snap_tolerance: float | None = None,
                       grade_source: str | None = None, use_selected: bool = False,
-                      add_to_map: bool = True, native=None, tee_tolerance: float | None = None) -> dict:
+                      add_to_map: bool = True, native=None, tee_tolerance: float | None = None,
+                      load_connection_points: bool = True, cp_load_search_m: float | None = None) -> dict:
     """Water Corporation gravity sewer layers -> new WWNet GeoPackage (see arcgis_toolbox/README.md).
 
     `*_layer` are map layers / paths / names; `fields` maps role -> source field name (missing roles
@@ -50,7 +51,10 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
     fmap = imp.FieldMap.from_config(cfg).with_overrides(**{k: (v or "") for k, v in (fields or {}).items()
                                                            if k in si.ROLE_LAYER})
     opts = imp.ImportOptions.from_config(cfg, snap_tolerance_m=snap_tolerance, grade_source=grade_source,
-                                       tee_tolerance_m=tee_tolerance)
+                                       tee_tolerance_m=tee_tolerance,
+                                       load_connection_points=bool(load_connection_points),
+                                       cp_load_search_m=(float(cp_load_search_m) if cp_load_search_m is not None
+                                                         else None))
     if cp_layer is not None and not fmap.cp_id:
         raise RuntimeError("Choose the connection point ID field.")
     if not fmap.ac_id or not fmap.pipe_id:
@@ -101,8 +105,15 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
     cps = []
     if cp_layer is not None:
         ac_ids = {imp.to_id(r.get(fmap.ac_id)) for r in acs}
-        cps = si.read_connection_points(arcpy, cp_layer, roles["cp"], fmap.cp_id, sorted(refs - ac_ids), ext,
-                                        use_selected, msgs)
+        # Loads need every connection point near a sewer: the extent grows by the search radius
+        # (spatial filter; the layer is never scanned in full).
+        buf = max(si.EXTENT_BUFFER_M, opts.cp_load_search_m) if opts.load_connection_points \
+            else si.EXTENT_BUFFER_M
+        cp_ext = si.rows_extent(sewers, buf)
+        cps = si.read_connection_points(arcpy, cp_layer, roles["cp"], fmap.cp_id, sorted(refs - ac_ids), cp_ext,
+                                        use_selected, msgs, buffer_m=buf)
+    elif load_connection_points:
+        msgs.info("No connection point layer given: no connection point loads were created.")
     model, rep = imp.build_model(acs, cps, sewers, fmap, opts, cfg)
     si.report_to_messages(msgs, rep)
     native.write_model(out_path, imp.model_json(model), exists and overwrite)
@@ -170,7 +181,8 @@ def _select(arcpy, layer, ids, field):
                                             where if ids else "")
 
 
-RESULT_FIELDS = [("conduit_id", "TEXT"), ("dn", "LONG"), ("grade_1in", "DOUBLE"), ("gsdf_lps", "DOUBLE"),
+RESULT_FIELDS = [("conduit_id", "TEXT"), ("dn", "LONG"), ("grade_1in", "DOUBLE"), ("adwf_lps", "DOUBLE"),
+                 ("gsdf_lps", "DOUBLE"),
                  ("pumped_lps", "DOUBLE"), ("total_lps", "DOUBLE"), ("capacity_lps", "DOUBLE"),
                  ("table44_lps", "DOUBLE"), ("hydraulic_capacity_lps", "DOUBLE"),
                  ("d_over_d", "DOUBLE"), ("velocity_mps", "DOUBLE"), ("result", "TEXT"), ("message", "TEXT")]
@@ -193,12 +205,12 @@ def _opt(c, key, prec):
 
 
 def results_table_lines(conduit_results: list, max_lines: int = MAX_LINES) -> list:
-    hdr = (f"{'Conduit':<10}{'DN':>5}{'Grade 1:x':>10}{'GSDF L/s':>9}{'Pumped':>8}{'Total L/s':>10}"
+    hdr = (f"{'Conduit':<10}{'DN':>5}{'Grade 1:x':>10}{'ADWF L/s':>9}{'GSDF L/s':>9}{'Pumped':>8}{'Total L/s':>10}"
            f"{'Cap L/s':>9}{'T4.4':>6}{'Hyd':>7}{'d/D':>6}{'v m/s':>7}  {'RESULT':<6}  Worst message")
     lines = [hdr, "-" * len(hdr)]
     for c in conduit_results[:max_lines]:
         lines.append(f"{str(c['conduit_id'])[:10]:<10}{int(_num(c, 'dn')):>5}{_num(c, 'grade_1in'):>10.0f}"
-                     f"{_num(c, 'gsdf_lps'):>9.2f}{_num(c, 'pumped_lps'):>8.2f}{_num(c, 'total_lps'):>10.2f}"
+                     f"{_num(c, 'adwf_lps'):>9.2f}{_num(c, 'gsdf_lps'):>9.2f}{_num(c, 'pumped_lps'):>8.2f}{_num(c, 'total_lps'):>10.2f}"
                      f"{_num(c, 'capacity_lps'):>9.1f}{_opt(c, 'table44_lps', 1):>6}"
                      f"{_opt(c, 'hydraulic_capacity_lps', 1):>7}{_num(c, 'd_over_d'):>6.2f}{_num(c, 'velocity_mps'):>7.2f}"
                      f"  {str(c['result']).upper():<6}  {_worst_message(c)[:60]}")
@@ -242,7 +254,7 @@ def build_results_fc(arcpy, gpkg_path: str, conduit_results: list) -> str:
             c = by_id.get(cid)
             if c is None:
                 continue
-            ins.insertRow([cid, int(_num(c, "dn")), _num(c, "grade_1in"), _num(c, "gsdf_lps"),
+            ins.insertRow([cid, int(_num(c, "dn")), _num(c, "grade_1in"), _num(c, "adwf_lps"), _num(c, "gsdf_lps"),
                            _num(c, "pumped_lps"), _num(c, "total_lps"), _num(c, "capacity_lps"),
                            _num(c, "table44_lps"), _num(c, "hydraulic_capacity_lps"), _num(c, "d_over_d"), _num(c, "velocity_mps"), c["result"],
                            _worst_message(c)[:255], shape])
@@ -297,6 +309,10 @@ def run_design(arcpy, msgs: Messages, gpkg_path: str, show_layer: bool = True, a
     msgs.info(f"Design run: {s['conduits']} conduit(s): {s['pass']} pass, {s['warn']} warn, "
               f"{s['fail']} fail. Terminal GSDF {s['terminal_gsdf_lps']:.3f} L/s "
               f"(total local {s['total_local_gsdf_lps']:.3f} L/s).")
+    adwf = s.get("total_local_adwf_lps") or 0.0
+    if adwf:
+        msgs.info(f"Loads: ADWF {adwf:.3f} L/s total ({s.get('terminal_adwf_lps') or 0.0:.3f} L/s at terminals); "
+                  f"GSDF from loads = ADWF x {s.get('peaking_factor', 1.5):g} peaking factor.")
     for line in results_table_lines(d["conduit_results"]):
         msgs.info(line)
     for line in design_detail_lines(d["conduit_results"]):
@@ -369,6 +385,32 @@ def trace(arcpy, msgs: Messages, nodes_layer, node_id: str, direction: str = "Up
         else:
             msgs.warn("The conduit layer is not in the active map; only nodes were selected.")
     return {"nodes": sorted(traced), "conduits": conduits}
+
+
+def import_profile(msgs: Messages, gpkg_path: str, profile_id: str, csv_path: str | None = None,
+                   description: str = "", set_default: bool = True, normalise: bool = False,
+                   pasted: str | None = None, exe=None) -> dict:
+    """Import a diurnal profile (CSV / TXT file, or text pasted from ICM: tab-separated Time / Factor)."""
+    if not (profile_id or "").strip():
+        raise RuntimeError("Enter a profile id.")
+    if csv_path:
+        if not os.path.isfile(csv_path):
+            raise RuntimeError(f"Profile file not found: {csv_path}")
+        with open(csv_path, encoding="utf-8-sig", errors="replace") as fh:
+            text = fh.read()
+    elif pasted and pasted.strip():
+        text = pasted
+    else:
+        raise RuntimeError("Choose a CSV / TXT profile file or paste the profile text.")
+    r = cli.run_import_profile(gpkg_path, profile_id.strip(), text, description or "", set_default,
+                               normalise, exe)
+    msgs.info(f"Imported profile {r['profile_id']}: {r['points']} row(s), interval {r.get('interval_min')} min, "
+              f"mean factor {r['mean_factor']:.4f}, min {r['min_factor']:.3f}, max {r['max_factor']:.3f}"
+              + (" (normalised to mean 1)" if r.get("normalised") else "")
+              + (". Set as the model's default profile." if r.get("is_default") else "."))
+    for w in r.get("warnings", []):
+        msgs.warn(w)
+    return r
 
 
 def pipe_capacity(msgs: Messages, dn, grade, ks=None, flow=None) -> dict:

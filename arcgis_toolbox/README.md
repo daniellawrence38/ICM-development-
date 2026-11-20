@@ -9,8 +9,9 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
 
 | Tool | What it does |
 |---|---|
+| Import Diurnal Profile | (category Data) Imports a diurnal profile (CSV / TXT file or text pasted from ICM: `Time<TAB>Factor`; hh:mm or minutes; any interval) into a model, optionally as the default profile; warns if the mean is not 1 (tick *Normalise* to divide by the mean). Example: `templates/profiles/example_residential.csv` (APPROXIMATE, digitised from a screenshot) |
 | Import Sewer Data | (category Data) Converts Water Corporation gravity-sewer layers into a new WWNet GeoPackage, checks it and adds it to the map; see [Import Sewer Data](#import-sewer-data) |
-| New Model | Creates a GeoPackage from `schema.sql` (sqlite3) and adds the layers to the active map in a `WWNet` group layer |
+| New Model | Creates a GeoPackage from `schema.sql` (sqlite3, schema v2) and adds the layers to the active map in a `WWNet` group layer |
 | Add Model To Map | Adds the `wwn_*` layers (`<file>.gpkg\main.<table>`) of an existing model and applies symbology: nodes by `node_type`, conduits by DN with an Arcade label `DN225 1:300`. Symbology failures only warn |
 | Check Model | `wwnet_native.check` (same output as `wwnet check --json`); messages via AddMessage/AddWarning/AddError; optional output issues table |
 | Run Design | `wwnet_native.design` (same output as `wwnet design --json`); prints the pass/warn/fail summary, a per-conduit table (DN, grade, GSDF / pumped / total / governing capacity (Cap = lesser of Table 4.4 and hydraulic) / T4.4 / Hyd L/s, d/D, velocity, result, worst message) and failing/warning checks with DS 50 clauses (max 5 per rule; info such as "cover not checked" is summarised in one line). By default adds a temporary in-memory layer `Design results — <model>` (polylines coloured pass/warn/fail, labelled with flow/capacity and d/D) to the active map and selects failed conduits on it and on the model's conduit layer. The layer lives in `memory\` and is not saved: re-run Run Design after restarting Pro. "Add results table to map" (off by default) also adds the standalone `wwn_results_conduits` table |
@@ -21,6 +22,13 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
 | Ask WWNet Assistant | DS 50 assistant with tools `list_layers`, `get_selected_features`, `query_features`, `get_feature`, `pipe_capacity`, `check_conduit`, `residential_gsdf`, `lookup_ds50`, `propose_edits` |
 
 ## Import Sewer Data
+
+Connection point loads: with a connection point layer, each connection point within the sewers' extent + the search distance
+(default 10 m, spatial filter, never a full scan) is assigned to the nearest imported sewer (point-to-line distance within the
+search distance) and counted as one connection (630 L/d) at that sewer's UPSTREAM node, aggregated into one `wwn_node_loads` row
+per node (`CP-<node_id>`). The messages report `Loads: N connection point(s) assigned to M node(s); K unassigned; ADWF total X L/s`.
+Tick off *Create loads from connection points* to skip. Run Design reports ADWF / GSDF totals; the results layer has `adwf_lps`.
+Add Model To Map upgrades a v1 model to schema v2 (new tables and the subcatchment `adwf_lps` / `profile_id` fields).
 
 Converts the Water Corporation (WA) layers *Sewer access chambers* (points), *Sewer connection points* (points,
 optional) and *Gravity sewers* (polylines) into a new WWNet GeoPackage. Needs a `wwnet_native` that has

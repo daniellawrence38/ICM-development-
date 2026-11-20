@@ -45,7 +45,7 @@ def test_zip_contents_and_no_qgis(tmp_path):
         names = set(zf.namelist())
         top = package.TOP + "/"
         for must in ("WWNet.pyt", "README.md", "templates/schema.sql", "rulesets/ds50_v2r4.toml",
-                     "templates/import/watercorp_sewer.toml", "wwnet_shared/core/importer.py",
+                     "templates/import/watercorp_sewer.toml", "templates/profiles/example_residential.csv", "wwnet_shared/core/importer.py",
                      "wwnet_arcgis/sewer_import.py", "wwnet_shared/__init__.py", "wwnet_shared/core/schema.py",
                      "wwnet_shared/core/native.py", "wwnet_shared/assistant/engine.py",
                      "wwnet_shared/assistant/client.py", "wwnet_shared/assistant/prompt.py",

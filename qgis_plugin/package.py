@@ -28,6 +28,9 @@ def copy_resources():
     for toml in sorted((REPO / "rulesets").glob("*.toml")):
         shutil.copy2(toml, RES / toml.name)
         n += 1
+    for f in sorted((REPO / "templates" / "profiles").glob("*.csv")):
+        shutil.copy2(f, RES / f.name)
+        n += 1
     print(f"copied {n} resource file(s) into {RES}")
 
 
