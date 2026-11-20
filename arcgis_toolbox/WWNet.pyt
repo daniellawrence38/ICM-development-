@@ -88,6 +88,7 @@ class ImportSewerData(object):
     # fixed parameter positions: 0 ACs, 1 connection points, 2 sewers, 3 output, 4 snap, 5 grade source,
     # 6 selected only, 7 add to map, 8.. one Field parameter per role in sewer_import.FIELD_ROLES
     _LAYER_PARAM = {"ac": 0, "cp": 1, "sewer": 2}
+    _LAYER_NAME = {"ac": "ac_layer", "cp": "cp_layer", "sewer": "sewer_layer"}
 
     def __init__(self):
         self.label = "Import Sewer Data"
@@ -113,7 +114,7 @@ class ImportSewerData(object):
                   _p("add_to_map", "Add to map", "GPBoolean", required=False, default=True)]
         for role, layer_key, label, required in si.FIELD_ROLES:
             f = _p("f_" + role, label, "Field", required=required)
-            f.parameterDependencies = [self._LAYER_PARAM[layer_key]]
+            f.parameterDependencies = [self._LAYER_NAME[layer_key]]  # Pro requires parameter NAMES
             f.category = "Source fields"
             params.append(f)
         return params

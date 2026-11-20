@@ -214,7 +214,8 @@ def test_pyt_tool_parameters_and_execute(world, tmp_path):
     assert byn["snap"].value == 0.5 and byn["grade_source"].value == "levels"
     assert byn["use_selected"].value is False and byn["add_to_map"].value is True
     assert byn["cp_layer"].parameterType == "Optional" and byn["f_pipe_id"].parameterType == "Required"
-    assert byn["f_diameter"].parameterDependencies == [2] and byn["f_ac_id"].parameterDependencies == [0]
+    assert byn["f_diameter"].parameterDependencies == ["sewer_layer"]
+    assert byn["f_ac_id"].parameterDependencies == ["ac_layer"]
     # picking layers fills the field parameters with defaults present in the layer
     byn["ac_layer"].value, byn["sewer_layer"].value = lyr["ac"], lyr["sew"]
     t.updateParameters(params)
@@ -241,3 +242,21 @@ def test_transformation_choice_and_none_available(world, tmp_path):
     run(a, lyr, tmp_path)
     assert a.env.geographicTransformations is None
     assert any(lv == "warn" and "No GDA94 -> GDA2020 transformation" in t for lv, t in a.log)
+
+
+def test_all_pyt_parameter_dependencies_are_existing_earlier_names(fake_arcpy):
+    """Guards the real-Pro rule that broke the dialog: dependencies are names of earlier params."""
+    import importlib.machinery
+    import importlib.util
+    from pathlib import Path
+    fake_arcpy([])
+    path = Path(__file__).resolve().parents[1] / "WWNet.pyt"
+    loader = importlib.machinery.SourceFileLoader("wwnet_pyt_deps", str(path))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("wwnet_pyt_deps", loader))
+    loader.exec_module(mod)
+    for t in mod.Toolbox().tools:
+        names = []
+        for p in t().getParameterInfo():
+            for d in p.parameterDependencies:
+                assert d in names, f"{t().label}: {p.name} depends on {d!r}"
+            names.append(p.name)

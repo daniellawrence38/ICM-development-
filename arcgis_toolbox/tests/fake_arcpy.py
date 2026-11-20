@@ -141,6 +141,19 @@ class FakeParameter:
         self.value, self.filter = None, _Filter()
         self.controlCLSID = None
         self.hasBeenValidated = False
+        self._deps = []
+
+    @property
+    def parameterDependencies(self):
+        return self._deps
+
+    @parameterDependencies.setter
+    def parameterDependencies(self, deps):
+        # Real ArcGIS Pro fails to open the tool ("tool has failed to open") unless these are
+        # parameter NAMES (strings); indices are rejected.
+        if not all(isinstance(d, str) for d in deps):
+            raise ValueError(f"parameterDependencies must be parameter names, got {deps!r}")
+        self._deps = list(deps)
 
     @property
     def valueAsText(self):
