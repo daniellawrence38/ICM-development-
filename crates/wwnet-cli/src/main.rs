@@ -5,6 +5,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use wwnet_core::{gpkg, Severity};
 use wwnet_design::service;
+use wwnet_sim::service::{simulate_file, simulate_json, ServiceOptions};
 
 #[derive(Parser)]
 #[command(name = "wwnet", version, about = "Wastewater network modelling tool")]
@@ -42,6 +43,32 @@ enum Cmd {
         /// Rule set TOML (default: embedded DS 50 Ver 2 Rev 4)
         #[arg(long)]
         ruleset: Option<PathBuf>,
+    },
+    /// Run the SWMM dynamic-wave simulation; writes wwn_sim_* tables.
+    /// Exit code 0 unless the engine reports an error.
+    Simulate {
+        file: PathBuf,
+        /// Total simulated hours including warm-up
+        #[arg(long, default_value_t = 48.0)]
+        duration_h: f64,
+        /// Warm-up hours excluded from the results
+        #[arg(long, default_value_t = 24.0)]
+        warmup_h: f64,
+        /// manning (one n for all conduits) or ks (equivalent n from the model's ks)
+        #[arg(long, default_value = "manning", value_parser = ["manning", "ks"])]
+        roughness: String,
+        /// Manning n (with --roughness manning)
+        #[arg(long = "n", default_value_t = 0.013)]
+        n: f64,
+        /// Multiplier on all inflows (e.g. 1.5 to test the peak)
+        #[arg(long, default_value_t = 1.0)]
+        flow_scale: f64,
+        /// Print the full result as JSON
+        #[arg(long)]
+        json: bool,
+        /// Also write the generated SWMM input file here
+        #[arg(long)]
+        write_inp: Option<PathBuf>,
     },
     /// Diurnal profile tools
     Profile {
@@ -160,6 +187,26 @@ fn run() -> Result<i32> {
             json,
             ruleset,
         } => return design(&file, json, ruleset.as_deref()),
+        Cmd::Simulate {
+            file,
+            duration_h,
+            warmup_h,
+            roughness,
+            n,
+            flow_scale,
+            json,
+            write_inp,
+        } => {
+            let opts = ServiceOptions {
+                duration_h,
+                warmup_h,
+                roughness,
+                manning_n: n,
+                flow_scale,
+                ..ServiceOptions::default()
+            };
+            return simulate(&file, &opts, json, write_inp.as_deref());
+        }
         Cmd::Profile {
             cmd:
                 ProfileCmd::Import {
@@ -262,4 +309,58 @@ fn design(file: &std::path::Path, json: bool, ruleset: Option<&std::path::Path>)
         }
     }
     Ok(if out.summary.fail > 0 { 1 } else { 0 })
+}
+
+fn simulate(
+    file: &std::path::Path,
+    opts: &ServiceOptions,
+    json: bool,
+    write_inp: Option<&std::path::Path>,
+) -> Result<i32> {
+    let out = simulate_file(file, opts, true)?;
+    if let Some(p) = write_inp {
+        std::fs::write(p, &out.inp_text)
+            .map_err(|e| anyhow::anyhow!("writing {}: {e}", p.display()))?;
+    }
+    if json {
+        println!("{}", simulate_json(&out)?);
+        return Ok(0);
+    }
+    let mut links: Vec<&wwnet_sim::service::SimLinkOut> = out.links.iter().collect();
+    links.sort_by(|a, b| b.max_d_over_d.total_cmp(&a.max_d_over_d));
+    println!(
+        "{:<12} {:>5} {:>11} {:>6} {:>8} {:>10}",
+        "CONDUIT", "DN", "Qmax L/s", "d/D", "v m/s", "SURCH min"
+    );
+    for l in links.iter().take(50) {
+        println!(
+            "{:<12} {:>5} {:>11.2} {:>6.2} {:>8.2} {:>10.0}",
+            l.conduit_id,
+            l.dn,
+            l.max_flow_lps,
+            l.max_d_over_d,
+            l.max_velocity_mps,
+            l.surcharged_min
+        );
+    }
+    if links.len() > 50 {
+        println!(
+            "... {} more conduit(s) (use --json for all)",
+            links.len() - 50
+        );
+    }
+    let s = &out.summary;
+    println!(
+        "inflow ADWF {:.3} L/s (x{} = {:.3} L/s simulated); peak outlet flow {:.3} L/s; continuity error {:.3} %",
+        s.inflow_adwf_lps, opts.flow_scale, s.inflow_simulated_lps, s.peak_outlet_flow_lps, s.continuity_error_pct
+    );
+    println!(
+        "{} conduit(s): {} surcharged; {} node(s): {} flooded ({:.2} m3)",
+        s.conduits, s.surcharged_conduits, s.nodes, s.flooded_nodes, s.total_flood_volume_m3
+    );
+    if let Some(r) = &out.run_id {
+        println!("results stored in wwn_sim_* (run {r})");
+    }
+    out.warnings.iter().for_each(|w| eprintln!("warning: {w}"));
+    Ok(0)
 }

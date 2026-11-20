@@ -709,6 +709,7 @@ dependencies = [
  "wwnet-core",
  "wwnet-design",
  "wwnet-rules",
+ "wwnet-sim",
 ]
 
 [[package]]
@@ -748,10 +749,12 @@ name = "wwnet-py"
 version = "0.1.0"
 dependencies = [
  "pyo3",
+ "serde_json",
  "wwnet-core",
  "wwnet-design",
  "wwnet-hydraulics",
  "wwnet-rules",
+ "wwnet-sim",
 ]
 
 [[package]]
@@ -770,12 +773,15 @@ name = "wwnet-sim"
 version = "0.1.0"
 dependencies = [
  "approx",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "wwnet-core",
+ "wwnet-design",
  "wwnet-hydraulics",
+ "wwnet-rules",
  "wwnet-swmm-sys",
 ]
 

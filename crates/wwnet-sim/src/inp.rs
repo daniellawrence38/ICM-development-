@@ -56,7 +56,7 @@ fn safe_id(orig: &str, used: &mut HashSet<String>) -> String {
 }
 
 /// Linear, cyclic (24 h) interpolation of the profile factor at `minute` of the day.
-fn profile_factor(pts: &[(u32, f64)], minute: f64) -> f64 {
+pub(crate) fn profile_factor(pts: &[(u32, f64)], minute: f64) -> f64 {
     match pts.len() {
         0 => 1.0,
         1 => pts[0].1,

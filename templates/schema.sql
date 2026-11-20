@@ -111,6 +111,26 @@ CREATE TABLE IF NOT EXISTS wwn_profiles (
 CREATE TABLE IF NOT EXISTS wwn_profile_info (
   profile_id TEXT PRIMARY KEY, description TEXT, interval_min INTEGER, mean_factor REAL);
 
+-- Written by `wwnet simulate` (SWMM dynamic engine); read-only for users. Statistics exclude the warm-up.
+CREATE TABLE IF NOT EXISTS wwn_sim_runs (
+  run_id TEXT PRIMARY KEY,                  -- UTC timestamp of the run
+  options_json TEXT, continuity_error_pct REAL, warnings_json TEXT);
+CREATE TABLE IF NOT EXISTS wwn_sim_links (
+  run_id TEXT NOT NULL, conduit_id TEXT NOT NULL,
+  max_flow_lps REAL, max_depth_m REAL, max_d_over_d REAL, max_velocity_mps REAL,
+  time_of_max_flow TEXT,                    -- time of day (HH:MM) of the peak
+  surcharged_min REAL,
+  PRIMARY KEY (run_id, conduit_id));
+CREATE TABLE IF NOT EXISTS wwn_sim_nodes (
+  run_id TEXT NOT NULL, node_id TEXT NOT NULL,
+  max_hgl_m REAL, max_depth_m REAL, flood_volume_m3 REAL, surcharged_min REAL,
+  PRIMARY KEY (run_id, node_id));
+CREATE TABLE IF NOT EXISTS wwn_sim_series (
+  run_id TEXT NOT NULL, object_type TEXT NOT NULL,   -- conduit | node (node flow = flooding)
+  object_id TEXT NOT NULL, minute REAL NOT NULL,     -- minutes after the end of the warm-up
+  flow_lps REAL, depth_m REAL,
+  PRIMARY KEY (run_id, object_type, object_id, minute));
+
 INSERT OR IGNORE INTO gpkg_contents (table_name, data_type, identifier, srs_id) VALUES
  ('wwn_nodes','features','Nodes',7850), ('wwn_conduits','features','Gravity sewers',7850),
  ('wwn_pump_stations','features','Pump stations',7850), ('wwn_rising_mains','features','Rising mains',7850),
@@ -118,7 +138,9 @@ INSERT OR IGNORE INTO gpkg_contents (table_name, data_type, identifier, srs_id) 
  ('wwn_pumps','attributes','Pumps',NULL), ('wwn_meta','attributes','Model metadata',NULL),
  ('wwn_results_conduits','attributes','Design results',NULL), ('wwn_issues','attributes','Validation issues',NULL),
  ('wwn_node_loads','attributes','Node loads',NULL), ('wwn_profiles','attributes','Profile values',NULL),
- ('wwn_profile_info','attributes','Profiles',NULL);
+ ('wwn_profile_info','attributes','Profiles',NULL),
+ ('wwn_sim_runs','attributes','Simulation runs',NULL), ('wwn_sim_links','attributes','Simulation link results',NULL),
+ ('wwn_sim_nodes','attributes','Simulation node results',NULL), ('wwn_sim_series','attributes','Simulation time series',NULL);
 INSERT OR IGNORE INTO gpkg_geometry_columns VALUES
  ('wwn_nodes','geom','POINT',7850,0,0), ('wwn_conduits','geom','LINESTRING',7850,0,0),
  ('wwn_pump_stations','geom','POINT',7850,0,0), ('wwn_rising_mains','geom','LINESTRING',7850,0,0),

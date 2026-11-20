@@ -268,6 +268,61 @@ fn import_profile<'py>(
     loads(py, &text)
 }
 
+/// Run the SWMM dynamic-wave simulation (same as `wwnet simulate --json`): dict with run_id,
+/// options, summary, links, nodes, warnings, series_ids. With `write`, results go to the
+/// wwn_sim_* tables (series for the downstream-most 5 conduits plus `series_ids`). With
+/// `write_inp`, the generated SWMM input file is saved there. RuntimeError if the engine fails;
+/// ValueError for bad options.
+#[pyfunction]
+#[pyo3(signature = (
+    gpkg_path, duration_h=48.0, warmup_h=24.0, roughness="manning", n=0.013, flow_scale=1.0,
+    write=true, series_ids=None, write_inp=None
+))]
+#[allow(clippy::too_many_arguments)]
+fn simulate<'py>(
+    py: Python<'py>,
+    gpkg_path: &str,
+    duration_h: f64,
+    warmup_h: f64,
+    roughness: &str,
+    n: f64,
+    flow_scale: f64,
+    write: bool,
+    series_ids: Option<Vec<String>>,
+    write_inp: Option<&str>,
+) -> PyResult<Bound<'py, PyAny>> {
+    use wwnet_sim::service::{simulate_file, simulate_json, ServiceOptions};
+    let opts = ServiceOptions {
+        duration_h,
+        warmup_h,
+        roughness: roughness.to_string(),
+        manning_n: n,
+        flow_scale,
+        series_ids: series_ids.unwrap_or_default(),
+        ..ServiceOptions::default()
+    };
+    let text = py
+        .allow_threads(|| {
+            let out = simulate_file(gpkg_path, &opts, write)?;
+            if let Some(p) = write_inp {
+                std::fs::write(p, &out.inp_text)?;
+            }
+            simulate_json(&out)
+        })
+        .map_err(|e| match &e {
+            wwnet_core::Error::Other(m)
+                if m.starts_with("roughness must")
+                    || m.starts_with("invalid Manning")
+                    || m.starts_with("invalid flow scale")
+                    || m.contains("invalid options") =>
+            {
+                PyValueError::new_err(m.clone())
+            }
+            _ => lib_err(e),
+        })?;
+    loads(py, &text)
+}
+
 /// Upgrade a model GeoPackage to the current schema (creates missing v2 tables).
 #[pyfunction]
 fn upgrade_model(py: Python<'_>, gpkg_path: &str) -> PyResult<()> {
@@ -294,6 +349,7 @@ fn wwnet_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(new_model, m)?)?;
     m.add_function(wrap_pyfunction!(write_model, m)?)?;
     m.add_function(wrap_pyfunction!(import_profile, m)?)?;
+    m.add_function(wrap_pyfunction!(simulate, m)?)?;
     m.add_function(wrap_pyfunction!(upgrade_model, m)?)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     Ok(())

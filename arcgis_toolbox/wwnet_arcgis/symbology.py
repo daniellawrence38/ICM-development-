@@ -93,7 +93,46 @@ def style_results(layer):
     lc.visible = True
 
 
-_STYLERS = {"wwn_nodes": style_nodes, "wwn_conduits": style_conduits, "results": style_results}
+# Simulation results: colour by the peak d/D class (surcharged = d/D >= 1 or any surcharged time).
+SIM_COLOURS = {"low": [46, 158, 68], "medium": [240, 210, 40], "high": [240, 140, 30],
+               "surcharged": [215, 38, 61]}
+SIM_LABEL_ARCADE = ('Text($feature.max_flow_lps,"0.0") + " L/s d/D " + Text($feature.max_d_over_d,"0.00")')
+
+
+def sim_class(max_d_over_d, surcharged_min) -> str:
+    """<0.5 low (green), 0.5-0.75 medium (yellow), 0.75-1.0 high (orange), surcharged (red)."""
+    d = float(max_d_over_d or 0.0)
+    if d >= 1.0 or float(surcharged_min or 0.0) > 0.0:
+        return "surcharged"
+    if d >= 0.75:
+        return "high"
+    if d >= 0.5:
+        return "medium"
+    return "low"
+
+
+def style_sim(layer):
+    _unique(layer, "d_class", lambda v: SIM_COLOURS.get(str(v), DEFAULT_RGB), width=lambda v: 2.5)
+    layer.showLabels = True
+    lc = layer.listLabelClasses()[0]
+    try:
+        lc.expressionEngine = "Arcade"
+    except Exception:  # noqa: BLE001
+        pass
+    lc.expression = SIM_LABEL_ARCADE
+    lc.visible = True
+
+
+def style_sim_nodes(layer):
+    sym = layer.symbology
+    sym.updateRenderer("SimpleRenderer")
+    sym.renderer.symbol.color = _rgb(SIM_COLOURS["surcharged"])
+    sym.renderer.symbol.size = 9
+    layer.symbology = sym
+
+
+_STYLERS = {"wwn_nodes": style_nodes, "wwn_conduits": style_conduits, "results": style_results,
+            "sim": style_sim, "sim_nodes": style_sim_nodes}
 
 
 def apply(table: str, layer, msgs):

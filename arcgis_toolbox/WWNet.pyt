@@ -56,7 +56,7 @@ class Toolbox(object):
     def __init__(self):
         self.label = "WWNet"
         self.alias = "wwnet"
-        self.tools = [NewModel, ImportSewerData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, Trace, PipeCapacity,
+        self.tools = [NewModel, ImportSewerData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity,
                       SetAssistantApiKey, AskWWNetAssistant, VerifySetup]
 
 
@@ -227,6 +227,34 @@ class RunDesign(object):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl.run_design(arcpy, Messages(arcpy), parameters[0].valueAsText, bool(parameters[1].value),
                         bool(parameters[2].value), bool(parameters[3].value))
+
+
+class RunSimulation(object):
+    def __init__(self):
+        self.label = "Run Simulation"
+        self.description = ("Run the EPA SWMM dynamic-wave engine (embedded, no install) on the model: dry weather "
+                            "flow from node loads and sub-catchments with their diurnal profiles. Results go to "
+                            "the wwn_sim_* tables and a temporary results layer coloured by peak d/D.")
+        self.category = "Analysis"
+
+    def getParameterInfo(self):
+        return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
+                _p("duration_h", "Duration (h)", "GPDouble", required=False, default=48.0),
+                _p("warmup_h", "Warm-up (h)", "GPDouble", required=False, default=24.0),
+                _p("roughness", "Roughness", "GPString", required=False, default="manning",
+                   values=["manning", "ks"]),
+                _p("manning_n", "Manning n", "GPDouble", required=False, default=0.013),
+                _p("flow_scale", "Flow scale", "GPDouble", required=False, default=1.0),
+                _p("show_layer", "Show results layer on map", "GPBoolean", required=False, default=True),
+                _p("export_inp", "Export SWMM .inp (optional)", "DEFile", "Output", required=False,
+                   filetype=["inp"])]
+
+    def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        v = lambda i, d: parameters[i].value if parameters[i].value is not None else d  # noqa: E731
+        impl.run_simulation(arcpy, Messages(arcpy), parameters[0].valueAsText, float(v(1, 48.0)),
+                            float(v(2, 24.0)), parameters[3].valueAsText or "manning", float(v(4, 0.013)),
+                            float(v(5, 1.0)), bool(v(6, True)), _text(parameters[7]))
 
 
 class Trace(object):

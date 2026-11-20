@@ -13,9 +13,11 @@ path = "src/main.rs"
 wwnet-core = { path = "../wwnet-core" }
 wwnet-design = { path = "../wwnet-design" }
 wwnet-rules = { path = "../wwnet-rules" }
+wwnet-sim = { path = "../wwnet-sim" }
 anyhow.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+serde_json.workspace = true

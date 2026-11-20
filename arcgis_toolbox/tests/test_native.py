@@ -77,3 +77,37 @@ def test_neither_available_explains_wheel(monkeypatch, tmp_path):
             fn()
         msg = str(ei.value)
         assert "wwnet_native" in msg and "pip install" in msg and "no .exe required" in msg
+
+
+def test_native_simulate(demo_gpkg, tmp_path):
+    import sqlite3
+    inp = tmp_path / "m.inp"
+    r = nat.simulate(demo_gpkg, duration_h=12.0, warmup_h=6.0, write_inp=str(inp), series_ids=["P01"])
+    assert r["summary"]["conduits"] == 11 and abs(r["summary"]["continuity_error_pct"]) < 1.0
+    assert "P01" in r["series_ids"] and r["run_id"]
+    assert "[CONDUITS]" in inp.read_text()
+    con = sqlite3.connect(demo_gpkg)
+    assert con.execute("select count(*) from wwn_sim_links").fetchone() == (11,)
+    assert con.execute("select count(*) from wwn_sim_runs").fetchone() == (1,)
+    con.close()
+    nowrite = nat.simulate(demo_gpkg, duration_h=12.0, warmup_h=6.0, write=False, flow_scale=2.0)
+    assert nowrite["run_id"] is None and nowrite["summary"]["inflow_simulated_lps"] == pytest.approx(
+        2 * nowrite["summary"]["inflow_adwf_lps"])
+    with pytest.raises(ValueError, match="roughness"):
+        nat.simulate(demo_gpkg, roughness="chezy", write=False)
+    with pytest.raises(RuntimeError, match="loading"):
+        nat.simulate(str(tmp_path / "missing.gpkg"))
+
+
+def test_run_simulate_native_matches_cli(wwnet_exe, demo_gpkg, tmp_path):
+    a = _copy(demo_gpkg, tmp_path, "a.gpkg")
+    b = _copy(demo_gpkg, tmp_path, "b.gpkg")
+    n = cli.run_simulate(a, 12.0, 6.0)
+    import wwnet_arcgis.cli as c
+    orig = c.native_service
+    c.native_service = lambda: None
+    try:
+        f = cli.run_simulate(b, 12.0, 6.0, exe=wwnet_exe)
+    finally:
+        c.native_service = orig
+    assert n["summary"] == f["summary"] and n["links"] == f["links"]

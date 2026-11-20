@@ -149,7 +149,7 @@ def test_pyt_compiles_and_defines_tools(fake_arcpy):
     loader.exec_module(mod)
     tb = mod.Toolbox()
     labels = [t().label for t in tb.tools]
-    assert labels == ["New Model", "Import Sewer Data", "Import Diurnal Profile", "Add Model To Map", "Check Model", "Run Design", "Trace",
+    assert labels == ["New Model", "Import Sewer Data", "Import Diurnal Profile", "Add Model To Map", "Check Model", "Run Design", "Run Simulation", "Trace",
                       "Pipe Capacity", "Set Assistant API Key", "Ask WWNet Assistant", "Verify Setup"]
     for t in tb.tools:
         params = t().getParameterInfo()
@@ -343,3 +343,108 @@ def test_add_model_upgrades_v1_file(fake_arcpy, demo_gpkg):
     con.close()
     assert any("node loads" in t.lower() for _, t in a.log)
     assert cols is not None
+
+
+# ------------------------------------------------------------------ Run Simulation
+
+SIM_NAME = "Simulation results — demo"
+NODES_NAME = "Simulation nodes — demo"
+
+
+def _fake_sim(flood=False):
+    links = [dict(conduit_id="P01", dn=150, max_flow_lps=1.0, max_d_over_d=0.3, max_velocity_mps=0.5,
+                  surcharged_min=0.0, time_of_max_flow="07:30"),
+             dict(conduit_id="P02", dn=150, max_flow_lps=9.0, max_d_over_d=0.6, max_velocity_mps=0.9,
+                  surcharged_min=0.0, time_of_max_flow="08:00"),
+             dict(conduit_id="P03", dn=225, max_flow_lps=30.0, max_d_over_d=0.9, max_velocity_mps=1.2,
+                  surcharged_min=0.0, time_of_max_flow="08:05"),
+             dict(conduit_id="P04", dn=225, max_flow_lps=40.0, max_d_over_d=0.8, max_velocity_mps=1.2,
+                  surcharged_min=15.0, time_of_max_flow="08:05")]
+    nodes = [dict(node_id="N01", max_hgl_m=1.0, max_depth_m=1.0, flood_volume_m3=2.5 if flood else 0.0,
+                  surcharged_min=30.0)]
+    return dict(run_id="2026-01-01T00:00:00Z", summary=dict(
+        inflow_adwf_lps=1.0, inflow_simulated_lps=1.5, peak_outlet_flow_lps=3.0, continuity_error_pct=-0.1,
+        conduits=4, nodes=1, surcharged_conduits=1, flooded_nodes=1 if flood else 0,
+        total_flood_volume_m3=2.5 if flood else 0.0), links=links, nodes=nodes, warnings=["a warning"])
+
+
+def test_sim_class_bands():
+    assert [symbology.sim_class(d, s) for d, s in ((0.2, 0), (0.5, 0), (0.74, 0), (0.75, 0), (0.99, 0),
+                                                   (1.0, 0), (0.3, 5))] == \
+        ["low", "medium", "medium", "high", "high", "surcharged", "surcharged"]
+    assert "L/s d/D" in symbology.SIM_LABEL_ARCADE
+
+
+def test_run_simulation_layers_and_messages(fake_arcpy, demo_gpkg, monkeypatch):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    calls = []
+    monkeypatch.setattr(tools_impl.cli, "run_simulate", lambda *args: calls.append(args) or _fake_sim())
+    styled = []
+    monkeypatch.setattr(tools_impl.symbology, "apply", lambda t, lyr, m: styled.append(t) or True)
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg, 12.0, 6.0, "ks", 0.014, 1.5, True, "out.inp")
+    assert calls[0][1:7] == (12.0, 6.0, "ks", 0.014, 1.5, "out.inp")
+    fc = a.memory["memory\\wwnet_sim_demo"]
+    assert fc["geom"] == "POLYLINE" and [n for n, _ in fc["fields"]] == [f for f, _ in tools_impl.SIM_FIELDS]
+    by = {r["conduit_id"]: r for r in fc["rows"]}
+    assert by["P03"]["d_class"] == "high" and by["P04"]["d_class"] == "surcharged"
+    assert by["P01"]["d_class"] == "low" and by["P02"]["d_class"] == "medium"
+    assert [l.name for l in layers].count(SIM_NAME) == 1
+    assert styled == ["sim"]
+    assert not any(NODES_NAME == l.name for l in layers)       # nothing flooded -> no nodes layer
+    text = [t for _, t in a.log]
+    assert any(t.startswith("Conduit") and "Surch min" in t for t in text)
+    assert any("continuity error" in t for t in text) and any("surcharged" in t for t in text)
+    assert ("warn", "a warning") in a.log and any("out.inp" in t for t in text)
+    rows = [t for t in text if t.startswith("P0")]
+    assert rows[0].startswith("P03") and rows[1].startswith("P04")        # sorted by d/D desc
+
+
+def test_run_simulation_flooding_nodes_layer(fake_arcpy, demo_gpkg, monkeypatch):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    monkeypatch.setattr(tools_impl.cli, "run_simulate", lambda *args: _fake_sim(flood=True))
+    styled = []
+    monkeypatch.setattr(tools_impl.symbology, "apply", lambda t, lyr, m: styled.append(t) or True)
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg)
+    assert styled == ["sim", "sim_nodes"]
+    nfc = a.memory["memory\\wwnet_simnodes_demo"]
+    assert nfc["geom"] == "POINT" and [r["node_id"] for r in nfc["rows"]] == ["N01"]
+    assert NODES_NAME in [l.name for l in layers]
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg)       # re-run replaces both layers
+    assert [l.name for l in layers].count(SIM_NAME) == 1 and [l.name for l in layers].count(NODES_NAME) == 1
+
+
+def test_run_simulation_real_engine_and_inp_export(fake_arcpy, wwnet_exe, demo_gpkg, no_native, tmp_path):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    inp = str(tmp_path / "model.inp")
+    d = tools_impl.run_simulation(a, Messages(a), demo_gpkg, 12.0, 6.0, "manning", 0.013, 1.0, True, inp,
+                                  exe=wwnet_exe)
+    assert d["summary"]["conduits"] == 11 and abs(d["summary"]["continuity_error_pct"]) < 1.0
+    assert "[CONDUITS]" in open(inp).read()
+    assert len(a.memory["memory\\wwnet_sim_demo"]["rows"]) == 11
+    assert [l.name for l in layers].count(SIM_NAME) == 1
+    assert any(lv == "warn" and "Symbology for sim" in t for lv, t in a.log)      # fake layer: warn only
+    con = sqlite3.connect(demo_gpkg)
+    assert con.execute("select count(*) from wwn_sim_links").fetchone() == (11,)
+    con.close()
+
+
+def test_run_simulation_show_layer_false(fake_arcpy, demo_gpkg, monkeypatch):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    monkeypatch.setattr(tools_impl.cli, "run_simulate", lambda *args: _fake_sim())
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg, show_layer=False)
+    assert not a.memory and len(layers) == 2
+
+
+def test_run_simulation_tool_parameters(fake_arcpy):
+    fake_arcpy([])
+    loader = importlib.machinery.SourceFileLoader("wwnet_pyt_sim", str(TOOLBOX / "WWNet.pyt"))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("wwnet_pyt_sim", loader))
+    loader.exec_module(mod)
+    t = mod.RunSimulation()
+    assert t.category == "Analysis"
+    p = {x.name: x for x in t.getParameterInfo()}
+    assert list(p) == ["gpkg", "duration_h", "warmup_h", "roughness", "manning_n", "flow_scale", "show_layer",
+                       "export_inp"]
+    assert p["duration_h"].value == 48.0 and p["warmup_h"].value == 24.0 and p["manning_n"].value == 0.013
+    assert p["roughness"].filter.list == ["manning", "ks"] and p["show_layer"].value is True
+    assert p["export_inp"].direction == "Output" and p["export_inp"].parameterType == "Optional"

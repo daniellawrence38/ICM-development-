@@ -350,6 +350,120 @@ def run_design(arcpy, msgs: Messages, gpkg_path: str, show_layer: bool = True, a
     return d
 
 
+SIM_FIELDS = [("conduit_id", "TEXT"), ("dn", "LONG"), ("max_flow_lps", "DOUBLE"), ("max_d_over_d", "DOUBLE"),
+              ("max_velocity_mps", "DOUBLE"), ("surcharged_min", "DOUBLE"), ("d_class", "TEXT")]
+SIM_NODE_FIELDS = [("node_id", "TEXT"), ("max_hgl_m", "DOUBLE"), ("max_depth_m", "DOUBLE"),
+                   ("flood_volume_m3", "DOUBLE"), ("surcharged_min", "DOUBLE")]
+
+
+def _memory_fc(arcpy, gpkg_path: str, prefix: str, geom: str, fields: list) -> str:
+    fc_name = f"{prefix}_{_safe_stem(gpkg_path)}"
+    fc = "memory\\" + fc_name
+    if arcpy.Exists(fc):
+        arcpy.management.Delete(fc)
+    arcpy.management.CreateFeatureclass("memory", fc_name, geom, spatial_reference=_spatial_ref(arcpy, gpkg_path))
+    for name, typ in fields:
+        if typ == "TEXT":
+            arcpy.management.AddField(fc, name, "TEXT", field_length=64)
+        else:
+            arcpy.management.AddField(fc, name, typ)
+    return fc
+
+
+def build_sim_fc(arcpy, gpkg_path: str, links: list) -> str:
+    """memory\\wwnet_sim_<stem> (POLYLINE): conduit geometry + simulation maxima; returns its path."""
+    fc = _memory_fc(arcpy, gpkg_path, "wwnet_sim", "POLYLINE", SIM_FIELDS)
+    by_id = {c["conduit_id"]: c for c in links}
+    cols = [f for f, _ in SIM_FIELDS] + ["SHAPE@"]
+    with arcpy.da.SearchCursor(gpkg.table_path(gpkg_path, "wwn_conduits"), ["conduit_id", "SHAPE@"]) as src, \
+            arcpy.da.InsertCursor(fc, cols) as ins:
+        for cid, shape in src:
+            c = by_id.get(cid)
+            if c is None:
+                continue
+            ins.insertRow([cid, int(_num(c, "dn")), _num(c, "max_flow_lps"), _num(c, "max_d_over_d"),
+                           _num(c, "max_velocity_mps"), _num(c, "surcharged_min"),
+                           symbology.sim_class(c.get("max_d_over_d"), c.get("surcharged_min")), shape])
+    return fc
+
+
+def build_sim_nodes_fc(arcpy, gpkg_path: str, nodes: list) -> str:
+    """memory\\wwnet_simnodes_<stem> (POINT): flooding nodes only; returns its path."""
+    fc = _memory_fc(arcpy, gpkg_path, "wwnet_simnodes", "POINT", SIM_NODE_FIELDS)
+    by_id = {n["node_id"]: n for n in nodes}
+    cols = [f for f, _ in SIM_NODE_FIELDS] + ["SHAPE@"]
+    with arcpy.da.SearchCursor(gpkg.table_path(gpkg_path, "wwn_nodes"), ["node_id", "SHAPE@"]) as src, \
+            arcpy.da.InsertCursor(fc, cols) as ins:
+        for nid, shape in src:
+            n = by_id.get(nid)
+            if n is None:
+                continue
+            ins.insertRow([nid, _num(n, "max_hgl_m"), _num(n, "max_depth_m"), _num(n, "flood_volume_m3"),
+                           _num(n, "surcharged_min"), shape])
+    return fc
+
+
+def sim_table_lines(links: list, top: int = 20) -> list:
+    """Top conduits by max d/D."""
+    hdr = f"{'Conduit':<10}{'DN':>5}{'Qmax L/s':>10}{'d/D':>6}{'v m/s':>7}{'Surch min':>10}  Peak at"
+    lines = [hdr, "-" * len(hdr)]
+    for c in sorted(links, key=lambda x: -_num(x, "max_d_over_d"))[:top]:
+        lines.append(f"{str(c['conduit_id'])[:10]:<10}{int(_num(c, 'dn')):>5}{_num(c, 'max_flow_lps'):>10.2f}"
+                     f"{_num(c, 'max_d_over_d'):>6.2f}{_num(c, 'max_velocity_mps'):>7.2f}"
+                     f"{_num(c, 'surcharged_min'):>10.0f}  {c.get('time_of_max_flow') or '-'}")
+    if len(links) > top:
+        lines.append(f"... {len(links) - top} more conduit(s) (full results in wwn_sim_links)")
+    return lines
+
+
+def _show_sim_layers(arcpy, msgs, gpkg_path: str, d: dict):
+    stem = _safe_stem(gpkg_path)
+    name = f"Simulation results \u2014 {stem}"
+    maplayers.remove_layers_named(arcpy, name)
+    fc = build_sim_fc(arcpy, gpkg_path, d["links"])
+    lyr = maplayers.add_results_layer(arcpy, fc, name, msgs)
+    symbology.apply("sim", lyr, msgs)
+    msgs.info(f"Results layer added: {name} (temporary \u2014 re-run Run Simulation after restarting Pro; "
+              "the results stay in the model's wwn_sim_* tables)")
+    nname = f"Simulation nodes \u2014 {stem}"
+    maplayers.remove_layers_named(arcpy, nname)
+    flooded = [n for n in d.get("nodes", []) if _num(n, "flood_volume_m3") > 0]
+    if flooded:
+        nfc = build_sim_nodes_fc(arcpy, gpkg_path, flooded)
+        nlyr = maplayers.add_results_layer(arcpy, nfc, nname, msgs)
+        symbology.apply("sim_nodes", nlyr, msgs)
+        msgs.info(f"Flooding layer added: {nname} ({len(flooded)} node(s))")
+
+
+def run_simulation(arcpy, msgs: Messages, gpkg_path: str, duration_h: float = 48.0, warmup_h: float = 24.0,
+                   roughness: str = "manning", manning_n: float = 0.013, flow_scale: float = 1.0,
+                   show_layer: bool = True, export_inp: str | None = None, exe=None) -> dict:
+    """Run the SWMM dynamic simulation (`wwnet simulate`), report and optionally map the results."""
+    d = cli.run_simulate(gpkg_path, duration_h, warmup_h, roughness, manning_n, flow_scale,
+                         export_inp or None, exe)
+    s = d["summary"]
+    msgs.info(f"Simulation {d.get('run_id') or ''}: {duration_h:g} h ({warmup_h:g} h warm-up), "
+              f"roughness {roughness}" + (f" n={manning_n:g}" if roughness == "manning" else "")
+              + f", flow scale {flow_scale:g}.")
+    msgs.info(f"Inflow ADWF {s['inflow_adwf_lps']:.3f} L/s (simulated {s['inflow_simulated_lps']:.3f} L/s); "
+              f"peak outlet flow {s['peak_outlet_flow_lps']:.3f} L/s; continuity error "
+              f"{s['continuity_error_pct']:.3f} %.")
+    msgs.info(f"{s['surcharged_conduits']} of {s['conduits']} conduit(s) surcharged; "
+              f"{s['flooded_nodes']} node(s) flooded ({s['total_flood_volume_m3']:.2f} m3).")
+    for line in sim_table_lines(d["links"]):
+        msgs.info(line)
+    for w in d.get("warnings", [])[:MAX_LINES]:
+        msgs.warn(w)
+    if export_inp:
+        msgs.info(f"SWMM input file written: {export_inp}")
+    if show_layer:
+        try:
+            _show_sim_layers(arcpy, msgs, gpkg_path, d)
+        except Exception as exc:  # noqa: BLE001
+            msgs.warn(f"Could not add the simulation layers to the map: {exc}")
+    return d
+
+
 def report_issues_sorted(issues):
     order = {"error": 0, "warning": 1}
     return sorted(issues, key=lambda i: order.get(i.get("severity"), 2))[:MAX_LINES]

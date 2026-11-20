@@ -698,6 +698,26 @@ fn add_node_loads(model: &Model, locals: &mut HashMap<String, Local>, issues: &m
     }
 }
 
+/// Average dry weather flow (L/s) of one sub-catchment for dynamic simulation, reusing the design
+/// loading code: the manual `adwf_lps` when set, otherwise the DS 50 daily flow / 86400 (i.e.
+/// GSDF / peaking at the DS 50 rates). Special `extra_flow_lps` is not ADWF and is excluded.
+/// Returns `None` (with the reason in the issues) when the loading cannot be determined.
+pub fn subcatchment_adwf_lps(
+    model: &Model,
+    s: &Subcatchment,
+    rules: &RuleSet,
+) -> (Option<f64>, Vec<Issue>) {
+    let single = Model {
+        subcatchments: vec![s.clone()],
+        load_settings: model.load_settings.clone(),
+        ..Model::default()
+    };
+    let mut issues = Vec::new();
+    let locals = local_loads(&single, rules, &mut issues);
+    let adwf = locals.values().next().map(|l| l.daily / 86400.0);
+    (adwf, issues)
+}
+
 /// Run the DS 50 design on a model.
 pub fn run_design(model: &Model, rules: &RuleSet) -> Result<DesignOutput> {
     let mut issues: Vec<Issue> = Vec::new();

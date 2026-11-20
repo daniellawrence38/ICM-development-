@@ -10,6 +10,9 @@ description = "Dynamic-wave hydraulic simulation of WWNet gravity networks via e
 wwnet-core = { path = "../wwnet-core" }
 wwnet-swmm-sys = { path = "../wwnet-swmm-sys" }
 wwnet-hydraulics = { path = "../wwnet-hydraulics" }
+wwnet-design = { path = "../wwnet-design" }
+wwnet-rules = { path = "../wwnet-rules" }
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -17,3 +20,4 @@ tempfile.workspace = true
 
 [dev-dependencies]
 approx.workspace = true
+serde_json.workspace = true

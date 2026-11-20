@@ -21,3 +21,5 @@ wwnet-hydraulics = { path = "../wwnet-hydraulics" }
 wwnet-rules = { path = "../wwnet-rules" }
 wwnet-design = { path = "../wwnet-design" }
 wwnet-core = { path = "../wwnet-core" }
+wwnet-sim = { path = "../wwnet-sim" }
+serde_json.workspace = true

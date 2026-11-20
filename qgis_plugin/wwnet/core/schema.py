@@ -10,9 +10,11 @@ from . import paths
 FEATURE_TABLES = ("wwn_nodes", "wwn_conduits", "wwn_pump_stations", "wwn_rising_mains",
                   "wwn_subcatchments")
 ATTRIBUTE_TABLES = ("wwn_pumps", "wwn_results_conduits", "wwn_issues", "wwn_meta", "wwn_node_loads",
-                    "wwn_profile_info", "wwn_profiles")
+                    "wwn_profile_info", "wwn_profiles", "wwn_sim_runs", "wwn_sim_links", "wwn_sim_nodes",
+                    "wwn_sim_series")
 ALL_TABLES = FEATURE_TABLES + ATTRIBUTE_TABLES
-READ_ONLY_TABLES = ("wwn_results_conduits", "wwn_issues", "wwn_meta")
+READ_ONLY_TABLES = ("wwn_results_conduits", "wwn_issues", "wwn_meta", "wwn_sim_runs", "wwn_sim_links",
+                    "wwn_sim_nodes", "wwn_sim_series")
 
 # Business id column per table (used by the assistant tools and issue navigation).
 ID_FIELDS = {
@@ -147,7 +149,7 @@ def column_summary(sql: str | None = None) -> str:
                     s += " {" + "|".join(enums[(tbl, name)]) + "}"
                 cols.append(s)
             kind = "features" if tbl in FEATURE_TABLES else "attributes"
-            ro = " [read-only: written by wwnet design]" if tbl in READ_ONLY_TABLES else ""
+            ro = " [read-only: written by wwnet design / simulate]" if tbl in READ_ONLY_TABLES else ""
             lines.append(f"{tbl} ({kind}{ro}): " + ", ".join(cols))
         return "\n".join(lines)
     finally:

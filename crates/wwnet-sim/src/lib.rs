@@ -6,6 +6,7 @@
 //! [`SimResult`].
 pub mod inp;
 pub mod run;
+pub mod service;
 pub mod types;
 
 pub use run::{simulate, simulate_gpkg_free};

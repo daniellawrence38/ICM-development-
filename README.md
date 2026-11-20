@@ -8,7 +8,9 @@ Wastewater network modelling for gravity sewers, pump stations and rising mains.
 | `crates/wwnet-hydraulics` | Colebrook-White / Manning part-full circular pipe hydraulics |
 | `crates/wwnet-rules` | DS 50 rule set loader and clause-referenced conduit checks |
 | `crates/wwnet-design` | GSDF loading (Tables 4.1–4.3), accumulation, design run |
-| `crates/wwnet-cli` | `wwnet new / check / trace / design` |
+| `crates/wwnet-sim` | SWMM `.inp` writer, in-process runner and the file-level simulation service (`wwnet_sim::service`) |
+| `crates/wwnet-swmm-sys` | Vendored EPA SWMM 5.2.4 C engine (built with `cc`; also linked into the `wwnet_native` wheel) |
+| `crates/wwnet-cli` | `wwnet new / check / trace / design / simulate` |
 | `crates/wwnet-py` | PyO3 `wwnet_native` abi3 wheel used by the plugin |
 | `qgis_plugin/` | QGIS plugin: model create/open, styling, check dock, AI assistant |
 | `arcgis_toolbox/` | ArcGIS Pro Python toolbox (`WWNet.pyt`): same tools and assistant, shares the plugin core |
@@ -23,6 +25,18 @@ cargo run -p wwnet-cli -- design examples/demo/demo.gpkg
 ```
 
 To build the plugin and wheel, see `qgis_plugin/README.md`.
+
+## Dynamic simulation (SWMM)
+
+`wwnet simulate <gpkg> [--duration-h 48] [--warmup-h 24] [--roughness manning|ks] [--n 0.013] [--flow-scale 1.0] [--json] [--write-inp out.inp]`
+(Python: `wwnet_native.simulate(gpkg, duration_h=48.0, warmup_h=24.0, roughness="manning", n=0.013, flow_scale=1.0, write=True, series_ids=None, write_inp=None)`)
+runs the embedded SWMM dynamic-wave engine. Inflows: node loads and sub-catchments (manual `adwf_lps`, else the DS 50
+daily flow / 86400), each with its `profile_id` (node load / sub-catchment, else `wwn_meta.default_profile`; none gives a constant
+flow and the warning "no diurnal profile: constant ADWF"). `--flow-scale` multiplies every inflow. Statistics exclude the warm-up.
+Results go to `wwn_sim_runs` (options, continuity error, warnings), `wwn_sim_links`, `wwn_sim_nodes` and `wwn_sim_series`
+(flow / depth of the 5 downstream-most conduits plus `series_ids`, minutes after the warm-up); the latest 10 runs are kept.
+Pump stations and rising mains are not modelled yet. The CLI prints the top 50 conduits by max d/D and a summary; exit code 0
+unless the engine errors.
 
 ## Loading (schema v2)
 

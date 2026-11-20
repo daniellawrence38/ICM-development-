@@ -115,6 +115,29 @@ def run_design(gpkg: str, exe: str | None = None) -> dict:
     return data
 
 
+def run_simulate(gpkg: str, duration_h: float = 48.0, warmup_h: float = 24.0, roughness: str = "manning",
+                 n: float = 0.013, flow_scale: float = 1.0, write_inp: str | None = None,
+                 exe: str | None = None) -> dict:
+    """SWMM dynamic simulation (results are written to the wwn_sim_* tables). Returns the result dict:
+    run_id, options, summary, links, nodes, warnings."""
+    nat = native_service()
+    if nat is not None and callable(getattr(nat, "simulate", None)):
+        return _native_call(lambda: nat.simulate(gpkg, duration_h, warmup_h, roughness, n, flow_scale,
+                                                 True, None, write_inp))
+    args = [exe or find_exe(), "simulate", gpkg, "--json", "--duration-h", repr(float(duration_h)),
+            "--warmup-h", repr(float(warmup_h)), "--roughness", roughness, "--n", repr(float(n)),
+            "--flow-scale", repr(float(flow_scale))]
+    if write_inp:
+        args += ["--write-inp", write_inp]
+    proc = _run(args, timeout=3600)
+    if proc.returncode != 0:
+        raise CliError((proc.stderr or proc.stdout).strip()[:500] or f"wwnet simulate failed ({proc.returncode})")
+    data = _json(proc, "simulate")
+    if not isinstance(data, dict) or "summary" not in data:
+        raise CliError(f"Unexpected simulate output (exit {proc.returncode}): {proc.stderr.strip()[:300]}")
+    return data
+
+
 def run_import_profile(gpkg: str, profile_id: str, text: str, description: str = "", set_default: bool = True,
                        normalise: bool = False, exe: str | None = None) -> dict:
     """Import a diurnal profile; returns the result dict (profile_id, points, mean_factor, warnings ...)."""
