@@ -169,6 +169,9 @@ class ImportReport:
                     if tot and n / tot >= 0.8 else "; each reversed sewer is noted in its notes field")
             lines.append(f"Reversed digitising direction of {n}{share} sewer(s){conv}.")
         lines.extend(self.diagnostics)
+        if c.get("surface_interpolated"):
+            lines.append(f"Interpolated surface level at {c['surface_interpolated']} junction/tee node(s) between "
+                         "chambers (cover is checked there; ground level is a linear estimate).")
         for fld, codes in self.assumed_codes.items():
             what = ", ".join(f"{k!r} x{v}" + (f" ({self.assumed_notes[fld][k]})" if k in self.assumed_notes.get(fld, {}) else "")
                              for k, v in sorted(codes.items()))
@@ -835,6 +838,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     cond_ids = set(pipe_ids)
     tee_inv: dict = {}               # tee node -> interpolated invert of the main
     branch_ds: list = []             # (conduit id, ds node, ds invert) of conduits ending at a tee node
+    through_pairs: list = []         # (tee node, piece conduit id, next piece conduit id) of split mains
     for idxs in parents.values():
         s = segs[idxs[0]]
         pid, row = s["pid"], s["row"]
@@ -958,6 +962,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             return round(ui + (di - ui) * (x / glen if glen > 0 else 0.0), 6)
 
         pos = 0.0
+        piece_cids: list = []
         for j, piece in enumerate(pieces):
             pl = _length(piece)
             a, b = pos, pos + pl
@@ -973,6 +978,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                     k += 1
                     cid = f"{pid}~{j + 1}_{k}"
                 cond_ids.add(cid)
+            piece_cids.append(cid)
             pus, pds = nchain[j], nchain[j + 1]
             if pui is not None:
                 outgoing.setdefault(pus, []).append(pui)
@@ -988,6 +994,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 "ds_invert": pdi, "length_m": plen, "sewer_type": sewer_type, "status": status,
                 "data_source": data_source, "install_year": year_of(get(row, "install_date")),
                 "asset_id": pid, "notes": "; ".join(notes) or None}))
+        for j in range(len(piece_cids) - 1):
+            through_pairs.append((nchain[j + 1], piece_cids[j], piece_cids[j + 1]))
 
     for cid, nid, di in branch_ds:
         inv = tee_inv.get(nid)
@@ -1059,6 +1067,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                  f"other sewer) at ({g[0]:.2f}, {g[1]:.2f})")
     if len(other) > 20:
         rep.diagnostics.append(f"... {len(other) - 20} more other dangling end(s) not listed.")
+    _interpolate_surface(nodes, conduits, through_pairs, rep)
     for nid, n in nodes.items():
         if nid in outgoing:
             lv, how = min(outgoing[nid]), "lowest outgoing sewer us invert"
@@ -1078,6 +1087,78 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     rep.count("conduits", len(conduits))
     model = {"nodes": list(nodes.values()), "conduits": conduits}
     return model, rep
+
+
+def _interpolate_surface(nodes: dict, conduits: list, through_pairs: list, rep: ImportReport):
+    """Fill surface_level of junction / tee nodes lying on a chain of sewers between two nodes that
+    have a surface level (chambers), linearly by cumulative chainage. A chain runs through nodes that
+    have no surface level, are typed `junction` and either join exactly two sewer ends or are a tee on a
+    split main (the branch is not part of the main's chain). Chains with a surface level at one end
+    only (or none) are left null."""
+    ends: dict = {}                  # node -> [(conduit index, end)]
+    index = {c["conduit_id"]: i for i, c in enumerate(conduits)}
+    for i, c in enumerate(conduits):
+        ends.setdefault(c["us_node_id"], []).append((i, 0))
+        ends.setdefault(c["ds_node_id"], []).append((i, 1))
+    through = {n: (index[a], index[b]) for n, a, b in through_pairs}
+    link: dict = {}                  # node -> (conduit i, conduit j) continuing the chain through it
+    for nid, lst in ends.items():
+        n = nodes.get(nid)
+        if n is None or n.get("surface_level") is not None or n.get("node_type") != "junction":
+            continue
+        if nid in through:
+            link[nid] = through[nid]
+        elif len(lst) == 2 and lst[0][0] != lst[1][0]:
+            link[nid] = (lst[0][0], lst[1][0])
+
+    def other_end(ci, node):
+        c = conduits[ci]
+        return c["ds_node_id"] if c["us_node_id"] == node else c["us_node_id"]
+
+    def walk(ci, node):
+        """Follow the chain from conduit `ci` away from `node`; returns [(conduit, far node), ...]."""
+        out: list = []
+        seen = {ci}
+        while True:
+            far = other_end(ci, node)
+            out.append((ci, far))
+            pair = link.get(far)
+            if pair is None:
+                return out
+            nxt = pair[1] if pair[0] == ci else pair[0]
+            if nxt in seen or ci not in pair:
+                return out
+            seen.add(nxt)
+            ci, node = nxt, far
+
+    def clen(ci):
+        c = conduits[ci]
+        return c.get("length_m") or _length(c["geom"])
+
+    done: set = set()
+    for nid, n in nodes.items():
+        if n.get("surface_level") is None:
+            continue
+        for ci, e in ends.get(nid, ()):
+            if ci in done:
+                continue
+            chain = walk(ci, nid)
+            done.update(c for c, _ in chain)
+            last = chain[-1][1]
+            lastn = nodes.get(last)
+            if len(chain) < 2 or lastn is None or lastn.get("surface_level") is None or last == nid:
+                continue
+            z0, z1 = n["surface_level"], lastn["surface_level"]
+            total = sum(clen(c) for c, _ in chain)
+            cum = 0.0
+            for c, far in chain[:-1]:
+                cum += clen(c)
+                node = nodes[far]
+                z = z0 + (z1 - z0) * (cum / total if total > 0 else 0.5)
+                node["surface_level"] = round(z, 3)
+                node["notes"] = (f"{node['notes']} + " if node.get("notes") else "+ ") + \
+                    f"surface interpolated between {nid} and {last}"
+                rep.count("surface_interpolated")
 
 
 def model_json(model: dict) -> str:

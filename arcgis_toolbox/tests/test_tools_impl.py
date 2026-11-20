@@ -169,7 +169,7 @@ def test_run_design_prints_table(fake_arcpy, wwnet_exe, demo_gpkg):
     d = tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
     text = [t for _, t in a.log]
     hdr = next(t for t in text if t.startswith("Conduit"))
-    for col in ("DN", "Grade 1:x", "GSDF L/s", "Pumped", "Total L/s", "Cap L/s", "d/D", "v m/s", "RESULT",
+    for col in ("DN", "Grade 1:x", "GSDF L/s", "Pumped", "Total L/s", "Cap L/s", "T4.4", "Hyd", "d/D", "v m/s", "RESULT",
                 "Worst message"):
         assert col in hdr
     c = d["conduit_results"][0]
@@ -225,3 +225,17 @@ def test_run_design_show_layer_false(fake_arcpy, wwnet_exe, demo_gpkg):
     tools_impl.run_design(a, Messages(a), demo_gpkg, show_layer=False, exe=wwnet_exe)
     assert not a.memory and len(layers) == 2
     assert not any("Results layer" in t for _, t in a.log)
+
+
+def test_design_detail_lines_cap_and_exclude_info():
+    def chk(rule, res):
+        return dict(rule=rule, clause="DS50 x", result=res, message="msg")
+    rows = [dict(conduit_id=f"C{i}", dn=150, result="fail", checks=[chk("max_flow", "fail"),
+                                                                    chk("cover_not_checked", "info")])
+            for i in range(8)]
+    lines = tools_impl.design_detail_lines(rows)
+    assert len(lines) == 6 and lines[-1] == "... 3 more max_flow item(s)"
+    assert not any("cover_not_checked" in t for t in lines)
+    assert tools_impl.design_info_lines({"summary": {"cover_not_checked_ends": 34}}) == [
+        "Cover not checked at 34 conduit end(s): no surface level (IS ends / junctions)."]
+    assert tools_impl.design_info_lines({"summary": {}}) == []

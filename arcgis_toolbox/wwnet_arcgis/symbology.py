@@ -71,7 +71,8 @@ def style_conduits(layer):
     lc.visible = True
 
 
-RESULT_COLOURS = {"pass": [46, 158, 68], "warn": [232, 163, 23], "fail": [215, 38, 61]}  # #2E9E44 #E8A317 #D7263D
+# #2E9E44 #E8A317 #D7263D; info (e.g. cover not checked) is coloured like pass
+RESULT_COLOURS = {"pass": [46, 158, 68], "warn": [232, 163, 23], "fail": [215, 38, 61], "info": [46, 158, 68]}
 
 RESULTS_LABEL_ARCADE = (
     '$feature.conduit_id + " DN" + $feature.dn + "  " + Text($feature.total_lps,"0.00") + "/" + '

@@ -172,6 +172,7 @@ def _select(arcpy, layer, ids, field):
 
 RESULT_FIELDS = [("conduit_id", "TEXT"), ("dn", "LONG"), ("grade_1in", "DOUBLE"), ("gsdf_lps", "DOUBLE"),
                  ("pumped_lps", "DOUBLE"), ("total_lps", "DOUBLE"), ("capacity_lps", "DOUBLE"),
+                 ("table44_lps", "DOUBLE"), ("hydraulic_capacity_lps", "DOUBLE"),
                  ("d_over_d", "DOUBLE"), ("velocity_mps", "DOUBLE"), ("result", "TEXT"), ("message", "TEXT")]
 
 
@@ -186,14 +187,20 @@ def _num(c, key, default=0.0):
     return default if v is None else v
 
 
+def _opt(c, key, prec):
+    v = c.get(key)
+    return "-" if v is None else f"{v:.{prec}f}"
+
+
 def results_table_lines(conduit_results: list, max_lines: int = MAX_LINES) -> list:
     hdr = (f"{'Conduit':<10}{'DN':>5}{'Grade 1:x':>10}{'GSDF L/s':>9}{'Pumped':>8}{'Total L/s':>10}"
-           f"{'Cap L/s':>9}{'d/D':>6}{'v m/s':>7}  {'RESULT':<6}  Worst message")
+           f"{'Cap L/s':>9}{'T4.4':>6}{'Hyd':>7}{'d/D':>6}{'v m/s':>7}  {'RESULT':<6}  Worst message")
     lines = [hdr, "-" * len(hdr)]
     for c in conduit_results[:max_lines]:
         lines.append(f"{str(c['conduit_id'])[:10]:<10}{int(_num(c, 'dn')):>5}{_num(c, 'grade_1in'):>10.0f}"
                      f"{_num(c, 'gsdf_lps'):>9.2f}{_num(c, 'pumped_lps'):>8.2f}{_num(c, 'total_lps'):>10.2f}"
-                     f"{_num(c, 'capacity_lps'):>9.1f}{_num(c, 'd_over_d'):>6.2f}{_num(c, 'velocity_mps'):>7.2f}"
+                     f"{_num(c, 'capacity_lps'):>9.1f}{_opt(c, 'table44_lps', 1):>6}"
+                     f"{_opt(c, 'hydraulic_capacity_lps', 1):>7}{_num(c, 'd_over_d'):>6.2f}{_num(c, 'velocity_mps'):>7.2f}"
                      f"  {str(c['result']).upper():<6}  {_worst_message(c)[:60]}")
     if len(conduit_results) > max_lines:
         lines.append(f"... {len(conduit_results) - max_lines} more")
@@ -237,7 +244,7 @@ def build_results_fc(arcpy, gpkg_path: str, conduit_results: list) -> str:
                 continue
             ins.insertRow([cid, int(_num(c, "dn")), _num(c, "grade_1in"), _num(c, "gsdf_lps"),
                            _num(c, "pumped_lps"), _num(c, "total_lps"), _num(c, "capacity_lps"),
-                           _num(c, "d_over_d"), _num(c, "velocity_mps"), c["result"],
+                           _num(c, "table44_lps"), _num(c, "hydraulic_capacity_lps"), _num(c, "d_over_d"), _num(c, "velocity_mps"), c["result"],
                            _worst_message(c)[:255], shape])
             n += 1
     return fc
@@ -259,6 +266,30 @@ def _show_results_layer(arcpy, msgs, gpkg_path: str, d: dict, select_failed: boo
     msgs.info(f"Results layer added: {name} (temporary \u2014 re-run Run Design after restarting Pro)")
 
 
+def design_detail_lines(conduit_results: list, per_rule: int = 5) -> list:
+    """Detail lines for FAIL and WARN checks only (never info), at most `per_rule` per rule."""
+    by_rule: dict = {}
+    for c in conduit_results:
+        for chk in cli.failed_checks(c):
+            by_rule.setdefault(chk.get("rule"), []).append((c, chk))
+    lines: list = []
+    for rule, items in by_rule.items():
+        items.sort(key=lambda it: 0 if it[1].get("result") == "fail" else 1)
+        for c, chk in items[:per_rule]:
+            lines.append(f"{c['conduit_id']} DN{c['dn']} {str(chk['result']).upper()} {rule} "
+                         f"({chk.get('clause')}): {chk.get('message')}")
+        if len(items) > per_rule:
+            lines.append(f"... {len(items) - per_rule} more {rule} item(s)")
+    return lines
+
+
+def design_info_lines(d: dict) -> list:
+    n = (d.get("summary") or {}).get("cover_not_checked_ends") or 0
+    if n:
+        return [f"Cover not checked at {n} conduit end(s): no surface level (IS ends / junctions)."]
+    return []
+
+
 def run_design(arcpy, msgs: Messages, gpkg_path: str, show_layer: bool = True, add_table: bool = False,
                select_failed: bool = True, exe=None) -> dict:
     d = cli.run_design(gpkg_path, exe)
@@ -268,14 +299,11 @@ def run_design(arcpy, msgs: Messages, gpkg_path: str, show_layer: bool = True, a
               f"(total local {s['total_local_gsdf_lps']:.3f} L/s).")
     for line in results_table_lines(d["conduit_results"]):
         msgs.info(line)
-    for c in d["conduit_results"]:
-        if c["result"] == "pass":
-            continue
-        msgs.warn(f"{c['conduit_id']} DN{c['dn']} {c['result'].upper()}: capacity {c['capacity_lps']:.1f} L/s, "
-                  f"flow {c['total_lps']:.2f} L/s, d/D {c['d_over_d']:.2f}")
-        for chk in cli.failed_checks(c):
-            msgs.warn(f"    {chk['rule']} ({chk['clause']}): {chk['message']}")
-    for i in report_issues_sorted(d.get("issues", [])):
+    for line in design_detail_lines(d["conduit_results"]):
+        msgs.warn(line)
+    for line in design_info_lines(d):
+        msgs.info(line)
+    for i in report_issues_sorted([i for i in d.get("issues", []) if i.get("object_type") != "conduit"]):
         msgs.warn(f"{i.get('code')} {i.get('object_type')} {i.get('object_id')} ({i.get('clause')}): "
                   f"{i.get('message')}")
     if show_layer:

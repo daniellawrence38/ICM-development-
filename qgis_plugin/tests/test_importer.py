@@ -512,7 +512,7 @@ def tseg(pid, line, us, ds, ui, di, **kw):
 
 
 def tee_world(branch_line, branch_levels=(21.0, 20.5), tee_at=40.0, off=0.3):
-    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("C", tee_at, 20, top=30.0)]
+    acs = [ac("A", 0, 0, 25.0), ac("B", 100, 0, 25.0), ac("C", tee_at, 20, top=30.0)]
     main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)
     line = branch_line(tee_at, off)
     branch = tseg("BR", line, None, None, *branch_levels, LENGTH=19.7)
@@ -565,7 +565,7 @@ def test_tee_adverse_branch_invert_warns():
 
 
 def test_two_tees_on_one_main_and_reversed_main(tmp_path):
-    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("C", 25, 20, top=30.0), ac("D", 70, -20, top=30.0)]
+    acs = [ac("A", 0, 0, 25.0), ac("B", 100, 0, 25.0), ac("C", 25, 20, top=30.0), ac("D", 70, -20, top=30.0)]
     main = tseg("M", [(100, 0), (0, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)    # digitised against flow
     sew = [main, tseg("B1", [(25, 20), (25, 0.2)], None, None, 22.0, 21.0, LENGTH=20.0),
            tseg("B2", [(70, -0.1), (70, -20)], None, None, 21.0, 20.0, LENGTH=20.0)]
@@ -632,3 +632,59 @@ def test_is_sewer_tee_downstream_free_upstream_is_end(tmp_path):
         assert rep.counts["direction_tee"] == 1 and rep.counts["dangling_is_io"] == 1
         assert rep.counts["dangling_other"] == 0 and "direction_unknown" not in codes_of(rep)
         assert c["M"]["length_m"] == pytest.approx(60) and c["M~2"]["length_m"] == pytest.approx(40)
+
+
+# ---------------------------------------------------------------- surface interpolation
+
+def test_surface_interpolated_at_segment_junction():
+    acs = [ac("A", 0, 0, 20.0), ac("B", 80, 0, 12.0)]
+    p1 = pipe("P1", [(0, 0), (50, 0)], "A", None, LENGTH=50, UPSTREAM=5, DOWNSTREAM=4)
+    p2 = pipe("P2", [(50, 0), (80, 0)], None, "B", LENGTH=30, UPSTREAM=4, DOWNSTREAM=3)
+    model, rep = build_model(acs, [], [p1, p2])
+    n = by_id(model["nodes"], "node_id")
+    assert n["J1"]["surface_level"] == pytest.approx(20.0 - 8.0 * 50 / 80, abs=1e-3)
+    assert n["J1"]["notes"].startswith("segment junction")
+    assert "+ surface interpolated between A and B" in n["J1"]["notes"]
+    assert n["J1"]["data_source"] == "gis"
+    assert rep.counts["surface_interpolated"] == 1
+    assert any("Interpolated surface level at 1" in x for x in rep.summary_lines(0))
+
+
+def test_surface_not_interpolated_with_one_chamber_or_dangling_end():
+    acs = [ac("A", 0, 0, 20.0)]
+    p1 = pipe("P1", [(0, 0), (50, 0)], "A", None, LENGTH=50, UPSTREAM=5, DOWNSTREAM=4)
+    p2 = pipe("P2", [(50, 0), (80, 0)], None, None, LENGTH=30, UPSTREAM=4, DOWNSTREAM=3)
+    model, rep = build_model(acs, [], [p1, p2])
+    n = by_id(model["nodes"], "node_id")
+    assert all("surface_level" not in n[k] for k in ("J1", "E1"))
+    assert "surface_interpolated" not in rep.counts
+    # a chamber without TOPLEV at one end: still no interpolation
+    acs = [ac("A", 0, 0, 20.0), {"PACID": "B", GEOM: (80, 0)}]
+    p2 = pipe("P2", [(50, 0), (80, 0)], None, "B", LENGTH=30, UPSTREAM=4, DOWNSTREAM=3)
+    model, rep = build_model(acs, [], [p1, p2])
+    assert "surface_level" not in by_id(model["nodes"], "node_id")["J1"]
+    assert "surface_interpolated" not in rep.counts
+
+
+def test_surface_interpolated_at_tee_on_split_main():
+    acs = [ac("A", 0, 0, 20.0), ac("B", 100, 0, 10.0), ac("C", 40, 20, top=30.0)]
+    main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)
+    br = tseg("BR", [(40, 20), (40, 0.3)], None, None, 21.0, 20.5, LENGTH=19.7)
+    model, rep = build_model(acs, [], [main, br])
+    n = by_id(model["nodes"], "node_id")
+    assert n["T1"]["surface_level"] == pytest.approx(16.0, abs=1e-3)
+    assert "+ surface interpolated between A and B" in n["T1"]["notes"]
+    assert n["T1"]["notes"].startswith("tee (mid-line junction)")
+    assert n["C"]["surface_level"] == 30.0 and rep.counts["surface_interpolated"] == 1
+
+
+def test_surface_interpolated_two_tees_reversed_main():
+    acs = [ac("A", 0, 0, 20.0), ac("B", 100, 0, 10.0), ac("C", 25, 20, 30.0), ac("D", 70, -20, 30.0)]
+    main = tseg("M", [(100, 0), (0, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)
+    sew = [main, tseg("B1", [(25, 20), (25, 0.2)], None, None, 22.0, 21.0, LENGTH=20.0),
+           tseg("B2", [(70, -0.1), (70, -20)], None, None, 21.0, 20.0, LENGTH=20.0)]
+    model, rep = build_model(acs, [], sew)
+    n = by_id(model["nodes"], "node_id")
+    levels = sorted(n[k]["surface_level"] for k in ("T1", "T2"))
+    assert levels == pytest.approx([13.0, 17.5], abs=1e-3)
+    assert rep.counts["surface_interpolated"] == 2
