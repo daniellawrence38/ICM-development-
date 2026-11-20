@@ -273,6 +273,12 @@ pub struct Subcatchment {
     pub region: Region,
     #[serde(default)]
     pub extra_flow_lps: f64,
+    /// Manual ADWF (L/s). When set it replaces the land-use / R-code loading for this catchment.
+    #[serde(default)]
+    pub adwf_lps: Option<f64>,
+    /// Diurnal profile for dynamic runs (`None` = the model default profile).
+    #[serde(default)]
+    pub profile_id: Option<String>,
     #[serde(default)]
     pub status: Status,
     pub notes: Option<String>,
@@ -292,6 +298,8 @@ impl Subcatchment {
             ground: Ground::default(),
             region: Region::default(),
             extra_flow_lps: 0.0,
+            adwf_lps: None,
+            profile_id: None,
             status: Status::default(),
             notes: None,
         }

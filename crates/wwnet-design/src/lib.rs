@@ -239,6 +239,37 @@ fn local_loads(model: &Model, rules: &RuleSet, out: &mut Vec<Issue>) -> HashMap<
     let mut map: HashMap<String, Local> = HashMap::new();
     for s in &model.subcatchments {
         let id = &s.subcatchment_id;
+        if let Some(a) = s.adwf_lps {
+            // Manual ADWF replaces the land-use / R-code loading (extra flow still applies).
+            if !a.is_finite() || a < 0.0 {
+                out.push(issue(
+                    Severity::Warning,
+                    "design_bad_area",
+                    "subcatchment",
+                    id,
+                    None,
+                    format!("invalid manual ADWF {a}; sub-catchment ignored"),
+                ));
+                continue;
+            }
+            let peak = model.load_settings.peaking_factor;
+            out.push(issue(
+                Severity::Info,
+                "design_manual_adwf",
+                "subcatchment",
+                id,
+                None,
+                format!(
+                    "manual ADWF {a:.3} L/s used instead of land-use loading; GSDF = ADWF x {peak}"
+                ),
+            ));
+            let l = map.entry(s.outlet_node_id.clone()).or_default();
+            l.adwf += a;
+            l.gsdf += a * peak + s.extra_flow_lps;
+            l.daily += a * 86400.0;
+            l.labels.push(format!("manual ADWF {} L/s", fmt_num(a)));
+            continue;
+        }
         let Some(area) = net_area(s, rules, out) else {
             continue;
         };

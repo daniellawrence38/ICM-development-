@@ -35,6 +35,13 @@ def _ensure_group(m, msgs):
 def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True) -> list:
     """Add every wwn_* feature table present in the file. Returns the added layers."""
     present = gpkg.contents(gpkg_path)
+    if "wwn_subcatchments" in present:
+        try:
+            if gpkg.upgrade_model(gpkg_path):
+                msgs.info("Upgraded the model to schema v2 (node loads, profiles, subcatchment ADWF / profile fields).")
+                present = gpkg.contents(gpkg_path)
+        except Exception as exc:  # noqa: BLE001 - e.g. read-only file: show the layers anyway
+            msgs.warn(f"Could not upgrade the model to schema v2 ({exc}); new fields may be missing.")
     tables = [t for t in gpkg.FEATURE_ORDER if t in present]
     if not tables:
         raise RuntimeError(f"{gpkg_path} contains no WWNet feature tables (wwn_nodes, wwn_conduits, ...).")
@@ -59,6 +66,13 @@ def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True) -> list:
     if symbolize:
         for t, lyr in added:
             symbology.apply(t, lyr, msgs)
+    for t in gpkg.ATTRIBUTE_ORDER:
+        if t in present:
+            try:
+                m.addDataFromPath(gpkg.table_path(gpkg_path, t))
+                msgs.info(f"Added table {present[t][0] or t}")
+            except Exception as exc:  # noqa: BLE001
+                msgs.warn(f"Could not add table {t}: {exc}")
     return [lyr for _, lyr in added]
 
 

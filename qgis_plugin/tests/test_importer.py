@@ -688,3 +688,80 @@ def test_surface_interpolated_two_tees_reversed_main():
     levels = sorted(n[k]["surface_level"] for k in ("T1", "T2"))
     assert levels == pytest.approx([13.0, 17.5], abs=1e-3)
     assert rep.counts["surface_interpolated"] == 2
+
+
+# ---------------------------------------------------------------- connection point loads
+
+def cp(cid, x, y):
+    return {"ID": cid, GEOM: (x, y)}
+
+
+def two_pipe_rows():
+    """A1 -> A2 -> A3 along y=0 (50 m each), flowing east."""
+    acs = [ac("A1", 0, 0, 20.0), ac("A2", 50, 0, 19.0), ac("A3", 100, 0, 18.0)]
+    pipes = [pipe("P1", [(0, 0), (50, 0)], "A1", "A2", UPSTREAM=19.5, DOWNSTREAM=18.6, LENGTH=50),
+             pipe("P2", [(50, 0), (100, 0)], "A2", "A3", UPSTREAM=18.5, DOWNSTREAM=17.6, LENGTH=50)]
+    return acs, pipes
+
+
+def test_cp_loads_nearest_segment_upstream_node_and_aggregation():
+    acs, pipes = two_pipe_rows()
+    cps = [cp("C1", 10, 3), cp("C2", 40, -4), cp("C3", 75, 2), cp("C4", 60, 9.9)]
+    model, rep = build_model(acs, cps, pipes, FieldMap(diameter="HEIGHT"))
+    loads = by_id(model["node_loads"], "node_id")
+    assert set(loads) == {"A1", "A2"}                      # P1 -> upstream A1, P2 -> upstream A2
+    assert loads["A1"]["connections"] == 2 and loads["A1"]["load_id"] == "CP-A1"
+    assert loads["A2"]["connections"] == 2 and loads["A2"]["source"] == "connection_points"
+    assert "adwf_lps" not in loads["A1"] and "2 connection point" in loads["A1"]["notes"]
+    assert rep.counts["cp_loads_assigned"] == 4 and rep.counts["cp_load_nodes"] == 2
+    line = [x for x in rep.summary_lines() if x.startswith("Loads:")][0]
+    assert line == ("Loads: 4 connection point(s) assigned to 2 node(s); 0 unassigned; "
+                    "ADWF total 0.029 L/s at 630 L/d/connection")
+
+
+def test_cp_radius_unassigned_and_example_cap():
+    acs, pipes = two_pipe_rows()
+    cps = [cp("N%d" % i, 20 + i, 30) for i in range(15)] + [cp("NEAR", 20, 10.0)]
+    model, rep = build_model(acs, cps, pipes, FieldMap(diameter="HEIGHT"))
+    assert rep.counts["cp_loads_unassigned"] == 15 and rep.counts["cp_loads_assigned"] == 1
+    assert sum(w.code == "cp_not_assigned" for w in rep.warnings) == 10
+    assert any("15 unassigned" in x for x in rep.summary_lines(0))
+    # a wider radius picks them all up
+    model, rep = build_model(acs, cps, pipes, FieldMap(diameter="HEIGHT"), ImportOptions(cp_load_search_m=40))
+    assert rep.counts["cp_loads_unassigned"] == 0
+
+
+def test_cp_loads_option_off_and_no_cps():
+    acs, pipes = two_pipe_rows()
+    model, rep = build_model(acs, [cp("C1", 10, 3)], pipes, FieldMap(diameter="HEIGHT"),
+                             ImportOptions(load_connection_points=False))
+    assert "node_loads" not in model
+    model, rep = build_model(acs, [], pipes, FieldMap(diameter="HEIGHT"))
+    assert "node_loads" not in model
+
+
+def test_cp_used_as_io_end_still_counts_as_load_at_that_node():
+    acs = [ac("A2", 20, 0, 19.0)]
+    pipes = [pipe("IO1", [(0, 0), (20, 0)], None, "A2", MAINTYPE="IO", UPSTREAM=19.5, DOWNSTREAM=19.0, LENGTH=20)]
+    model, rep = build_model(acs, [cp("C1", 0, 0)], pipes, FieldMap(diameter="HEIGHT"))
+    n = [n for n in model["nodes"] if n["node_type"] == "io_end"]
+    assert len(n) == 1
+    loads = model["node_loads"]
+    assert loads == [{"load_id": f"CP-{n[0]['node_id']}", "node_id": n[0]["node_id"], "connections": 1,
+                      "source": "connection_points", "notes": loads[0]["notes"]}]
+
+
+def test_cp_loads_roundtrip_to_native_design():
+    native = pytest.importorskip("wwnet_native")
+    acs, pipes = two_pipe_rows()
+    model, rep = build_model(acs, [cp("C1", 10, 3)] * 0 + [cp("C%d" % i, 10, 3) for i in range(10)], pipes,
+                             FieldMap(diameter="HEIGHT"))
+    import os
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        f = os.path.join(d, "m.gpkg")
+        native.write_model(f, imp.model_json(model), False)
+        out = native.design(f, None, False)
+        adwf = out["conduit_results"][0]["adwf_lps"]
+        assert abs(adwf - 10 * 630 / 86400) < 1e-9
+        assert abs(out["conduit_results"][0]["gsdf_lps"] - adwf * 1.5) < 1e-9

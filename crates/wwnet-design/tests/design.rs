@@ -254,3 +254,77 @@ fn missing_surface_level_is_info_not_warn() {
     assert_eq!(o.summary.warn, 0);
     assert!(o.issues.iter().all(|i| i.code != "design_missing_data"));
 }
+
+fn with_load(connections: Option<i64>, adwf: Option<f64>) -> Model {
+    let mut m = single(0.0);
+    m.subcatchments.clear();
+    m.node_loads.push(wwnet_core::NodeLoad {
+        load_id: "L1".into(),
+        node_id: "A".into(),
+        connections,
+        adwf_lps: adwf,
+        profile_id: None,
+        source: Some(
+            if adwf.is_some() {
+                "manual"
+            } else {
+                "connection_points"
+            }
+            .into(),
+        ),
+        notes: None,
+    });
+    m
+}
+
+#[test]
+fn node_load_connections_give_adwf_and_gsdf_at_peaking() {
+    let o = run_design(&with_load(Some(100), None), &RuleSet::ds50()).unwrap();
+    let c = conduit_of(&o, "C1");
+    let adwf = 100.0 * 630.0 / 86400.0;
+    assert_relative_eq!(c.adwf_lps, adwf, epsilon = 1e-9);
+    assert_relative_eq!(c.gsdf_lps, adwf * 1.5, epsilon = 1e-9);
+    assert_relative_eq!(o.summary.total_local_adwf_lps, adwf, epsilon = 1e-9);
+}
+
+#[test]
+fn manual_node_load_and_custom_peaking_and_accumulation() {
+    let mut m = with_load(Some(100), Some(2.0)); // adwf_lps wins over connections
+    m.load_settings.peaking_factor = 2.0;
+    m.subcatchments.push(sub("S1", "A", 1.0));
+    let base = run_design(&single(1.0), &RuleSet::ds50()).unwrap();
+    let o = run_design(&m, &RuleSet::ds50()).unwrap();
+    let (b, c) = (conduit_of(&base, "C1"), conduit_of(&o, "C1"));
+    assert_relative_eq!(c.adwf_lps, 2.0, epsilon = 1e-9);
+    assert_relative_eq!(c.gsdf_lps, b.gsdf_lps + 4.0, epsilon = 1e-9);
+}
+
+#[test]
+fn no_loads_leaves_results_unchanged() {
+    let o = run_design(&single(1.0), &RuleSet::ds50()).unwrap();
+    assert_eq!(conduit_of(&o, "C1").adwf_lps, 0.0);
+    assert_eq!(o.summary.total_local_adwf_lps, 0.0);
+}
+
+#[test]
+fn manual_subcatchment_adwf_replaces_land_use_loading() {
+    let mut m = single(5.0);
+    m.subcatchments[0].adwf_lps = Some(1.2);
+    m.subcatchments[0].extra_flow_lps = 0.5;
+    let o = run_design(&m, &RuleSet::ds50()).unwrap();
+    let c = conduit_of(&o, "C1");
+    assert_relative_eq!(c.adwf_lps, 1.2, epsilon = 1e-9);
+    assert_relative_eq!(c.gsdf_lps, 1.2 * 1.5 + 0.5, epsilon = 1e-9);
+    assert!(o.issues.iter().any(|i| i.code == "design_manual_adwf"));
+}
+
+#[test]
+fn load_on_missing_node_warns() {
+    let mut m = with_load(Some(10), None);
+    m.node_loads[0].node_id = "ZZ".into();
+    let o = run_design(&m, &RuleSet::ds50()).unwrap();
+    assert!(o
+        .issues
+        .iter()
+        .any(|i| i.code == "design_load_node_missing"));
+}

@@ -16,7 +16,7 @@ def new_model(arcpy, msgs: Messages, out_path: str, add_to_map: bool = True, ove
     if not out_path.lower().endswith(".gpkg"):
         out_path += ".gpkg"
     gpkg.create_model(out_path, overwrite=overwrite)
-    msgs.info(f"Created WWNet model {out_path} (EPSG:7850, schema v1).")
+    msgs.info(f"Created WWNet model {out_path} (EPSG:7850, schema v2).")
     if add_to_map:
         maplayers.add_model(arcpy, out_path, msgs)
     return out_path

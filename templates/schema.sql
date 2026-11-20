@@ -85,6 +85,8 @@ CREATE TABLE IF NOT EXISTS wwn_subcatchments (
   land_use TEXT DEFAULT 'residential', rcode TEXT DEFAULT 'R20',
   ground TEXT DEFAULT 'dry', region TEXT DEFAULT 'south',
   extra_flow_lps REAL DEFAULT 0,             -- approved trade waste / special flows
+  adwf_lps REAL,                             -- v2: manual ADWF (L/s); replaces land-use/R-code loading when set
+  profile_id TEXT,                           -- v2: diurnal profile (NULL = default profile)
   status TEXT NOT NULL DEFAULT 'proposed', notes TEXT);
 
 -- Written by `wwnet design`; read-only for users.

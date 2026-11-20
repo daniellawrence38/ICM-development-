@@ -7,6 +7,7 @@ import sqlite3
 
 from . import shared
 
+ATTRIBUTE_ORDER = ("wwn_node_loads", "wwn_profile_info")     # v2 tables worth showing in the map
 FEATURE_ORDER = ("wwn_subcatchments", "wwn_rising_mains", "wwn_conduits",
                  "wwn_pump_stations", "wwn_nodes")      # bottom -> top
 
@@ -43,6 +44,10 @@ def contents(gpkg: str) -> dict:
 
 def create_model(path: str, overwrite: bool = False) -> str:
     return shared.core("schema").create_model(path, overwrite=overwrite)
+
+
+def upgrade_model(path: str) -> bool:
+    return shared.core("schema").upgrade_model(path)
 
 
 def conduit_ends(gpkg: str) -> dict:

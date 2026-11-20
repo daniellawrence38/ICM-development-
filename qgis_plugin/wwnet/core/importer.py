@@ -19,6 +19,7 @@ from typing import Iterable
 
 from . import paths, tomlmini
 
+ADWF_PER_CONNECTION_LPD = 630.0   # default allowance (wwn_meta adwf_per_connection_lpd) used for the report line
 GEOM = "_geom"                 # key holding the geometry coordinates in each input row
 CONTEXT = "_context"           # chamber rows flagged True were read only as context for the sewers (not selected)
 TEMPLATE_NAME = "watercorp_sewer.toml"
@@ -87,13 +88,16 @@ class ImportOptions:
     grade_tolerance_pct: float = 10.0
     default_dn: int = 150
     tee_tolerance_m: float = 0.5            # a lone sewer end this close to another sewer's mid-line is a T-junction
+    load_connection_points: bool = True     # assign every connection point read to the nearest sewer's upstream node
+    cp_load_search_m: float = 10.0          # max point-to-sewer distance for that assignment
 
     @classmethod
     def from_config(cls, cfg: dict | None = None, **overrides) -> "ImportOptions":
         o = (cfg or load_template()).get("options", {})
         out = cls(float(o.get("snap_tolerance_m", 0.5)), str(o.get("grade_source", "levels")),
                   float(o.get("grade_tolerance_pct", 10.0)), int(o.get("default_dn", 150)),
-                  float(o.get("tee_tolerance_m", 0.5)))
+                  float(o.get("tee_tolerance_m", 0.5)), bool(o.get("load_connection_points", True)),
+                  float(o.get("cp_load_search_m", 10.0)))
         for k, v in overrides.items():
             if v is not None:
                 setattr(out, k, v)
@@ -1086,7 +1090,51 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     rep.count("nodes", len(nodes))
     rep.count("conduits", len(conduits))
     model = {"nodes": list(nodes.values()), "conduits": conduits}
+    if opt.load_connection_points and cp_pool:
+        loads = _assign_cp_loads(cp_pool, conduits, float(opt.cp_load_search_m), rep)
+        if loads:
+            model["node_loads"] = loads
     return model, rep
+
+
+def _assign_cp_loads(cp_pool: dict, conduits: list, radius: float, rep: ImportReport) -> list:
+    """Each connection point goes to the nearest imported sewer within `radius` (point-to-polyline
+    distance); its load is put on that sewer's UPSTREAM node. One ``wwn_node_loads`` row per node."""
+    grid = _SegGrid(max(radius, 1.0), radius)
+    for ci, c in enumerate(conduits):
+        pts = c.get("geom") or []
+        for a, b in zip(pts, pts[1:]):
+            grid.add(ci, a, b)
+    per_node: dict = {}
+    unassigned: list = []
+    for cid, p in cp_pool.items():
+        best = None
+        for ci, a, b in grid.candidates(p):
+            d = _project(p, a, b)[0]
+            if d <= radius and (best is None or (d, ci) < best):
+                best = (d, ci)
+        if best is None:
+            unassigned.append(cid)
+            continue
+        node = conduits[best[1]]["us_node_id"]
+        per_node.setdefault(node, []).append(cid)
+    rows = []
+    for node, cids in per_node.items():
+        rows.append({"load_id": f"CP-{node}", "node_id": node, "connections": len(cids),
+                     "source": "connection_points",
+                     "notes": f"{len(cids)} connection point(s) within {radius:g} m of the sewer starting here"})
+    n_assigned = sum(len(v) for v in per_node.values())
+    rep.count("cp_loads_assigned", n_assigned)
+    rep.count("cp_load_nodes", len(rows))
+    rep.count("cp_loads_unassigned", len(unassigned))
+    adwf = n_assigned * ADWF_PER_CONNECTION_LPD / 86400.0
+    rep.diagnostics.append(f"Loads: {n_assigned} connection point(s) assigned to {len(rows)} node(s); "
+                           f"{len(unassigned)} unassigned; ADWF total {adwf:.3f} L/s at "
+                           f"{ADWF_PER_CONNECTION_LPD:g} L/d/connection")
+    for cid in unassigned[:10]:
+        rep.warn("cp_not_assigned", "connection_point", cid,
+                 f"no imported sewer within {radius:g} m; its load is not assigned")
+    return rows
 
 
 def _interpolate_surface(nodes: dict, conduits: list, through_pairs: list, rep: ImportReport):

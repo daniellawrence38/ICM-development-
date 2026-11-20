@@ -9,7 +9,8 @@ from . import paths
 
 FEATURE_TABLES = ("wwn_nodes", "wwn_conduits", "wwn_pump_stations", "wwn_rising_mains",
                   "wwn_subcatchments")
-ATTRIBUTE_TABLES = ("wwn_pumps", "wwn_results_conduits", "wwn_issues", "wwn_meta")
+ATTRIBUTE_TABLES = ("wwn_pumps", "wwn_results_conduits", "wwn_issues", "wwn_meta", "wwn_node_loads",
+                    "wwn_profile_info", "wwn_profiles")
 ALL_TABLES = FEATURE_TABLES + ATTRIBUTE_TABLES
 READ_ONLY_TABLES = ("wwn_results_conduits", "wwn_issues", "wwn_meta")
 
@@ -18,6 +19,7 @@ ID_FIELDS = {
     "wwn_nodes": "node_id", "wwn_conduits": "conduit_id", "wwn_pump_stations": "ps_id",
     "wwn_pumps": "pump_id", "wwn_rising_mains": "rm_id",
     "wwn_subcatchments": "subcatchment_id", "wwn_results_conduits": "conduit_id",
+    "wwn_node_loads": "load_id", "wwn_profile_info": "profile_id",
 }
 
 # Which enumeration (from the schema.sql header) applies to which field.
@@ -90,6 +92,29 @@ def create_model(path: str, sql: str | None = None, overwrite: bool = False) -> 
     finally:
         con.close()
     return path
+
+
+def upgrade_model(path: str, sql: str | None = None) -> bool:
+    """Bring an existing model file up to schema v2 (missing tables, subcatchment columns, meta defaults).
+    Idempotent; returns True if anything was added."""
+    sql = sql if sql is not None else schema_sql_text()
+    con = sqlite3.connect(os.fspath(path))
+    try:
+        before = {r[0] for r in con.execute("SELECT name FROM sqlite_master")}
+        cols = {r[1] for r in con.execute("PRAGMA table_info(wwn_subcatchments)")}
+        if not cols:
+            raise ValueError(f"{path} is not a WWNet model (no wwn_subcatchments table)")
+        con.executescript(sql)
+        changed = bool({r[0] for r in con.execute("SELECT name FROM sqlite_master")} - before)
+        for col, typ in (("adwf_lps", "REAL"), ("profile_id", "TEXT")):
+            if col not in cols:
+                con.execute(f"ALTER TABLE wwn_subcatchments ADD COLUMN {col} {typ}")
+                changed = True
+        con.execute("UPDATE wwn_meta SET value='2' WHERE key='schema_version' AND CAST(value AS INTEGER) < 2")
+        con.commit()
+        return changed
+    finally:
+        con.close()
 
 
 def table_identifiers(gpkg: str) -> dict:

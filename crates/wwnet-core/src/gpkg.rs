@@ -284,11 +284,28 @@ pub fn create(path: impl AsRef<Path>) -> Result<()> {
 pub fn upgrade(path: impl AsRef<Path>) -> Result<()> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA_SQL)?;
+    for col in ["adwf_lps REAL", "profile_id TEXT"] {
+        let name = col.split(' ').next().unwrap_or_default();
+        if !has_column(&conn, "wwn_subcatchments", name)? {
+            conn.execute(
+                &format!("ALTER TABLE wwn_subcatchments ADD COLUMN {col}"),
+                [],
+            )?;
+        }
+    }
     conn.execute(
         "UPDATE wwn_meta SET value='2' WHERE key='schema_version' AND CAST(value AS INTEGER) < 2",
         [],
     )?;
     Ok(())
+}
+
+fn has_column(c: &Connection, table: &str, col: &str) -> Result<bool> {
+    let mut st = c.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names: Vec<String> = st
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(names.iter().any(|n| n == col))
 }
 
 fn has_table(c: &Connection, name: &str) -> Result<bool> {
@@ -367,11 +384,12 @@ pub fn insert_rising_main(c: &Connection, r: &RisingMain) -> Result<()> {
 
 pub fn insert_subcatchment(c: &Connection, s: &Subcatchment) -> Result<()> {
     c.execute(
-        "INSERT INTO wwn_subcatchments (geom,subcatchment_id,outlet_node_id,net_area_ha,gross_area_ha,broadacre,land_use,rcode,ground,region,extra_flow_lps,status,notes)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO wwn_subcatchments (geom,subcatchment_id,outlet_node_id,net_area_ha,gross_area_ha,broadacre,land_use,rcode,ground,region,extra_flow_lps,adwf_lps,profile_id,status,notes)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         params![s.geom.as_ref().map(encode_multipolygon), s.subcatchment_id, s.outlet_node_id,
             s.net_area_ha, s.gross_area_ha, s.broadacre as i64, s.land_use.as_str(), s.rcode,
-            s.ground.as_str(), s.region.as_str(), s.extra_flow_lps, s.status.as_str(), s.notes],
+            s.ground.as_str(), s.region.as_str(), s.extra_flow_lps, s.adwf_lps, s.profile_id,
+            s.status.as_str(), s.notes],
     )?;
     Ok(())
 }
@@ -648,7 +666,11 @@ impl Model {
             });
         }
 
-        let mut st = c.prepare("SELECT geom,subcatchment_id,outlet_node_id,net_area_ha,gross_area_ha,broadacre,land_use,rcode,ground,region,extra_flow_lps,status,notes FROM wwn_subcatchments ORDER BY fid")?;
+        // v1 files lack adwf_lps / profile_id: read them as NULL.
+        let v2 = has_column(&c, "wwn_subcatchments", "adwf_lps")?;
+        let sc_sql = format!("SELECT geom,subcatchment_id,outlet_node_id,net_area_ha,gross_area_ha,broadacre,land_use,rcode,ground,region,extra_flow_lps,status,notes,{} FROM wwn_subcatchments ORDER BY fid",
+            if v2 { "adwf_lps,profile_id" } else { "NULL,NULL" });
+        let mut st = c.prepare(&sc_sql)?;
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
             m.subcatchments.push(Subcatchment {
@@ -669,6 +691,8 @@ impl Model {
                 ground: en(r.get(8)?)?,
                 region: en(r.get(9)?)?,
                 extra_flow_lps: r.get::<_, Option<f64>>(10)?.unwrap_or(0.0),
+                adwf_lps: r.get(13)?,
+                profile_id: r.get(14)?,
                 status: en(r.get(11)?)?,
                 notes: r.get(12)?,
             });
