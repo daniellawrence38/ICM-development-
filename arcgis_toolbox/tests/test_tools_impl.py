@@ -543,3 +543,29 @@ def test_trace_with_pro_connection_string_layers(fake_arcpy, wwnet_exe, demo_gpk
     assert "OUT1" in r["nodes"]
     assert [s[0] for s in a.selections] == ["Nodes", "Gravity sewers"]
     assert not any("not in the active map" in t for _, t in a.log)
+
+
+def pro_gpkg_source(gpkg_path, table):
+    """dataSource exactly as real Pro 3.x reports a GeoPackage layer (pasted from the user's PC)."""
+    return f"Instance={gpkg_path},Dataset=main.%{table}"
+
+
+def test_split_datasource_real_pro_gpkg_string():
+    real = r"Instance=C:\Users\lawrend0\Desktop\WWNet\models\import_test.gpkg,Dataset=main.%wwn_nodes"
+    p = r"C:\Users\lawrend0\Desktop\WWNet\models\import_test.gpkg"
+    assert gpkg.split_datasource(real) == (p, "wwn_nodes")
+    assert gpkg.dataset_path(real) == gpkg.table_path(p, "wwn_nodes")
+    sp = r"C:\a, b\my model.GPKG"   # comma and space in the folder
+    assert gpkg.split_datasource(pro_gpkg_source(sp, "wwn_conduits")) == (sp, "wwn_conduits")
+
+
+def test_trace_and_find_layer_with_real_pro_gpkg_layers(fake_arcpy, wwnet_exe, demo_gpkg):
+    layers = [fa.make_layer("Nodes", pro_gpkg_source(demo_gpkg, "wwn_nodes")),
+              fa.make_layer("Gravity sewers", pro_gpkg_source(demo_gpkg, "wwn_conduits"))]
+    a = fake_arcpy(layers)
+    layers.insert(0, _ProBasemapLayer())
+    assert maplayers.find_layer_for(a, demo_gpkg, "wwn_conduits") is layers[2]
+    r = tools_impl.trace(a, Messages(a), layers[1], "N03", "Downstream", True, wwnet_exe)
+    assert "OUT1" in r["nodes"]
+    assert [s[0] for s in a.selections] == ["Nodes", "Gravity sewers"]
+    assert not any("not in the active map" in t for _, t in a.log)

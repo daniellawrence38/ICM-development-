@@ -18,6 +18,9 @@ def table_path(gpkg: str, table: str) -> str:
 
 
 _SPLIT = re.compile(r"^(.*?\.gpkg)(?:[\\/]+(?:main\.)?([^\\/]+))?$", re.IGNORECASE)
+# real Pro 3.x GeoPackage layer: 'Instance=C:\\m\\a.gpkg,Dataset=main.%wwn_nodes'
+_INSTANCE_DATASET = re.compile(r"^\s*Instance=(.+?\.gpkg)\s*,\s*Dataset=(?:main\.)?%?([A-Za-z_]\w*)\s*$",
+                               re.IGNORECASE)
 _CONN_FILE_KEYS = ("DB_CONNECTION_PROPERTIES", "INSTANCE", "DATABASE")
 
 
@@ -48,8 +51,12 @@ def _split_connection_string(ds: str):
 
 def split_datasource(ds: str):
     """'C:\\m\\a.gpkg\\main.wwn_nodes' -> ('C:\\m\\a.gpkg', 'wwn_nodes'); also Pro's SQLite
-    connection-string form (see _split_connection_string); else (None, None)."""
+    forms 'Instance=<file>.gpkg,Dataset=main.%<table>' and the SQLite connection string
+    (see _split_connection_string); else (None, None)."""
     ds = ds or ""
+    m = _INSTANCE_DATASET.match(ds)
+    if m:
+        return m.group(1), m.group(2)
     if "=" in ds and ";" in ds:
         return _split_connection_string(ds)
     m = _SPLIT.match(ds)
