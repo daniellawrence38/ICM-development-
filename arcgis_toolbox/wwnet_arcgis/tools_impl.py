@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 
-from . import (arcpy_tools, assistant_run, capacity, cli, dpapi, gpkg, issues_table, maplayers,
+from . import (arcpy_tools, assistant_run, capacity, cli, dpapi, gpenv, gpkg, issues_table, maplayers,
                settings, shared, sewer_import, symbology, vendor)
 from .messages import Messages
 
@@ -18,12 +18,14 @@ def new_model(arcpy, msgs: Messages, out_path: str, add_to_map: bool = True, ove
     gpkg.create_model(out_path, overwrite=overwrite)
     msgs.info(f"Created WWNet model {out_path} (EPSG:7850, schema v2).")
     if add_to_map:
-        maplayers.add_model(arcpy, out_path, msgs)
+        with gpenv.quiet(arcpy):
+            maplayers.add_model(arcpy, out_path, msgs)
     return out_path
 
 
 def add_model_to_map(arcpy, msgs: Messages, gpkg_path: str, symbolize: bool = True):
-    layers = maplayers.add_model(arcpy, gpkg_path, msgs, symbolize=symbolize)
+    with gpenv.quiet(arcpy):
+        layers = maplayers.add_model(arcpy, gpkg_path, msgs, symbolize=symbolize)
     msgs.info(f"Added {len(layers)} layer(s) to the active map.")
     return layers
 
@@ -59,80 +61,81 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
         raise RuntimeError("Choose the connection point ID field.")
     if not fmap.ac_id or not fmap.pipe_id:
         raise RuntimeError("The access chamber ID field and the sewer ID field are required.")
-    sources = [("Access chambers", ac_layer), ("Gravity sewers", sewer_layer)]
-    if cp_layer is not None:
-        sources.insert(1, ("Connection points", cp_layer))
-    if fmap.chamber_type and fmap.chamber_type.lower() not in {
-            n.lower() for n in si.layer_field_names(arcpy, ac_layer)}:
-        msgs.warn(f"Access chambers have no field {fmap.chamber_type!r}: every chamber is imported as an "
-                  "access chamber (inspection shafts are not skipped).")
-        fmap = fmap.with_overrides(chamber_type="")
-    si.prepare_projection(arcpy, msgs, sources)
-    sewer_names = {n.lower() for n in si.layer_field_names(arcpy, sewer_layer)}
-    if fmap.shape_length and fmap.shape_length.lower() not in sewer_names:
-        fmap = fmap.with_overrides(shape_length="")          # optional diagnostic field absent: skip it
-    roles = {k: si.roles_for(k, {r: getattr(fmap, r) for r, *_ in si.FIELD_ROLES})
-             for k in ("ac", "cp", "sewer")}
-    if fmap.shape_length:
-        roles["sewer"]["shape_length"] = fmap.shape_length
-    sewers = si.read_features(arcpy, sewer_layer, roles["sewer"], "line", "Gravity sewers",
-                              use_selected, msgs)
-    if not sewers:
-        raise RuntimeError("No gravity sewers were read (nothing selected / empty layer?).")
-    ext = si.rows_extent(sewers)
-    sewers_selected = use_selected and si.selection_count(sewer_layer) > 0
-    refs = {imp.to_id(r.get(f)) for r in sewers for f in (fmap.us_node, fmap.ds_node) if f}
-    refs.discard("")
-    acs = None
-    if sewers_selected and not si.selection_count(ac_layer) and ext is not None:
-        acs = si.read_in_extent(arcpy, ac_layer, roles["ac"], "point", "Access chambers", ext, msgs)
+    with gpenv.quiet(arcpy):
+        sources = [("Access chambers", ac_layer), ("Gravity sewers", sewer_layer)]
+        if cp_layer is not None:
+            sources.insert(1, ("Connection points", cp_layer))
+        if fmap.chamber_type and fmap.chamber_type.lower() not in {
+                n.lower() for n in si.layer_field_names(arcpy, ac_layer)}:
+            msgs.warn(f"Access chambers have no field {fmap.chamber_type!r}: every chamber is imported as an "
+                      "access chamber (inspection shafts are not skipped).")
+            fmap = fmap.with_overrides(chamber_type="")
+        si.prepare_projection(arcpy, msgs, sources)
+        sewer_names = {n.lower() for n in si.layer_field_names(arcpy, sewer_layer)}
+        if fmap.shape_length and fmap.shape_length.lower() not in sewer_names:
+            fmap = fmap.with_overrides(shape_length="")          # optional diagnostic field absent: skip it
+        roles = {k: si.roles_for(k, {r: getattr(fmap, r) for r, *_ in si.FIELD_ROLES})
+                 for k in ("ac", "cp", "sewer")}
+        if fmap.shape_length:
+            roles["sewer"]["shape_length"] = fmap.shape_length
+        sewers = si.read_features(arcpy, sewer_layer, roles["sewer"], "line", "Gravity sewers",
+                                  use_selected, msgs)
+        if not sewers:
+            raise RuntimeError("No gravity sewers were read (nothing selected / empty layer?).")
+        ext = si.rows_extent(sewers)
+        sewers_selected = use_selected and si.selection_count(sewer_layer) > 0
+        refs = {imp.to_id(r.get(f)) for r in sewers for f in (fmap.us_node, fmap.ds_node) if f}
+        refs.discard("")
+        acs = None
+        if sewers_selected and not si.selection_count(ac_layer) and ext is not None:
+            acs = si.read_in_extent(arcpy, ac_layer, roles["ac"], "point", "Access chambers", ext, msgs)
+            if acs is None:
+                msgs.warn("Access chambers: reading all features instead.")
+            else:
+                msgs.info(f"Access chambers: nothing selected; read {len(acs)} feature(s) within the selected "
+                          f"sewers' extent +{si.EXTENT_BUFFER_M:g} m.")
+                for r in acs:
+                    r[imp.CONTEXT] = True            # nothing selected: all of these are context chambers
+                acs = si.add_referenced_chambers(arcpy, ac_layer, roles["ac"], fmap.ac_id, refs, acs, msgs,
+                                                 extent_too=False, n_selected=0)
+        elif use_selected and si.selection_count(ac_layer) and ext is not None:
+            acs = si.read_features(arcpy, ac_layer, roles["ac"], "point", "Access chambers", True, msgs)
+            n_sel = len(acs)
+            acs = si.add_referenced_chambers(arcpy, ac_layer, roles["ac"], fmap.ac_id, refs, acs, msgs, ext=ext,
+                                             n_selected=n_sel)
         if acs is None:
-            msgs.warn("Access chambers: reading all features instead.")
-        else:
-            msgs.info(f"Access chambers: nothing selected; read {len(acs)} feature(s) within the selected "
-                      f"sewers' extent +{si.EXTENT_BUFFER_M:g} m.")
-            for r in acs:
-                r[imp.CONTEXT] = True            # nothing selected: all of these are context chambers
-            acs = si.add_referenced_chambers(arcpy, ac_layer, roles["ac"], fmap.ac_id, refs, acs, msgs,
-                                             extent_too=False, n_selected=0)
-    elif use_selected and si.selection_count(ac_layer) and ext is not None:
-        acs = si.read_features(arcpy, ac_layer, roles["ac"], "point", "Access chambers", True, msgs)
-        n_sel = len(acs)
-        acs = si.add_referenced_chambers(arcpy, ac_layer, roles["ac"], fmap.ac_id, refs, acs, msgs, ext=ext,
-                                         n_selected=n_sel)
-    if acs is None:
-        acs = si.read_features(arcpy, ac_layer, roles["ac"], "point", "Access chambers", use_selected, msgs)
-    cps = []
-    if cp_layer is not None:
-        ac_ids = {imp.to_id(r.get(fmap.ac_id)) for r in acs}
-        # Loads need every connection point near a sewer: the extent grows by the search radius
-        # (spatial filter; the layer is never scanned in full).
-        buf = max(si.EXTENT_BUFFER_M, opts.cp_load_search_m) if opts.load_connection_points \
-            else si.EXTENT_BUFFER_M
-        cp_ext = si.rows_extent(sewers, buf)
-        cps = si.read_connection_points(arcpy, cp_layer, roles["cp"], fmap.cp_id, sorted(refs - ac_ids), cp_ext,
-                                        use_selected, msgs, buffer_m=buf)
-    elif load_connection_points:
-        msgs.info("No connection point layer given: no connection point loads were created.")
-    model, rep = imp.build_model(acs, cps, sewers, fmap, opts, cfg)
-    si.report_to_messages(msgs, rep)
-    native.write_model(out_path, imp.model_json(model), exists and overwrite)
-    msgs.info(f"Wrote WWNet model {out_path} (EPSG:7850).")
-    issues = native.check(out_path, True)
-    counts = {"error": 0, "warning": 0, "info": 0}
-    for i in issues:
-        counts[i["severity"] if i["severity"] in counts else "info"] += 1
-    report_issues(msgs, issues[:si.MAX_ISSUE_LINES])
-    if len(issues) > si.MAX_ISSUE_LINES:
-        msgs.info(f"... {len(issues) - si.MAX_ISSUE_LINES} more issue(s) stored in wwn_issues "
-                  "(run Check Model for the full table).")
-    msgs.info(f"Model check: {counts['error']} error(s), {counts['warning']} warning(s), {counts['info']} info.")
-    if add_to_map:
-        try:
-            add_model_to_map(arcpy, msgs, out_path, True)
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not add the model to the active map: {exc}")
-    return {"path": out_path, "report": rep, "issues": issues, "model": model}
+            acs = si.read_features(arcpy, ac_layer, roles["ac"], "point", "Access chambers", use_selected, msgs)
+        cps = []
+        if cp_layer is not None:
+            ac_ids = {imp.to_id(r.get(fmap.ac_id)) for r in acs}
+            # Loads need every connection point near a sewer: the extent grows by the search radius
+            # (spatial filter; the layer is never scanned in full).
+            buf = max(si.EXTENT_BUFFER_M, opts.cp_load_search_m) if opts.load_connection_points \
+                else si.EXTENT_BUFFER_M
+            cp_ext = si.rows_extent(sewers, buf)
+            cps = si.read_connection_points(arcpy, cp_layer, roles["cp"], fmap.cp_id, sorted(refs - ac_ids), cp_ext,
+                                            use_selected, msgs, buffer_m=buf)
+        elif load_connection_points:
+            msgs.info("No connection point layer given: no connection point loads were created.")
+        model, rep = imp.build_model(acs, cps, sewers, fmap, opts, cfg)
+        si.report_to_messages(msgs, rep)
+        native.write_model(out_path, imp.model_json(model), exists and overwrite)
+        msgs.info(f"Wrote WWNet model {out_path} (EPSG:7850).")
+        issues = native.check(out_path, True)
+        counts = {"error": 0, "warning": 0, "info": 0}
+        for i in issues:
+            counts[i["severity"] if i["severity"] in counts else "info"] += 1
+        report_issues(msgs, issues[:si.MAX_ISSUE_LINES])
+        if len(issues) > si.MAX_ISSUE_LINES:
+            msgs.info(f"... {len(issues) - si.MAX_ISSUE_LINES} more issue(s) stored in wwn_issues "
+                      "(run Check Model for the full table).")
+        msgs.info(f"Model check: {counts['error']} error(s), {counts['warning']} warning(s), {counts['info']} info.")
+        if add_to_map:
+            try:
+                add_model_to_map(arcpy, msgs, out_path, True)
+            except Exception as exc:  # noqa: BLE001
+                msgs.warn(f"Could not add the model to the active map: {exc}")
+        return {"path": out_path, "report": rep, "issues": issues, "model": model}
 
 
 def sewer_field_defaults(arcpy, layer) -> dict:
@@ -169,7 +172,8 @@ def check_model(arcpy, msgs: Messages, gpkg_path: str, out_table: str | None = N
     msgs.info(f"Check finished: {counts['error']} error(s), {counts['warning']} warning(s), "
               f"{counts['info']} info.")
     if out_table:
-        n = issues_table.write_issues_table(arcpy, out_table, issues)
+        with gpenv.quiet(arcpy):
+            n = issues_table.write_issues_table(arcpy, out_table, issues)
         msgs.info(f"Wrote {n} issue(s) to {out_table}")
     return issues
 
@@ -322,31 +326,32 @@ def run_design(arcpy, msgs: Messages, gpkg_path: str, show_layer: bool = True, a
     for i in report_issues_sorted([i for i in d.get("issues", []) if i.get("object_type") != "conduit"]):
         msgs.warn(f"{i.get('code')} {i.get('object_type')} {i.get('object_id')} ({i.get('clause')}): "
                   f"{i.get('message')}")
-    if show_layer:
-        try:
-            _show_results_layer(arcpy, msgs, gpkg_path, d, select_failed)
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not add the results layer to the map: {exc}")
-    if add_table:
-        try:
-            maplayers.add_results_table(arcpy, gpkg_path, msgs)
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not add the results table to the map: {exc}")
-    if select_failed:
-        lyr = None
-        try:
-            lyr = maplayers.find_layer_for(arcpy, gpkg_path, "wwn_conduits")
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not inspect the map: {exc}")
-        if lyr is None:
-            msgs.warn("The model's conduit layer is not in the active map; skipping select.")
-        else:
-            failed = cli.failed_conduits(d)
+    with gpenv.quiet(arcpy):
+        if show_layer:
             try:
-                _select(arcpy, lyr, failed, "conduit_id")
-                msgs.info(f"Selected {len(failed)} failed conduit(s)." if failed else "No failed conduits.")
+                _show_results_layer(arcpy, msgs, gpkg_path, d, select_failed)
             except Exception as exc:  # noqa: BLE001
-                msgs.warn(f"Could not select failed conduits: {exc}")
+                msgs.warn(f"Could not add the results layer to the map: {exc}")
+        if add_table:
+            try:
+                maplayers.add_results_table(arcpy, gpkg_path, msgs)
+            except Exception as exc:  # noqa: BLE001
+                msgs.warn(f"Could not add the results table to the map: {exc}")
+        if select_failed:
+            lyr = None
+            try:
+                lyr = maplayers.find_layer_for(arcpy, gpkg_path, "wwn_conduits")
+            except Exception as exc:  # noqa: BLE001
+                msgs.warn(f"Could not inspect the map: {exc}")
+            if lyr is None:
+                msgs.warn("The model's conduit layer is not in the active map; skipping select.")
+            else:
+                failed = cli.failed_conduits(d)
+                try:
+                    _select(arcpy, lyr, failed, "conduit_id")
+                    msgs.info(f"Selected {len(failed)} failed conduit(s)." if failed else "No failed conduits.")
+                except Exception as exc:  # noqa: BLE001
+                    msgs.warn(f"Could not select failed conduits: {exc}")
     return d
 
 
@@ -457,10 +462,11 @@ def run_simulation(arcpy, msgs: Messages, gpkg_path: str, duration_h: float = 48
     if export_inp:
         msgs.info(f"SWMM input file written: {export_inp}")
     if show_layer:
-        try:
-            _show_sim_layers(arcpy, msgs, gpkg_path, d)
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not add the simulation layers to the map: {exc}")
+        with gpenv.quiet(arcpy):
+            try:
+                _show_sim_layers(arcpy, msgs, gpkg_path, d)
+            except Exception as exc:  # noqa: BLE001
+                msgs.warn(f"Could not add the simulation layers to the map: {exc}")
     return d
 
 
@@ -492,18 +498,19 @@ def trace(arcpy, msgs: Messages, nodes_layer, node_id: str, direction: str = "Up
     conduits = gpkg.conduits_between(path, traced)
     msgs.info(f"{len(conduits)} conduit(s) on the traced path.")
     if select:
-        # the parameter may be a dataset path rather than a map layer: select on the map layer
-        nl = maplayers.find_layer_for(arcpy, path, "wwn_nodes")
-        if nl is not None:
-            _select(arcpy, nl, sorted(traced), "node_id")
-        else:
-            msgs.warn("The nodes layer is not in the active map; nothing selected (add the model with "
-                      "'Add Model To Map').")
-        cl = maplayers.find_layer_for(arcpy, path, "wwn_conduits")
-        if cl is not None:
-            _select(arcpy, cl, conduits, "conduit_id")
-        else:
-            msgs.warn("The conduit layer is not in the active map; only nodes were selected.")
+        with gpenv.quiet(arcpy):
+            # the parameter may be a dataset path rather than a map layer: select on the map layer
+            nl = maplayers.find_layer_for(arcpy, path, "wwn_nodes")
+            if nl is not None:
+                _select(arcpy, nl, sorted(traced), "node_id")
+            else:
+                msgs.warn("The nodes layer is not in the active map; nothing selected (add the model with "
+                          "'Add Model To Map').")
+            cl = maplayers.find_layer_for(arcpy, path, "wwn_conduits")
+            if cl is not None:
+                _select(arcpy, cl, conduits, "conduit_id")
+            else:
+                msgs.warn("The conduit layer is not in the active map; only nodes were selected.")
     return {"nodes": sorted(traced), "conduits": conduits}
 
 
@@ -660,22 +667,6 @@ def ask_assistant(arcpy, msgs: Messages, question: str, layer_name: str | None =
     return res
 
 
-def _log_get(arcpy, name: str):
-    """Current geoprocessing log setting (GetLogHistory / GetLogMetadata), or None when arcpy lacks
-    it or the call fails. Logging control must never break an export."""
-    try:
-        return getattr(arcpy, name)() if hasattr(arcpy, name) else None
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _log_set(arcpy, name: str, value) -> None:
-    try:
-        getattr(arcpy, name)(value)
-    except Exception:  # noqa: BLE001
-        pass
-
-
 def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
                out_sr_label: str = "GDA2020 / MGA zone 50 (EPSG:7850)", dem: str | None = None) -> dict:
     """Write <stem>_ICM.gdb (ICM_Nodes, ICM_Conduits), two CSVs and an import-notes file to out_folder."""
@@ -720,14 +711,8 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
             msgs.info(f"Projecting GDA2020 -> GDA94 with {name}.")
         else:
             msgs.warn("No GDA94 <-> GDA2020 transformation is listed by ArcGIS; coordinates may be ~1.5 m out.")
-    prev_hist = _log_get(arcpy, "GetLogHistory")
-    prev_meta = _log_get(arcpy, "GetLogMetadata")
-    if prev_hist is not None:
-        _log_set(arcpy, "SetLogHistory", False)
-    if prev_meta is not None:
-        _log_set(arcpy, "SetLogMetadata", False)
     node_tm, conduit_tm, gdb_s = {}, {}, 0.0
-    try:
+    with gpenv.quiet(arcpy):
         stem = icm_export.safe_stem(gpkg_path)
         gdb = os.path.join(out_folder, f"{stem}_ICM.gdb")
         if not arcpy.Exists(gdb):
@@ -759,11 +744,6 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
         msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}")
         msgs.info(f"Import notes (field mapping for ICM's Open Data Import Centre): {notes}")
         lap("CSV/notes")
-    finally:
-        if prev_hist is not None:
-            _log_set(arcpy, "SetLogHistory", prev_hist)
-        if prev_meta is not None:
-            _log_set(arcpy, "SetLogMetadata", prev_meta)
     msgs.info("Timing: " + ", ".join(f"{k} {v:.1f} s" for k, v in tm.items())
               + f", total {time.perf_counter() - t0:.1f} s")
     tkeys = ("exists", "delete", "create", "fields", "copy")
