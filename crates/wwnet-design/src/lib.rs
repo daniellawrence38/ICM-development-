@@ -3,6 +3,7 @@
 //! Computes local loading per sub-catchment (4.2.1), accumulates flow down the gravity
 //! network (stopping at pump station wet wells), runs the clause-referenced conduit checks of
 //! `wwnet-rules` and adds node checks (falls through ACs, drop ACs).
+pub mod loads;
 pub mod service;
 
 use serde::Serialize;
@@ -53,6 +54,16 @@ impl ConduitDesign {
             .iter()
             .find(|c| c.result == self.result)
             .map(|c| c.message.as_str())
+    }
+
+    /// Message of the first fail check, else the first warn check (`None` when all pass / info).
+    pub fn worst_failure(&self) -> Option<&str> {
+        [CheckResult::Fail, CheckResult::Warn].iter().find_map(|r| {
+            self.checks
+                .iter()
+                .find(|c| c.result == *r)
+                .map(|c| c.message.as_str())
+        })
     }
 }
 
@@ -203,7 +214,7 @@ fn net_area(s: &Subcatchment, rules: &RuleSet, out: &mut Vec<Issue>) -> Option<f
             let a = g * (1.0 - ded);
             out.push(issue(
                 Severity::Info,
-                "design_net_area_broadacre",
+                "NET_AREA_BROADACRE",
                 "subcatchment",
                 id,
                 Some("DS50 4.2.1(k)"),
@@ -216,7 +227,7 @@ fn net_area(s: &Subcatchment, rules: &RuleSet, out: &mut Vec<Issue>) -> Option<f
         let a = g.area() / 10_000.0;
         out.push(issue(
             Severity::Info,
-            "design_net_area_geometry",
+            "NET_AREA_GEOMETRY",
             "subcatchment",
             id,
             None,
@@ -226,7 +237,7 @@ fn net_area(s: &Subcatchment, rules: &RuleSet, out: &mut Vec<Issue>) -> Option<f
     }
     out.push(issue(
         Severity::Warning,
-        "design_no_area",
+        "NO_AREA",
         "subcatchment",
         id,
         None,
@@ -244,7 +255,7 @@ fn local_loads(model: &Model, rules: &RuleSet, out: &mut Vec<Issue>) -> HashMap<
             if !a.is_finite() || a < 0.0 {
                 out.push(issue(
                     Severity::Warning,
-                    "design_bad_area",
+                    "BAD_AREA",
                     "subcatchment",
                     id,
                     None,
@@ -255,7 +266,7 @@ fn local_loads(model: &Model, rules: &RuleSet, out: &mut Vec<Issue>) -> HashMap<
             let peak = model.load_settings.peaking_factor;
             out.push(issue(
                 Severity::Info,
-                "design_manual_adwf",
+                "MANUAL_ADWF",
                 "subcatchment",
                 id,
                 None,
@@ -276,7 +287,7 @@ fn local_loads(model: &Model, rules: &RuleSet, out: &mut Vec<Issue>) -> HashMap<
         if !area.is_finite() || area < 0.0 {
             out.push(issue(
                 Severity::Warning,
-                "design_bad_area",
+                "BAD_AREA",
                 "subcatchment",
                 id,
                 None,
@@ -292,7 +303,7 @@ fn local_loads(model: &Model, rules: &RuleSet, out: &mut Vec<Issue>) -> HashMap<
                     if let Some(note) = &r.note {
                         out.push(issue(
                             Severity::Info,
-                            "design_rate_note",
+                            "RATE_NOTE",
                             "subcatchment",
                             id,
                             Some(&r.clause),
@@ -315,7 +326,7 @@ fn local_loads(model: &Model, rules: &RuleSet, out: &mut Vec<Issue>) -> HashMap<
                 Err(e) => {
                     out.push(issue(
                         Severity::Warning,
-                        "design_rate_missing",
+                        "RATE_MISSING",
                         "subcatchment",
                         id,
                         Some("DS50 Table 4.1/4.2"),
@@ -353,7 +364,7 @@ fn local_loads(model: &Model, rules: &RuleSet, out: &mut Vec<Issue>) -> HashMap<
                 Err(e) => {
                     out.push(issue(
                         Severity::Warning,
-                        "design_rate_missing",
+                        "RATE_MISSING",
                         "subcatchment",
                         id,
                         Some("DS50 Table 4.3"),
@@ -507,7 +518,7 @@ fn design_conduit(
     for m in &missing {
         issues.push(issue(
             Severity::Warning,
-            "design_missing_data",
+            "MISSING_DATA",
             "conduit",
             cid,
             None,
@@ -545,7 +556,7 @@ fn design_conduit(
         }
         issues.push(issue(
             sev,
-            &format!("design_{}", k.rule),
+            &k.rule.to_ascii_uppercase(),
             "conduit",
             cid,
             Some(&k.clause),
@@ -600,7 +611,7 @@ fn node_checks(model: &Model, rules: &RuleSet, issues: &mut Vec<Issue>) {
                         if fall < req - TOL {
                             issues.push(issue(
                                 Severity::Warning,
-                                "design_ac_fall",
+                                "AC_FALL",
                                 "node",
                                 &n.node_id,
                                 Some("DS50 Table 4.8"),
@@ -620,7 +631,7 @@ fn node_checks(model: &Model, rules: &RuleSet, issues: &mut Vec<Issue>) {
                     match rules.drop_min(idn, odn, mat) {
                         Some(req) if fall < req - TOL => issues.push(issue(
                             Severity::Warning,
-                            "design_drop_ac",
+                            "DROP_AC",
                             "node",
                             &n.node_id,
                             Some("DS50 Table 4.5"),
@@ -632,7 +643,7 @@ fn node_checks(model: &Model, rules: &RuleSet, issues: &mut Vec<Issue>) {
                         Some(_) => {}
                         None => issues.push(issue(
                             Severity::Info,
-                            "design_drop_ac_no_entry",
+                            "DROP_AC_NO_ENTRY",
                             "node",
                             &n.node_id,
                             Some("DS50 Table 4.5"),
@@ -648,53 +659,13 @@ fn node_checks(model: &Model, rules: &RuleSet, issues: &mut Vec<Issue>) {
 /// Add node loads (ADWF, and its GSDF at the peaking factor) to the local loads.
 fn add_node_loads(model: &Model, locals: &mut HashMap<String, Local>, issues: &mut Vec<Issue>) {
     let ls = &model.load_settings;
-    let node_ids: std::collections::HashSet<&str> =
-        model.nodes.iter().map(|n| n.node_id.as_str()).collect();
-    for l in &model.node_loads {
-        let adwf = l.effective_adwf_lps(ls.adwf_per_connection_lpd);
-        if !adwf.is_finite() || adwf < 0.0 {
-            issues.push(issue(
-                Severity::Warning,
-                "design_bad_load",
-                "node",
-                &l.node_id,
-                None,
-                format!("node load {} has invalid ADWF {adwf}; ignored", l.load_id),
-            ));
-            continue;
-        }
-        if l.adwf_lps.is_none() && l.connections.is_none() {
-            issues.push(issue(
-                Severity::Warning,
-                "design_bad_load",
-                "node",
-                &l.node_id,
-                None,
-                format!(
-                    "node load {} has neither connections nor ADWF; ignored",
-                    l.load_id
-                ),
-            ));
-            continue;
-        }
-        if !node_ids.contains(l.node_id.as_str()) {
-            issues.push(issue(
-                Severity::Warning,
-                "design_load_node_missing",
-                "node",
-                &l.node_id,
-                None,
-                format!(
-                    "node load {} refers to a node that does not exist; its flow is lost",
-                    l.load_id
-                ),
-            ));
-            continue;
-        }
-        let e = locals.entry(l.node_id.clone()).or_default();
-        e.adwf += adwf;
-        e.gsdf += adwf * ls.peaking_factor;
-        e.daily += adwf * 86400.0;
+    let (loads, found) = loads::resolve_node_loads(model);
+    issues.extend(found);
+    for l in loads {
+        let e = locals.entry(l.load.node_id.clone()).or_default();
+        e.adwf += l.adwf_lps;
+        e.gsdf += l.adwf_lps * ls.peaking_factor;
+        e.daily += l.adwf_lps * 86400.0;
     }
 }
 
@@ -727,7 +698,7 @@ pub fn run_design(model: &Model, rules: &RuleSet) -> Result<DesignOutput> {
         if !model.nodes.iter().any(|n| &n.node_id == outlet) {
             issues.push(issue(
                 Severity::Warning,
-                "design_outlet_missing",
+                "SUBCATCHMENT_OUTLET_MISSING",
                 "node",
                 outlet,
                 None,
@@ -784,7 +755,7 @@ pub fn run_design(model: &Model, rules: &RuleSet) -> Result<DesignOutput> {
                 None => {
                     issues.push(issue(
                         Severity::Warning,
-                        "design_pump_rate_missing",
+                        "PUMP_RATE_MISSING",
                         "pump_station",
                         &ps.ps_id,
                         Some("DS50 4.2.1(l)"),
@@ -809,7 +780,7 @@ pub fn run_design(model: &Model, rules: &RuleSet) -> Result<DesignOutput> {
                 }
                 None => issues.push(issue(
                     Severity::Warning,
-                    "design_pump_no_discharge",
+                    "PUMP_NO_DISCHARGE",
                     "pump_station",
                     &ps.ps_id,
                     None,
@@ -824,8 +795,8 @@ pub fn run_design(model: &Model, rules: &RuleSet) -> Result<DesignOutput> {
         let out_list = outs.get(id.as_str()).map(Vec::as_slice).unwrap_or(&[]);
         if out_list.len() > 1 {
             issues.push(issue(
-                Severity::Warning,
-                "design_bifurcation",
+                Severity::Info,
+                "BIFURCATION_ROUTING",
                 "node",
                 id,
                 None,
@@ -898,29 +869,36 @@ pub fn to_conduit_results(out: &DesignOutput, rules: &RuleSet) -> Result<Vec<Con
     out.conduit_results
         .iter()
         .map(|c| {
-            let messages = serde_json::to_string(&serde_json::json!({
-                "checks": c.checks,
-                "hydraulic_capacity_lps": c.hydraulic_capacity_lps,
-                "table44_lps": c.table44_lps,
-            }))
-            .map_err(|e| Error::Other(format!("cannot encode messages: {e}")))?;
+            let messages = serde_json::to_string(&serde_json::json!({ "checks": c.checks }))
+                .map_err(|e| Error::Other(format!("cannot encode messages: {e}")))?;
             Ok(ConduitResult {
                 conduit_id: c.conduit_id.clone(),
                 ruleset: Some(label.clone()),
+                dn: Some(c.dn),
+                grade_1in: c.grade_1in,
+                adwf_lps: Some(c.adwf_lps),
                 gsdf_lps: Some(c.gsdf_lps),
+                pumped_lps: Some(c.pumped_lps),
+                total_lps: Some(c.total_lps),
                 capacity_lps: c.capacity_lps,
+                table44_lps: c.table44_lps,
+                hydraulic_capacity_lps: c.hydraulic_capacity_lps,
                 d_over_d: c.d_over_d,
                 velocity_mps: c.velocity_mps,
-                grade_1in: c.grade_1in,
-                result: match c.result {
-                    CheckResult::Pass => "pass",
-                    CheckResult::Warn => "warn",
-                    CheckResult::Fail => "fail",
-                    CheckResult::Info => "info",
-                }
-                .into(),
+                result: result_str(c.result).into(),
+                worst_message: c.worst_failure().map(String::from),
                 messages: Some(messages),
             })
         })
         .collect()
+}
+
+/// `pass` | `warn` | `fail` | `info`.
+pub fn result_str(r: CheckResult) -> &'static str {
+    match r {
+        CheckResult::Pass => "pass",
+        CheckResult::Warn => "warn",
+        CheckResult::Fail => "fail",
+        CheckResult::Info => "info",
+    }
 }

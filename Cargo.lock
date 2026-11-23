@@ -728,6 +728,7 @@ name = "wwnet-design"
 version = "0.1.0"
 dependencies = [
  "approx",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

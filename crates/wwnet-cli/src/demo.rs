@@ -146,3 +146,37 @@ pub fn model() -> Model {
     }
     m
 }
+
+/// The demo with flow-modelling inputs: connection-point node loads on every manhole (12 lots each,
+/// source `connection_points`) and the APPROXIMATE example residential profile as the default.
+pub fn model_with_flows() -> Model {
+    let mut m = model();
+    let ids: Vec<String> = m
+        .nodes
+        .iter()
+        .filter(|n| n.node_type != NodeType::Outfall)
+        .map(|n| n.node_id.clone())
+        .collect();
+    for id in ids {
+        m.node_loads.push(NodeLoad {
+            load_id: format!("CP-{id}"),
+            node_id: id,
+            connections: Some(12),
+            adwf_lps: None,
+            profile_id: None,
+            source: Some("connection_points".into()),
+            notes: Some("demo".into()),
+        });
+    }
+    let csv = include_str!("../../../templates/profiles/example_residential.csv");
+    let (p, _) = wwnet_core::profile::parse_profile(
+        "example_residential",
+        csv,
+        "APPROXIMATE example residential profile (digitised)",
+        false,
+    )
+    .expect("bundled example profile parses");
+    m.profiles.push(p);
+    m.load_settings.default_profile = Some("example_residential".into());
+    m
+}

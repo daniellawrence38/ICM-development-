@@ -153,7 +153,8 @@ fn ruleset_toml() -> &'static str {
 }
 
 /// Validate a model (same as `wwnet check --json`): list of issue dicts
-/// (severity, code, object_type, object_id, message, clause). With `write`, replaces `wwn_issues`.
+/// (severity, code, object_type, object_id, message, clause). With `write`, replaces the `check`
+/// rows of `wwn_issues` (a point layer).
 #[pyfunction]
 #[pyo3(signature = (gpkg_path, write=true))]
 fn check<'py>(py: Python<'py>, gpkg_path: &str, write: bool) -> PyResult<Bound<'py, PyAny>> {
@@ -167,7 +168,8 @@ fn check<'py>(py: Python<'py>, gpkg_path: &str, write: bool) -> PyResult<Bound<'
 }
 
 /// Run the DS 50 design (same as `wwnet design --json`): dict with conduit_results, node_flows,
-/// issues and summary. With `write`, saves wwn_results_conduits and appends to wwn_issues.
+/// issues and summary. With `write`, saves the wwn_results_conduits layer and replaces the `design`
+/// rows of wwn_issues.
 #[pyfunction]
 #[pyo3(signature = (gpkg_path, ruleset_path=None, write=true))]
 fn design<'py>(
@@ -185,9 +187,13 @@ fn design<'py>(
     loads(py, &text)
 }
 
-/// Trace upstream and/or downstream of a node: {"upstream": [ids], "downstream": [ids]}
-/// containing only the requested directions (neither flag means both). KeyError if the node is unknown.
+/// Trace upstream and/or downstream of a node or a conduit: {"upstream": [node ids],
+/// "downstream": [node ids], "conduits": [conduit ids], "summary": {start_node, start_conduit,
+/// upstream_nodes, upstream_conduits, upstream_connections, upstream_subcatchments, adwf_lps,
+/// gsdf_lps, pumped_lps}}; only the requested directions are present (neither flag means both).
+/// KeyError if the id is neither a node nor a conduit.
 #[pyfunction]
+#[pyo3(signature = (gpkg_path, node_id, up=true, down=false))]
 fn trace<'py>(
     py: Python<'py>,
     gpkg_path: &str,
@@ -269,14 +275,16 @@ fn import_profile<'py>(
 }
 
 /// Run the SWMM dynamic-wave simulation (same as `wwnet simulate --json`): dict with run_id,
-/// options, summary, links, nodes, warnings, series_ids. With `write`, results go to the
-/// wwn_sim_* tables (series for the downstream-most 5 conduits plus `series_ids`). With
-/// `write_inp`, the generated SWMM input file is saved there. RuntimeError if the engine fails;
-/// ValueError for bad options.
+/// label, options, summary, links, nodes, issues, warnings, series_ids. With `write`, results go to
+/// the wwn_sim_* tables and the wwn_sim_conduit_results / wwn_sim_node_results map layers (series
+/// for the downstream-most 5 conduits plus `series_ids`), and the issues to wwn_issues (source
+/// `simulate`). `roughness` "ks" (default, the design's Colebrook ks as a per-conduit n) or
+/// "manning" (one `n`). With `write_inp`, the generated SWMM input file is saved there.
+/// RuntimeError if the engine fails; ValueError for bad options.
 #[pyfunction]
 #[pyo3(signature = (
-    gpkg_path, duration_h=48.0, warmup_h=24.0, roughness="manning", n=0.013, flow_scale=1.0,
-    write=true, series_ids=None, write_inp=None
+    gpkg_path, duration_h=48.0, warmup_h=24.0, roughness="ks", n=0.013, flow_scale=1.0,
+    write=true, series_ids=None, write_inp=None, label=""
 ))]
 #[allow(clippy::too_many_arguments)]
 fn simulate<'py>(
@@ -290,6 +298,7 @@ fn simulate<'py>(
     write: bool,
     series_ids: Option<Vec<String>>,
     write_inp: Option<&str>,
+    label: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
     use wwnet_sim::service::{simulate_file, simulate_json, ServiceOptions};
     let opts = ServiceOptions {
@@ -299,6 +308,7 @@ fn simulate<'py>(
         manning_n: n,
         flow_scale,
         series_ids: series_ids.unwrap_or_default(),
+        label: label.to_string(),
         ..ServiceOptions::default()
     };
     let text = py
@@ -323,11 +333,153 @@ fn simulate<'py>(
     loads(py, &text)
 }
 
-/// Upgrade a model GeoPackage to the current schema (creates missing v2 tables).
+/// Upgrade a model GeoPackage to the current schema (creates missing tables / columns).
 #[pyfunction]
 fn upgrade_model(py: Python<'_>, gpkg_path: &str) -> PyResult<()> {
     py.allow_threads(|| wwnet_core::gpkg::upgrade(gpkg_path))
         .map_err(lib_err)
+}
+
+/// The file's schema version (1 when unknown); `SCHEMA_VERSION` is the current one.
+#[pyfunction]
+fn schema_version(py: Python<'_>, gpkg_path: &str) -> PyResult<i64> {
+    py.allow_threads(|| wwnet_core::gpkg::schema_version(gpkg_path))
+        .map_err(lib_err)
+}
+
+/// User-facing service errors (no such run / profile, bad value) become ValueError.
+fn svc_err(e: wwnet_core::Error) -> PyErr {
+    match &e {
+        wwnet_core::Error::Other(m)
+            if m.starts_with("no ")
+                || m.starts_with("profile ")
+                || m.starts_with("both runs")
+                || m.starts_with("invalid ")
+                || m.starts_with("issue source")
+                || m.starts_with("table must")
+                || m.contains(" must be between ") =>
+        {
+            PyValueError::new_err(m.clone())
+        }
+        _ => lib_err(e),
+    }
+}
+
+fn json_call<'py, F>(py: Python<'py>, f: F) -> PyResult<Bound<'py, PyAny>>
+where
+    F: FnOnce() -> wwnet_core::Result<String> + Send,
+{
+    let text = py.allow_threads(f).map_err(svc_err)?;
+    loads(py, &text)
+}
+
+/// Replace the `source` rows ("check", "design", "import", "simulate") of wwn_issues with the
+/// issues in `issues_json` (list of {severity, code, object_type, object_id, clause, message,
+/// x?, y?}); issues without x / y are drawn at their object. Returns the number stored.
+#[pyfunction]
+fn store_issues(
+    py: Python<'_>,
+    gpkg_path: &str,
+    source: &str,
+    issues_json: &str,
+) -> PyResult<usize> {
+    py.allow_threads(|| service::store_issues_json(gpkg_path, source, issues_json))
+        .map_err(svc_err)
+}
+
+/// Stored simulation runs, newest first: list of {run_id, label, options, summary,
+/// continuity_error_pct, warnings, shown}.
+#[pyfunction]
+fn sim_runs<'py>(py: Python<'py>, gpkg_path: &str) -> PyResult<Bound<'py, PyAny>> {
+    json_call(py, || {
+        wwnet_sim::service::to_json(&wwnet_sim::service::list_runs(gpkg_path)?)
+    })
+}
+
+/// Show a stored run (run id, label, "latest" or "previous") in the wwn_sim_conduit_results /
+/// wwn_sim_node_results layers. Returns the run's info dict. ValueError if there is no such run.
+#[pyfunction]
+#[pyo3(signature = (gpkg_path, run="latest"))]
+fn show_sim_run<'py>(py: Python<'py>, gpkg_path: &str, run: &str) -> PyResult<Bound<'py, PyAny>> {
+    json_call(py, || {
+        wwnet_sim::service::to_json(&wwnet_sim::service::show_run(gpkg_path, run)?)
+    })
+}
+
+/// Compare stored runs `run_a` (baseline) and `run_b` per conduit: {run_a, run_b, rows, counts};
+/// with `write`, fills the wwn_sim_compare layer.
+#[pyfunction]
+#[pyo3(signature = (gpkg_path, run_a="previous", run_b="latest", write=true))]
+fn compare_sim_runs<'py>(
+    py: Python<'py>,
+    gpkg_path: &str,
+    run_a: &str,
+    run_b: &str,
+    write: bool,
+) -> PyResult<Bound<'py, PyAny>> {
+    json_call(py, || {
+        wwnet_sim::service::to_json(&wwnet_sim::service::compare_runs(
+            gpkg_path, run_a, run_b, write,
+        )?)
+    })
+}
+
+/// Stored time series of a run: {run, series: [{object_type, object_id, minutes, flow_lps,
+/// depth_m}], missing, available}. `ids` None = every stored series.
+#[pyfunction]
+#[pyo3(signature = (gpkg_path, run="latest", ids=None))]
+fn sim_series<'py>(
+    py: Python<'py>,
+    gpkg_path: &str,
+    run: &str,
+    ids: Option<Vec<String>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let ids = ids.unwrap_or_default();
+    json_call(py, move || {
+        wwnet_sim::service::to_json(&wwnet_sim::service::read_series(gpkg_path, run, &ids)?)
+    })
+}
+
+/// Loading settings and profiles: {schema_version, adwf_per_connection_lpd, peaking_factor,
+/// default_profile, profiles: [{profile_id, description, points, interval_min, mean_factor}]}.
+#[pyfunction]
+fn get_settings<'py>(py: Python<'py>, gpkg_path: &str) -> PyResult<Bound<'py, PyAny>> {
+    json_call(py, || service::json(&service::get_settings(gpkg_path)?))
+}
+
+/// Change loading settings (None keeps a value; default_profile "" clears it). Returns the
+/// settings dict. ValueError for out-of-range values or an unknown profile.
+#[pyfunction]
+#[pyo3(signature = (gpkg_path, adwf_per_connection_lpd=None, peaking_factor=None, default_profile=None))]
+fn set_settings<'py>(
+    py: Python<'py>,
+    gpkg_path: &str,
+    adwf_per_connection_lpd: Option<f64>,
+    peaking_factor: Option<f64>,
+    default_profile: Option<&str>,
+) -> PyResult<Bound<'py, PyAny>> {
+    json_call(py, || {
+        service::json(&service::set_settings(
+            gpkg_path,
+            adwf_per_connection_lpd,
+            peaking_factor,
+            default_profile,
+        )?)
+    })
+}
+
+/// Set profile_id on node loads (`table` "node_loads", ids = load or node ids) or sub-catchments
+/// (`table` "subcatchments"); "" clears it. Returns the number of rows changed.
+#[pyfunction]
+fn assign_profile(
+    py: Python<'_>,
+    gpkg_path: &str,
+    table: &str,
+    ids: Vec<String>,
+    profile_id: &str,
+) -> PyResult<usize> {
+    py.allow_threads(|| service::assign_profile(gpkg_path, table, &ids, profile_id))
+        .map_err(svc_err)
 }
 
 /// Version of the native module.
@@ -351,6 +503,16 @@ fn wwnet_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(import_profile, m)?)?;
     m.add_function(wrap_pyfunction!(simulate, m)?)?;
     m.add_function(wrap_pyfunction!(upgrade_model, m)?)?;
+    m.add_function(wrap_pyfunction!(schema_version, m)?)?;
+    m.add_function(wrap_pyfunction!(store_issues, m)?)?;
+    m.add_function(wrap_pyfunction!(sim_runs, m)?)?;
+    m.add_function(wrap_pyfunction!(show_sim_run, m)?)?;
+    m.add_function(wrap_pyfunction!(compare_sim_runs, m)?)?;
+    m.add_function(wrap_pyfunction!(sim_series, m)?)?;
+    m.add_function(wrap_pyfunction!(get_settings, m)?)?;
+    m.add_function(wrap_pyfunction!(set_settings, m)?)?;
+    m.add_function(wrap_pyfunction!(assign_profile, m)?)?;
+    m.add("SCHEMA_VERSION", wwnet_core::gpkg::SCHEMA_VERSION)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
     Ok(())
 }

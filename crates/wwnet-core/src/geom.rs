@@ -44,6 +44,23 @@ impl LineString {
     pub fn last(&self) -> Option<&Point> {
         self.0.last()
     }
+    /// Point half way along the line (the first vertex for a zero-length line).
+    pub fn midpoint(&self) -> Option<Point> {
+        let half = self.length() / 2.0;
+        let mut run = 0.0;
+        for w in self.0.windows(2) {
+            let seg = w[0].distance(&w[1]);
+            if seg > 0.0 && run + seg >= half {
+                let t = (half - run) / seg;
+                return Some(Point::new(
+                    w[0].x + t * (w[1].x - w[0].x),
+                    w[0].y + t * (w[1].y - w[0].y),
+                ));
+            }
+            run += seg;
+        }
+        self.0.first().copied()
+    }
 }
 
 /// Polygons -> rings (first is exterior, rest are holes) -> points.
@@ -64,6 +81,11 @@ fn ring_area(r: &[Point]) -> f64 {
 }
 
 impl MultiPolygon {
+    /// Centre of the bounding box (a label point for issues; not a true centroid).
+    pub fn centre(&self) -> Option<Point> {
+        bbox(self.0.iter().flatten().flatten())
+            .map(|(a, b, c, d)| Point::new((a + c) / 2.0, (b + d) / 2.0))
+    }
     /// Planar area (shoelace); holes are subtracted.
     pub fn area(&self) -> f64 {
         self.0

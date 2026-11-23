@@ -162,3 +162,128 @@ fn bad_options_are_errors() {
     .unwrap_err();
     assert!(e.to_string().contains("roughness must"), "{e}");
 }
+
+#[test]
+fn labelled_runs_show_compare_and_series() {
+    use wwnet_sim::service::{compare_runs, list_runs, read_series, show_run};
+    let (_d, f) = demo();
+    add_loads(&f);
+    let o = ServiceOptions {
+        duration_h: 12.0,
+        warmup_h: 6.0,
+        label: "base".into(),
+        ..ServiceOptions::default()
+    };
+    let a = simulate_file(&f, &o, true).unwrap();
+    assert_eq!(a.label, "base");
+    // displayed layer = latest run, with geometry and a d/D class for every conduit
+    let shown = count(
+        &f,
+        "select count(*) from wwn_sim_conduit_results where geom is not null and d_class is not null",
+    );
+    assert_eq!(shown, a.links.len() as i64);
+    assert_eq!(
+        count(&f, "select count(*) from wwn_sim_node_results"),
+        a.nodes.len() as i64
+    );
+    let b = simulate_file(
+        &f,
+        &ServiceOptions {
+            flow_scale: 2.0,
+            label: "x2".into(),
+            ..o.clone()
+        },
+        true,
+    )
+    .unwrap();
+    let runs = list_runs(&f).unwrap();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].label, "x2");
+    assert!(runs[0].shown && !runs[1].shown);
+    assert!(runs[0].summary.get("peak_outlet_flow_lps").is_some());
+    // show the older run by label
+    let s = show_run(&f, "base").unwrap();
+    assert_eq!(s.run_id, a.run_id.clone().unwrap());
+    let lbl: String = gpkg::open(&f)
+        .unwrap()
+        .query_row(
+            "select label from wwn_sim_conduit_results limit 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(lbl, "base");
+    assert!(show_run(&f, "nope").is_err());
+    // compare: doubling the flow makes conduits worse
+    let cmp = compare_runs(&f, "base", "x2", true).unwrap();
+    assert_eq!(cmp.rows.len(), b.links.len());
+    let worse = cmp.counts.get("worse").copied().unwrap_or(0)
+        + cmp.counts.get("new_surcharge").copied().unwrap_or(0);
+    assert!(worse > 0, "{:?}", cmp.counts);
+    assert_eq!(
+        count(
+            &f,
+            "select count(*) from wwn_sim_compare where geom is not null"
+        ),
+        cmp.rows.len() as i64
+    );
+    assert!(compare_runs(&f, "latest", "x2", false).is_err());
+    // series of the latest run
+    let sr = read_series(&f, "latest", &[]).unwrap();
+    assert_eq!(sr.series.len(), 5);
+    assert!(sr.series[0].minutes.len() > 10);
+    let sr = read_series(&f, "previous", &["ZZZ".to_string()]).unwrap();
+    assert_eq!(sr.missing, vec!["ZZZ".to_string()]);
+    // simulate issues replace their own rows
+    let before = count(
+        &f,
+        "select count(*) from wwn_issues where source='simulate'",
+    );
+    simulate_file(&f, &o, true).unwrap();
+    assert_eq!(
+        count(
+            &f,
+            "select count(*) from wwn_issues where source='simulate'"
+        ),
+        before
+    );
+}
+
+#[test]
+fn pump_station_lost_flow_is_reported() {
+    let (_d, f) = demo();
+    add_loads(&f);
+    let m = Model::load(&f).unwrap();
+    // put a pump station on the most downstream node that has loads upstream
+    let out = m
+        .nodes
+        .iter()
+        .find(|n| n.node_type == wwnet_core::NodeType::Outfall)
+        .unwrap();
+    let c = gpkg::open(&f).unwrap();
+    let mut ps = wwnet_core::PumpStation::new("PS9");
+    ps.wet_well_node_id = Some(out.node_id.clone());
+    gpkg::insert_pump_station(&c, &ps).unwrap();
+    drop(c);
+    let r = simulate_file(
+        &f,
+        &ServiceOptions {
+            duration_h: 12.0,
+            warmup_h: 6.0,
+            ..ServiceOptions::default()
+        },
+        false,
+    )
+    .unwrap();
+    let i = r
+        .issues
+        .iter()
+        .find(|i| i.code == "PUMP_STATION_NOT_SIMULATED")
+        .unwrap();
+    assert_eq!(i.object_id, "PS9");
+    assert!(i.message.contains("L/s ADWF"), "{}", i.message);
+    assert!(!r
+        .warnings
+        .iter()
+        .any(|w| w.starts_with("pump stations and rising mains")));
+}

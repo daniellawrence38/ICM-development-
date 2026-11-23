@@ -59,7 +59,7 @@ fn v2_roundtrip_and_meta_defaults() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(v, "2");
+    assert_eq!(v, "3");
 }
 
 /// Build a v1-shaped file by dropping the v2 tables / columns.
@@ -101,10 +101,75 @@ fn v1_file_loads_and_upgrades() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(v, "2");
+    assert_eq!(v, "3");
     drop(c);
     let m = Model::load(&f).unwrap();
     assert_eq!(m.subcatchments.len(), 1);
+}
+
+/// A v2 file (non-spatial results / issues tables, no run labels) is upgraded to v3 layer tables.
+#[test]
+fn v2_file_upgrades_to_v3_layers() {
+    let d = tempfile::tempdir().unwrap();
+    let f = d.path().join("v2.gpkg");
+    gpkg::create(&f).unwrap();
+    model().write(&f).unwrap();
+    let c = Connection::open(&f).unwrap();
+    c.execute_batch(
+        "DROP TABLE wwn_results_conduits; DROP TABLE wwn_issues; DROP TABLE wwn_sim_runs;
+         DROP TABLE wwn_sim_conduit_results; DROP TABLE wwn_sim_node_results; DROP TABLE wwn_sim_compare;
+         CREATE TABLE wwn_results_conduits (conduit_id TEXT PRIMARY KEY, run_at TEXT, ruleset TEXT,
+           gsdf_lps REAL, capacity_lps REAL, d_over_d REAL, velocity_mps REAL, grade_1in REAL, result TEXT,
+           messages TEXT);
+         INSERT INTO wwn_results_conduits (conduit_id, result) VALUES ('C1', 'pass');
+         CREATE TABLE wwn_issues (fid INTEGER PRIMARY KEY AUTOINCREMENT, run_at TEXT, severity TEXT,
+           code TEXT, object_type TEXT, object_id TEXT, clause TEXT, message TEXT);
+         INSERT INTO wwn_issues (severity, code, object_type, object_id, message) VALUES ('warning','X','node','N1','old');
+         CREATE TABLE wwn_sim_runs (run_id TEXT PRIMARY KEY, options_json TEXT, continuity_error_pct REAL,
+           warnings_json TEXT);
+         DELETE FROM gpkg_geometry_columns WHERE table_name IN ('wwn_results_conduits','wwn_issues');
+         UPDATE gpkg_contents SET data_type='attributes', srs_id=NULL, identifier='Validation issues'
+           WHERE table_name='wwn_issues';
+         UPDATE gpkg_contents SET data_type='attributes', srs_id=NULL WHERE table_name='wwn_results_conduits';
+         UPDATE wwn_meta SET value='2' WHERE key='schema_version';",
+    )
+    .unwrap();
+    drop(c);
+    assert_eq!(gpkg::schema_version(&f).unwrap(), 2);
+    gpkg::ensure_current(&f).unwrap();
+    gpkg::upgrade(&f).unwrap(); // idempotent
+    assert_eq!(gpkg::schema_version(&f).unwrap(), 3);
+    let c = Connection::open(&f).unwrap();
+    for t in [
+        "wwn_results_conduits",
+        "wwn_issues",
+        "wwn_sim_conduit_results",
+        "wwn_sim_compare",
+    ] {
+        let (dt, srs): (String, Option<i64>) = c
+            .query_row(
+                "SELECT data_type, srs_id FROM gpkg_contents WHERE table_name=?",
+                [t],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((dt.as_str(), srs), ("features", Some(7850)), "{t}");
+        let n: i64 = c
+            .query_row(
+                "SELECT count(*) FROM gpkg_geometry_columns WHERE table_name=?",
+                [t],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "{t}");
+    }
+    assert!(gpkg::has_column(&c, "wwn_results_conduits", "worst_message").unwrap());
+    assert!(gpkg::has_column(&c, "wwn_sim_runs", "label").unwrap());
+    // the old issue is kept until a run replaces it (it has no source)
+    let n: i64 = c
+        .query_row("SELECT count(*) FROM wwn_issues", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
 }
 
 #[test]

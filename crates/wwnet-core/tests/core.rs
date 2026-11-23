@@ -332,10 +332,26 @@ fn gpkg_roundtrip_and_issues() {
     assert_eq!(back, m);
 
     let issues = run(&back);
-    Model::write_issues(&path, &issues).unwrap();
+    Model::store_issues(&path, "check", &issues).unwrap();
     assert_eq!(Model::read_issue_count(&path).unwrap(), issues.len() as i64);
-    Model::write_issues(&path, &[]).unwrap();
-    assert_eq!(Model::read_issue_count(&path).unwrap(), 0);
+    // another source is kept; re-storing a source replaces only its own rows (no accumulation)
+    let extra = Issue::new(
+        Severity::Warning,
+        "X",
+        "conduit",
+        "C1",
+        None,
+        "design issue",
+    );
+    Model::store_issues(&path, "design", std::slice::from_ref(&extra)).unwrap();
+    Model::store_issues(&path, "design", std::slice::from_ref(&extra)).unwrap();
+    assert_eq!(
+        Model::read_issue_count(&path).unwrap(),
+        issues.len() as i64 + 1
+    );
+    Model::store_issues(&path, "check", &[]).unwrap();
+    assert_eq!(Model::read_issue_count(&path).unwrap(), 1);
+    assert!(Model::store_issues(&path, "nonsense", &[]).is_err());
     Model::save_results(
         &path,
         &[gpkg::ConduitResult {
@@ -345,6 +361,19 @@ fn gpkg_roundtrip_and_issues() {
         }],
     )
     .unwrap();
+    {
+        let c = gpkg::open(&path).unwrap();
+        // results and issues carry geometry: the conduit line and its midpoint
+        let (has_line, has_pt): (bool, bool) = c
+            .query_row(
+                "SELECT (SELECT geom IS NOT NULL FROM wwn_results_conduits WHERE conduit_id='C1'),
+                        (SELECT geom IS NOT NULL FROM wwn_issues WHERE object_id='C1')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(has_line && has_pt);
+    }
 
     let c = gpkg::open(&path).unwrap();
     let (minx, maxx): (f64, f64) = c

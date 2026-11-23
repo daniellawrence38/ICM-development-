@@ -279,28 +279,75 @@ pub fn create(path: impl AsRef<Path>) -> Result<()> {
     Ok(())
 }
 
-/// Bring a model file up to the current schema (v2): creates any missing tables and meta
-/// defaults and sets `schema_version` to 2. Idempotent; existing data is never modified.
+/// Current schema version written by [`create`] and [`upgrade`].
+pub const SCHEMA_VERSION: i64 = 3;
+
+/// Bring a model file up to the current schema (v3): creates any missing tables and meta defaults,
+/// adds missing columns and sets `schema_version`. Idempotent. User data is never modified; the
+/// derived `wwn_results_conduits` table is recreated when it still has the v1/v2 (non-spatial) layout
+/// (the next design run fills it again).
 pub fn upgrade(path: impl AsRef<Path>) -> Result<()> {
     let conn = Connection::open(path)?;
+    if has_table(&conn, "wwn_results_conduits")?
+        && !has_column(&conn, "wwn_results_conduits", "geom")?
+    {
+        conn.execute_batch("DROP TABLE wwn_results_conduits")?;
+    }
     conn.execute_batch(SCHEMA_SQL)?;
-    for col in ["adwf_lps REAL", "profile_id TEXT"] {
+    for (table, col) in [
+        ("wwn_subcatchments", "adwf_lps REAL"),
+        ("wwn_subcatchments", "profile_id TEXT"),
+        ("wwn_issues", "source TEXT"),
+        ("wwn_issues", "geom POINT"),
+        ("wwn_sim_runs", "label TEXT"),
+        ("wwn_sim_runs", "summary_json TEXT"),
+    ] {
         let name = col.split(' ').next().unwrap_or_default();
-        if !has_column(&conn, "wwn_subcatchments", name)? {
-            conn.execute(
-                &format!("ALTER TABLE wwn_subcatchments ADD COLUMN {col}"),
-                [],
-            )?;
+        if !has_column(&conn, table, name)? {
+            conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {col}"), [])?;
         }
     }
     conn.execute(
-        "UPDATE wwn_meta SET value='2' WHERE key='schema_version' AND CAST(value AS INTEGER) < 2",
+        "UPDATE gpkg_contents SET data_type='features', srs_id=? \
+         WHERE table_name IN ('wwn_issues','wwn_results_conduits') AND data_type<>'features'",
+        [SRS_ID],
+    )?;
+    conn.execute(
+        "UPDATE gpkg_contents SET identifier='Issues' WHERE table_name='wwn_issues' AND identifier='Validation issues'",
         [],
+    )?;
+    conn.execute(
+        "UPDATE wwn_meta SET value=? WHERE key='schema_version' AND CAST(value AS INTEGER) < ?",
+        params![SCHEMA_VERSION.to_string(), SCHEMA_VERSION],
     )?;
     Ok(())
 }
 
-fn has_column(c: &Connection, table: &str, col: &str) -> Result<bool> {
+/// The file's `schema_version` (1 when the key is missing).
+pub fn schema_version(path: impl AsRef<Path>) -> Result<i64> {
+    let c = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    if !has_table(&c, "wwn_meta")? {
+        return Ok(1);
+    }
+    Ok(c.query_row(
+        "SELECT CAST(value AS INTEGER) FROM wwn_meta WHERE key='schema_version'",
+        [],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()?
+    .unwrap_or(1))
+}
+
+/// Upgrade the file only when it is older than [`SCHEMA_VERSION`] (avoids touching current files).
+pub fn ensure_current(path: impl AsRef<Path>) -> Result<()> {
+    let path = path.as_ref();
+    if schema_version(path)? < SCHEMA_VERSION {
+        upgrade(path)?;
+    }
+    Ok(())
+}
+
+pub fn has_column(c: &Connection, table: &str, col: &str) -> Result<bool> {
     let mut st = c.prepare(&format!("PRAGMA table_info({table})"))?;
     let names: Vec<String> = st
         .query_map([], |r| r.get::<_, String>(1))?
@@ -308,7 +355,7 @@ fn has_column(c: &Connection, table: &str, col: &str) -> Result<bool> {
     Ok(names.iter().any(|n| n == col))
 }
 
-fn has_table(c: &Connection, name: &str) -> Result<bool> {
+pub fn has_table(c: &Connection, name: &str) -> Result<bool> {
     Ok(c.query_row(
         "SELECT count(*) FROM sqlite_master WHERE type='table' AND name=?",
         [name],
@@ -467,23 +514,80 @@ pub fn update_extents(c: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Give `to` the extent of `from` in gpkg_contents (results tables share the network's extent).
+pub fn copy_extent(c: &Connection, from: &str, to: &str) -> Result<()> {
+    c.execute(
+        "UPDATE gpkg_contents SET (min_x,min_y,max_x,max_y,last_change) = \
+         (SELECT min_x,min_y,max_x,max_y,strftime('%Y-%m-%dT%H:%M:%fZ','now') FROM gpkg_contents WHERE table_name=?1) \
+         WHERE table_name=?2",
+        params![from, to],
+    )?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------- results
 
-/// One row of `wwn_results_conduits`.
+/// One row of `wwn_results_conduits` (the geometry is copied from `wwn_conduits` on save).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ConduitResult {
     pub conduit_id: String,
     pub ruleset: Option<String>,
+    pub dn: Option<i64>,
+    pub grade_1in: Option<f64>,
+    pub adwf_lps: Option<f64>,
     pub gsdf_lps: Option<f64>,
+    pub pumped_lps: Option<f64>,
+    pub total_lps: Option<f64>,
+    /// Governing capacity: the lesser of `table44_lps` and `hydraulic_capacity_lps`.
     pub capacity_lps: Option<f64>,
+    pub table44_lps: Option<f64>,
+    pub hydraulic_capacity_lps: Option<f64>,
     pub d_over_d: Option<f64>,
     pub velocity_mps: Option<f64>,
-    pub grade_1in: Option<f64>,
-    /// pass | warn | fail
+    /// pass | warn | fail | info
     pub result: String,
-    /// JSON text `[{rule, clause, value, limit, result}]`
+    pub worst_message: Option<String>,
+    /// JSON text `{"checks": [{rule, clause, value, limit, result, message}]}`
     pub messages: Option<String>,
 }
+
+/// Issue source written to `wwn_issues.source`.
+pub const ISSUE_SOURCES: [&str; 4] = ["check", "design", "import", "simulate"];
+
+/// Where an issue is drawn: node point, conduit midpoint, pump station point, sub-catchment centre.
+fn issue_locations(c: &Connection) -> Result<std::collections::HashMap<(String, String), Point>> {
+    let mut out = std::collections::HashMap::new();
+    for (table, ot, idf) in [
+        ("wwn_nodes", "node", "node_id"),
+        ("wwn_conduits", "conduit", "conduit_id"),
+        ("wwn_pump_stations", "pump_station", "ps_id"),
+        ("wwn_subcatchments", "subcatchment", "subcatchment_id"),
+    ] {
+        if !has_table(c, table)? {
+            continue;
+        }
+        let mut st = c.prepare(&format!(
+            "SELECT {idf}, geom FROM {table} WHERE geom IS NOT NULL"
+        ))?;
+        let rows: Vec<(String, Vec<u8>)> = st
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (id, blob) in rows {
+            let p = match decode(&blob) {
+                Ok(Some(Geometry::Point(p))) => Some(p),
+                Ok(Some(Geometry::LineString(l))) => l.midpoint(),
+                Ok(Some(Geometry::MultiPolygon(m))) => m.centre(),
+                _ => None,
+            };
+            if let Some(p) = p {
+                out.insert((ot.to_string(), id), p);
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------- Model I/O
 
 // ---------------------------------------------------------------- Model I/O
 
@@ -780,53 +884,89 @@ impl Model {
         Ok(m)
     }
 
-    /// Replace the contents of `wwn_results_conduits` with `results`.
+    /// Replace the contents of `wwn_results_conduits` with `results` (geometry copied from the
+    /// conduit of the same id). Upgrades older files first.
     pub fn save_results(path: impl AsRef<Path>, results: &[ConduitResult]) -> Result<()> {
+        let path = path.as_ref();
+        ensure_current(path)?;
         let mut c = open(path)?;
         let tx = c.transaction()?;
         tx.execute("DELETE FROM wwn_results_conduits", [])?;
         for r in results {
             tx.execute(
-                "INSERT INTO wwn_results_conduits (conduit_id,run_at,ruleset,gsdf_lps,capacity_lps,d_over_d,velocity_mps,grade_1in,result,messages)
-                 VALUES (?,strftime('%Y-%m-%dT%H:%M:%SZ','now'),?,?,?,?,?,?,?,?)",
-                params![r.conduit_id, r.ruleset, r.gsdf_lps, r.capacity_lps, r.d_over_d,
-                    r.velocity_mps, r.grade_1in, r.result, r.messages],
+                "INSERT INTO wwn_results_conduits (geom,conduit_id,run_at,ruleset,dn,grade_1in,adwf_lps,gsdf_lps,pumped_lps,total_lps,capacity_lps,table44_lps,hydraulic_capacity_lps,d_over_d,velocity_mps,result,worst_message,messages)
+                 VALUES ((SELECT geom FROM wwn_conduits WHERE conduit_id=?1),?1,strftime('%Y-%m-%dT%H:%M:%SZ','now'),?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+                params![r.conduit_id, r.ruleset, r.dn, r.grade_1in, r.adwf_lps, r.gsdf_lps,
+                    r.pumped_lps, r.total_lps, r.capacity_lps, r.table44_lps,
+                    r.hydraulic_capacity_lps, r.d_over_d, r.velocity_mps, r.result,
+                    r.worst_message, r.messages],
             )?;
         }
+        copy_extent(&tx, "wwn_conduits", "wwn_results_conduits")?;
         tx.commit()?;
         Ok(())
     }
 
-    /// Replace the contents of `wwn_issues` with `issues`.
-    pub fn write_issues(path: impl AsRef<Path>, issues: &[Issue]) -> Result<()> {
-        Self::store_issues(path.as_ref(), issues, true)
+    /// Replace the `wwn_issues` rows of `source` (`check`, `design`, `import`, `simulate`) with
+    /// `issues`, each placed at its object (see [`ISSUE_SOURCES`]). Rows of other sources are kept;
+    /// rows without a source (written before schema v3) are removed. Upgrades older files first.
+    pub fn store_issues(path: impl AsRef<Path>, source: &str, issues: &[Issue]) -> Result<()> {
+        let items: Vec<(Issue, Option<Point>)> = issues.iter().map(|i| (i.clone(), None)).collect();
+        Self::store_located_issues(path, source, &items)
     }
 
-    /// Append `issues` to `wwn_issues` (stamped with the current time), keeping existing rows.
-    pub fn append_issues(path: impl AsRef<Path>, issues: &[Issue]) -> Result<()> {
-        Self::store_issues(path.as_ref(), issues, false)
-    }
-
-    fn store_issues(path: &Path, issues: &[Issue], replace: bool) -> Result<()> {
-        let mut c = open(path)?;
-        let tx = c.transaction()?;
-        if replace {
-            tx.execute("DELETE FROM wwn_issues", [])?;
+    /// As [`Model::store_issues`], with an explicit location per issue (`None`: look up the object).
+    pub fn store_located_issues(
+        path: impl AsRef<Path>,
+        source: &str,
+        issues: &[(Issue, Option<Point>)],
+    ) -> Result<()> {
+        if !ISSUE_SOURCES.contains(&source) {
+            return Err(Error::Other(format!(
+                "issue source must be one of {ISSUE_SOURCES:?}, not '{source}'"
+            )));
         }
-        for i in issues {
+        let path = path.as_ref();
+        ensure_current(path)?;
+        let mut c = open(path)?;
+        let locs = issue_locations(&c)?;
+        let tx = c.transaction()?;
+        tx.execute(
+            "DELETE FROM wwn_issues WHERE source=? OR source IS NULL",
+            [source],
+        )?;
+        let mut pts = Vec::new();
+        for (i, at) in issues {
+            let p = at.or_else(|| {
+                locs.get(&(i.object_type.clone(), i.object_id.clone()))
+                    .copied()
+            });
+            if let Some(p) = p {
+                pts.push(p);
+            }
             tx.execute(
-                "INSERT INTO wwn_issues (run_at,severity,code,object_type,object_id,clause,message)
-                 VALUES (strftime('%Y-%m-%dT%H:%M:%SZ','now'),?,?,?,?,?,?)",
+                "INSERT INTO wwn_issues (run_at,severity,code,object_type,object_id,clause,message,source,geom)
+                 VALUES (strftime('%Y-%m-%dT%H:%M:%SZ','now'),?,?,?,?,?,?,?,?)",
                 params![
                     i.severity.as_str(),
                     i.code,
                     i.object_type,
                     i.object_id,
                     i.clause,
-                    i.message
+                    i.message,
+                    source,
+                    p.as_ref().map(encode_point)
                 ],
             )?;
         }
+        let (a, b, cc, d) = match bbox(&pts) {
+            Some((a, b, cc, d)) => (Some(a), Some(b), Some(cc), Some(d)),
+            None => (None, None, None, None),
+        };
+        tx.execute(
+            "UPDATE gpkg_contents SET min_x=?, min_y=?, max_x=?, max_y=?, last_change=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE table_name='wwn_issues'",
+            params![a, b, cc, d],
+        )?;
         tx.commit()?;
         Ok(())
     }

@@ -1,4 +1,7 @@
--- WWNet GeoPackage schema v2 (v2 adds node loads, diurnal profiles and loading settings; v1 files are upgraded by `gpkg::upgrade`). Single source of truth for wwnet-core (Rust) and the QGIS plugin.
+-- WWNet GeoPackage schema v3 (v2 adds node loads, diurnal profiles and loading settings; v3 makes issues and results
+-- map layers: wwn_issues gets source + point geometry, wwn_results_conduits and the wwn_sim_*_results / wwn_sim_compare
+-- tables are feature tables, wwn_sim_runs gets label + summary_json). Older files are upgraded by `gpkg::upgrade`.
+-- Single source of truth for wwnet-core (Rust) and both front ends.
 -- CRS: EPSG:7850 (GDA2020 / MGA zone 50). Levels in m AHD, diameters in mm, flows in L/s.
 -- Enumerations (TEXT, lower_snake):
 --   node_type:   ac | ms | drop_ac | junction | wet_well | outfall | io_end | is_end
@@ -35,7 +38,7 @@ INSERT OR IGNORE INTO gpkg_spatial_ref_sys VALUES
  ('GDA2020 / MGA zone 50', 7850, 'EPSG', 7850, 'PROJCS["GDA2020 / MGA zone 50",GEOGCS["GDA2020",DATUM["Geocentric_Datum_of_Australia_2020",SPHEROID["GRS 1980",6378137,298.257222101]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",117],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",10000000],UNIT["metre",1]]', 'GDA2020 / MGA zone 50');
 
 CREATE TABLE IF NOT EXISTS wwn_meta (key TEXT PRIMARY KEY, value TEXT);
-INSERT OR IGNORE INTO wwn_meta VALUES ('schema_version','2'), ('ruleset','ds50_v2r4'), ('crs','EPSG:7850'),
+INSERT OR IGNORE INTO wwn_meta VALUES ('schema_version','3'), ('ruleset','ds50_v2r4'), ('crs','EPSG:7850'),
  ('adwf_per_connection_lpd','630'), ('peaking_factor','1.5');  -- default_profile: absent = none
 
 CREATE TABLE IF NOT EXISTS wwn_nodes (
@@ -89,15 +92,24 @@ CREATE TABLE IF NOT EXISTS wwn_subcatchments (
   profile_id TEXT,                           -- v2: diurnal profile (NULL = default profile)
   status TEXT NOT NULL DEFAULT 'proposed', notes TEXT);
 
--- Written by `wwnet design`; read-only for users.
+-- Written by `wwnet design`; read-only for users. A feature table (conduit geometry copied in) so the latest design
+-- shows as a persistent, styled layer. Rewritten by every design run.
 CREATE TABLE IF NOT EXISTS wwn_results_conduits (
-  conduit_id TEXT PRIMARY KEY, run_at TEXT, ruleset TEXT,
-  gsdf_lps REAL, capacity_lps REAL, d_over_d REAL, velocity_mps REAL,
-  grade_1in REAL, result TEXT,              -- pass | warn | fail
-  messages TEXT);                           -- JSON [{rule, clause, value, limit, result}]
+  fid INTEGER PRIMARY KEY AUTOINCREMENT, geom LINESTRING,
+  conduit_id TEXT NOT NULL UNIQUE, run_at TEXT, ruleset TEXT, dn INTEGER, grade_1in REAL,
+  adwf_lps REAL, gsdf_lps REAL, pumped_lps REAL, total_lps REAL,
+  capacity_lps REAL,                        -- governing: lesser of table44_lps and hydraulic_capacity_lps
+  table44_lps REAL, hydraulic_capacity_lps REAL, d_over_d REAL, velocity_mps REAL,
+  result TEXT,                              -- pass | warn | fail | info
+  worst_message TEXT,
+  messages TEXT);                           -- JSON {checks: [{rule, clause, value, limit, result, message}]}
+-- Issues of the latest check / design / import / simulate (column source); each run replaces its own rows. Point =
+-- the node, the conduit midpoint, the pump station or the sub-catchment centre (NULL for model-level issues).
 CREATE TABLE IF NOT EXISTS wwn_issues (
   fid INTEGER PRIMARY KEY AUTOINCREMENT, run_at TEXT, severity TEXT, code TEXT,
-  object_type TEXT, object_id TEXT, clause TEXT, message TEXT);
+  object_type TEXT, object_id TEXT, clause TEXT, message TEXT,
+  source TEXT,                              -- check | design | import | simulate
+  geom POINT);
 
 -- Schema v2: dry weather loads and diurnal profiles.
 CREATE TABLE IF NOT EXISTS wwn_node_loads (
@@ -114,7 +126,9 @@ CREATE TABLE IF NOT EXISTS wwn_profile_info (
 -- Written by `wwnet simulate` (SWMM dynamic engine); read-only for users. Statistics exclude the warm-up.
 CREATE TABLE IF NOT EXISTS wwn_sim_runs (
   run_id TEXT PRIMARY KEY,                  -- UTC timestamp of the run
-  options_json TEXT, continuity_error_pct REAL, warnings_json TEXT);
+  options_json TEXT, continuity_error_pct REAL, warnings_json TEXT,
+  label TEXT,                               -- v3: user label, e.g. 'existing x1.0'
+  summary_json TEXT);                       -- v3: run summary (inflow, peak outlet flow, surcharged / flooded counts)
 CREATE TABLE IF NOT EXISTS wwn_sim_links (
   run_id TEXT NOT NULL, conduit_id TEXT NOT NULL,
   max_flow_lps REAL, max_depth_m REAL, max_d_over_d REAL, max_velocity_mps REAL,
@@ -131,17 +145,44 @@ CREATE TABLE IF NOT EXISTS wwn_sim_series (
   flow_lps REAL, depth_m REAL,
   PRIMARY KEY (run_id, object_type, object_id, minute));
 
+-- v3: map layers of one stored simulation run (the latest, or the one chosen with Show Simulation Run), and of a
+-- run comparison. Rewritten by `wwnet simulate` / show_sim_run / compare_sim_runs.
+CREATE TABLE IF NOT EXISTS wwn_sim_conduit_results (
+  fid INTEGER PRIMARY KEY AUTOINCREMENT, geom LINESTRING,
+  run_id TEXT, label TEXT, conduit_id TEXT NOT NULL UNIQUE, dn INTEGER,
+  max_flow_lps REAL, max_depth_m REAL, max_d_over_d REAL, max_velocity_mps REAL,
+  time_of_max_flow TEXT, surcharged_min REAL,
+  d_class TEXT);                            -- low (<0.5) | medium (<0.75) | high (<1.0) | surcharged
+CREATE TABLE IF NOT EXISTS wwn_sim_node_results (
+  fid INTEGER PRIMARY KEY AUTOINCREMENT, geom POINT,
+  run_id TEXT, label TEXT, node_id TEXT NOT NULL UNIQUE,
+  max_hgl_m REAL, max_depth_m REAL, freeboard_m REAL,  -- freeboard = surface level - max HGL
+  flood_volume_m3 REAL, surcharged_min REAL);
+CREATE TABLE IF NOT EXISTS wwn_sim_compare (
+  fid INTEGER PRIMARY KEY AUTOINCREMENT, geom LINESTRING,
+  conduit_id TEXT NOT NULL UNIQUE, run_a TEXT, run_b TEXT,
+  max_flow_a_lps REAL, max_flow_b_lps REAL, d_flow_lps REAL, d_flow_pct REAL,
+  max_d_over_d_a REAL, max_d_over_d_b REAL, d_d_over_d REAL,
+  surcharged_a INTEGER, surcharged_b INTEGER,
+  change TEXT);                             -- worse | better | same | new_surcharge | relieved
+
 INSERT OR IGNORE INTO gpkg_contents (table_name, data_type, identifier, srs_id) VALUES
  ('wwn_nodes','features','Nodes',7850), ('wwn_conduits','features','Gravity sewers',7850),
  ('wwn_pump_stations','features','Pump stations',7850), ('wwn_rising_mains','features','Rising mains',7850),
  ('wwn_subcatchments','features','Sub-catchments',7850),
  ('wwn_pumps','attributes','Pumps',NULL), ('wwn_meta','attributes','Model metadata',NULL),
- ('wwn_results_conduits','attributes','Design results',NULL), ('wwn_issues','attributes','Validation issues',NULL),
+ ('wwn_results_conduits','features','Design results',7850), ('wwn_issues','features','Issues',7850),
  ('wwn_node_loads','attributes','Node loads',NULL), ('wwn_profiles','attributes','Profile values',NULL),
  ('wwn_profile_info','attributes','Profiles',NULL),
  ('wwn_sim_runs','attributes','Simulation runs',NULL), ('wwn_sim_links','attributes','Simulation link results',NULL),
- ('wwn_sim_nodes','attributes','Simulation node results',NULL), ('wwn_sim_series','attributes','Simulation time series',NULL);
+ ('wwn_sim_nodes','attributes','Simulation node results',NULL), ('wwn_sim_series','attributes','Simulation time series',NULL),
+ ('wwn_sim_conduit_results','features','Simulation results (conduits)',7850),
+ ('wwn_sim_node_results','features','Simulation results (nodes)',7850),
+ ('wwn_sim_compare','features','Simulation comparison',7850);
 INSERT OR IGNORE INTO gpkg_geometry_columns VALUES
  ('wwn_nodes','geom','POINT',7850,0,0), ('wwn_conduits','geom','LINESTRING',7850,0,0),
  ('wwn_pump_stations','geom','POINT',7850,0,0), ('wwn_rising_mains','geom','LINESTRING',7850,0,0),
- ('wwn_subcatchments','geom','MULTIPOLYGON',7850,0,0);
+ ('wwn_subcatchments','geom','MULTIPOLYGON',7850,0,0),
+ ('wwn_results_conduits','geom','LINESTRING',7850,0,0), ('wwn_issues','geom','POINT',7850,0,0),
+ ('wwn_sim_conduit_results','geom','LINESTRING',7850,0,0), ('wwn_sim_node_results','geom','POINT',7850,0,0),
+ ('wwn_sim_compare','geom','LINESTRING',7850,0,0);

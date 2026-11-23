@@ -3,13 +3,14 @@ use crate::model::{Model, Node, NodeType};
 use crate::network::{EdgeKind, Network};
 use petgraph::algo::tarjan_scc;
 use petgraph::Direction;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Info,
+    #[serde(alias = "warn")]
     Warning,
     Error,
 }
@@ -24,14 +25,36 @@ impl Severity {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// One finding of a check, design, import or simulation run. Codes are UPPER_SNAKE across all sources.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Issue {
     pub severity: Severity,
     pub code: String,
     pub object_type: String,
     pub object_id: String,
+    #[serde(default)]
     pub clause: Option<String>,
     pub message: String,
+}
+
+impl Issue {
+    pub fn new(
+        severity: Severity,
+        code: &str,
+        object_type: &str,
+        object_id: &str,
+        clause: Option<&str>,
+        message: impl Into<String>,
+    ) -> Issue {
+        Issue {
+            severity,
+            code: code.into(),
+            object_type: object_type.into(),
+            object_id: object_id.into(),
+            clause: clause.map(String::from),
+            message: message.into(),
+        }
+    }
 }
 
 const ENDPOINT_TOL_M: f64 = 0.5;

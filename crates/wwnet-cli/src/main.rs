@@ -24,9 +24,10 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Trace upstream and/or downstream of a node
+    /// Trace upstream and/or downstream of a node or a conduit, with the upstream loading
     Trace {
         file: PathBuf,
+        /// Node id or conduit id
         node_id: String,
         #[arg(long)]
         up: bool,
@@ -54,8 +55,8 @@ enum Cmd {
         /// Warm-up hours excluded from the results
         #[arg(long, default_value_t = 24.0)]
         warmup_h: f64,
-        /// manning (one n for all conduits) or ks (equivalent n from the model's ks)
-        #[arg(long, default_value = "manning", value_parser = ["manning", "ks"])]
+        /// ks (equivalent n per conduit from the model's Colebrook ks, as the design) or manning (one n)
+        #[arg(long, default_value = "ks", value_parser = ["manning", "ks"])]
         roughness: String,
         /// Manning n (with --roughness manning)
         #[arg(long = "n", default_value_t = 0.013)]
@@ -69,6 +70,23 @@ enum Cmd {
         /// Also write the generated SWMM input file here
         #[arg(long)]
         write_inp: Option<PathBuf>,
+        /// Run label stored with the results (e.g. "existing x1.0")
+        #[arg(long, default_value = "")]
+        label: String,
+    },
+    /// List the stored simulation runs, newest first
+    Runs {
+        file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Compare two stored simulation runs (id, label, latest or previous); writes wwn_sim_compare
+    Compare {
+        file: PathBuf,
+        run_a: String,
+        run_b: String,
+        #[arg(long)]
+        json: bool,
     },
     /// Diurnal profile tools
     Profile {
@@ -77,7 +95,12 @@ enum Cmd {
     },
     /// Write a synthetic demo catchment
     #[command(hide = true)]
-    Demo { file: PathBuf },
+    Demo {
+        file: PathBuf,
+        /// Add connection-point node loads and the example diurnal profile (flow-modelling demo)
+        #[arg(long)]
+        flows: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -115,9 +138,13 @@ fn run() -> Result<i32> {
             gpkg::create(&file)?;
             println!("created {}", file.display());
         }
-        Cmd::Demo { file } => {
+        Cmd::Demo { file, flows } => {
             gpkg::create(&file)?;
-            let m = demo::model();
+            let m = if flows {
+                demo::model_with_flows()
+            } else {
+                demo::model()
+            };
             m.write(&file)?;
             println!(
                 "wrote demo catchment to {} ({} nodes, {} conduits, {} subcatchments)",
@@ -181,6 +208,56 @@ fn run() -> Result<i32> {
                     v.iter().for_each(|n| println!("  {n}"));
                 }
             }
+            let s = &t.summary;
+            println!("conduits on the traced path(s): {}", t.conduits.len());
+            println!(
+                "upstream of {}: {} node(s), {} conduit(s), {} connection(s), {} sub-catchment(s); ADWF {} L/s, GSDF {} L/s, pumped {} L/s",
+                s.start_node,
+                s.upstream_nodes,
+                s.upstream_conduits,
+                s.upstream_connections,
+                s.upstream_subcatchments,
+                opt(s.adwf_lps, 3),
+                opt(s.gsdf_lps, 3),
+                opt(s.pumped_lps, 3)
+            );
+        }
+        Cmd::Runs { file, json } => {
+            let runs = wwnet_sim::service::list_runs(&file)?;
+            if json {
+                println!("{}", wwnet_sim::service::to_json(&runs)?);
+            } else if runs.is_empty() {
+                println!("no stored simulation runs");
+            } else {
+                for r in &runs {
+                    println!(
+                        "{}{}  peak outlet {} L/s",
+                        if r.shown { "* " } else { "  " },
+                        r.title(),
+                        r.summary
+                            .get("peak_outlet_flow_lps")
+                            .and_then(|v| v.as_f64())
+                            .map(|v| format!("{v:.3}"))
+                            .unwrap_or_else(|| "-".into())
+                    );
+                }
+            }
+        }
+        Cmd::Compare {
+            file,
+            run_a,
+            run_b,
+            json,
+        } => {
+            let c = wwnet_sim::service::compare_runs(&file, &run_a, &run_b, true)?;
+            if json {
+                println!("{}", wwnet_sim::service::to_json(&c)?);
+            } else {
+                println!("{} -> {}", c.run_a.title(), c.run_b.title());
+                for (k, n) in &c.counts {
+                    println!("  {k}: {n}");
+                }
+            }
         }
         Cmd::Design {
             file,
@@ -196,6 +273,7 @@ fn run() -> Result<i32> {
             flow_scale,
             json,
             write_inp,
+            label,
         } => {
             let opts = ServiceOptions {
                 duration_h,
@@ -203,6 +281,7 @@ fn run() -> Result<i32> {
                 roughness,
                 manning_n: n,
                 flow_scale,
+                label,
                 ..ServiceOptions::default()
             };
             return simulate(&file, &opts, json, write_inp.as_deref());

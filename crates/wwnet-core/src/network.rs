@@ -83,24 +83,35 @@ impl Network {
     }
 
     fn trace(&self, id: &str, dir: Direction) -> Result<Vec<&str>> {
+        Ok(self.trace_links(id, dir == Direction::Incoming)?.0)
+    }
+
+    /// Nodes (breadth-first, excluding `id`) and the gravity conduits traversed, upstream or
+    /// downstream of `id`; pumped links are followed but are not conduits.
+    pub fn trace_links(&self, id: &str, upstream: bool) -> Result<(Vec<&str>, Vec<&str>)> {
+        let dir = if upstream {
+            Direction::Incoming
+        } else {
+            Direction::Outgoing
+        };
         let start = self.idx(id)?;
         let mut seen = HashSet::from([start]);
         let mut q = VecDeque::from([start]);
         let mut out = Vec::new();
+        let mut links = Vec::new();
         while let Some(n) = q.pop_front() {
             for e in self.graph.edges_directed(n, dir) {
-                let other = if dir == Direction::Incoming {
-                    e.source()
-                } else {
-                    e.target()
-                };
+                if e.weight().kind == EdgeKind::Gravity {
+                    links.push(e.weight().id.as_str());
+                }
+                let other = if upstream { e.source() } else { e.target() };
                 if seen.insert(other) {
                     out.push(self.graph[other].id.as_str());
                     q.push_back(other);
                 }
             }
         }
-        Ok(out)
+        Ok((out, links))
     }
 
     /// All nodes upstream of `id` (breadth-first, excluding `id`), following pumped links.

@@ -10,6 +10,7 @@ description = "DS 50 gravity sewer design engine: loading, accumulation and cond
 wwnet-core = { path = "../wwnet-core" }
 wwnet-rules = { path = "../wwnet-rules" }
 wwnet-hydraulics = { path = "../wwnet-hydraulics" }
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

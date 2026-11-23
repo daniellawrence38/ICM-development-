@@ -65,7 +65,7 @@ fn table_44_flow_fail() {
     let f = c.checks.iter().find(|k| k.rule == "max_flow").unwrap();
     assert_eq!(f.result, CheckResult::Fail);
     assert_eq!(f.limit, 6.0);
-    assert!(o.issues.iter().any(|i| i.code == "design_max_flow"));
+    assert!(o.issues.iter().any(|i| i.code == "MAX_FLOW"));
 }
 
 #[test]
@@ -125,10 +125,7 @@ fn pump_station_pumped_inflow() {
     m.pump_stations[0].pump_rate_lps = None;
     let o = run_design(&m, &RuleSet::ds50()).unwrap();
     assert_relative_eq!(conduit_of(&o, "C2").pumped_lps, 2.19, epsilon = 1e-9);
-    assert!(o
-        .issues
-        .iter()
-        .any(|i| i.code == "design_pump_rate_missing"));
+    assert!(o.issues.iter().any(|i| i.code == "PUMP_RATE_MISSING"));
 }
 
 #[test]
@@ -143,7 +140,7 @@ fn missing_levels_are_skipped_with_warnings() {
     assert!(c.grade_1in.is_none());
     assert_eq!(c.result, CheckResult::Warn);
     assert!(c.checks.iter().all(|k| k.rule != "min_cover"));
-    assert!(o.issues.iter().any(|i| i.code == "design_missing_data"));
+    assert!(o.issues.iter().any(|i| i.code == "MISSING_DATA"));
 }
 
 #[test]
@@ -177,10 +174,10 @@ fn demo_end_to_end() {
     assert_relative_eq!(o.summary.terminal_gsdf_lps, sum, epsilon = 1e-9);
 
     Model::save_results(&f, &to_conduit_results(&o, &rules).unwrap()).unwrap();
-    let before = Model::read_issue_count(&f).unwrap();
-    Model::append_issues(&f, &o.issues).unwrap();
+    Model::store_issues(&f, "design", &o.issues).unwrap();
+    Model::store_issues(&f, "design", &o.issues).unwrap(); // replaces, never accumulates
     let n = Model::read_issue_count(&f).unwrap();
-    assert_eq!((n - before) as usize, o.issues.len());
+    assert_eq!(n as usize, o.issues.len());
 }
 
 fn graded(dn: i64, grade: f64) -> Model {
@@ -225,11 +222,12 @@ fn capacity_is_governed_by_table_44() {
     assert!(c.table44_lps.is_none());
     assert_eq!(c.capacity_lps, c.hydraulic_capacity_lps);
 
-    // Stored messages carry the extra capacities.
+    // Stored rows carry the extra capacities as columns; the checks stay in messages.
     let rows = to_conduit_results(&run_design(&graded(150, 29.0), &rs).unwrap(), &rs).unwrap();
+    assert_eq!(rows[0].table44_lps, Some(8.0));
+    assert!(rows[0].hydraulic_capacity_lps.unwrap() > 15.0);
+    assert_eq!(rows[0].dn, Some(150));
     let v: serde_json::Value = serde_json::from_str(rows[0].messages.as_ref().unwrap()).unwrap();
-    assert_eq!(v["table44_lps"], 8.0);
-    assert!(v["hydraulic_capacity_lps"].as_f64().unwrap() > 15.0);
     assert!(v["checks"].is_array());
 }
 
@@ -252,7 +250,7 @@ fn missing_surface_level_is_info_not_warn() {
         .contains("cover not checked (no surface level at A)"));
     assert_eq!(o.summary.cover_not_checked_ends, 2);
     assert_eq!(o.summary.warn, 0);
-    assert!(o.issues.iter().all(|i| i.code != "design_missing_data"));
+    assert!(o.issues.iter().all(|i| i.code != "MISSING_DATA"));
 }
 
 fn with_load(connections: Option<i64>, adwf: Option<f64>) -> Model {
@@ -315,7 +313,7 @@ fn manual_subcatchment_adwf_replaces_land_use_loading() {
     let c = conduit_of(&o, "C1");
     assert_relative_eq!(c.adwf_lps, 1.2, epsilon = 1e-9);
     assert_relative_eq!(c.gsdf_lps, 1.2 * 1.5 + 0.5, epsilon = 1e-9);
-    assert!(o.issues.iter().any(|i| i.code == "design_manual_adwf"));
+    assert!(o.issues.iter().any(|i| i.code == "MANUAL_ADWF"));
 }
 
 #[test]
@@ -323,8 +321,5 @@ fn load_on_missing_node_warns() {
     let mut m = with_load(Some(10), None);
     m.node_loads[0].node_id = "ZZ".into();
     let o = run_design(&m, &RuleSet::ds50()).unwrap();
-    assert!(o
-        .issues
-        .iter()
-        .any(|i| i.code == "design_load_node_missing"));
+    assert!(o.issues.iter().any(|i| i.code == "LOAD_NODE_MISSING"));
 }
