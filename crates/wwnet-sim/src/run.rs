@@ -43,10 +43,24 @@ struct LinkAcc {
 struct NodeAcc {
     ix: i32,
     r: NodeResult,
+    /// Minutes since start at which `r.max_hgl` occurred.
+    max_hgl_t_min: f64,
+}
+/// Flow below this (L/s) counts as a stopped pump.
+const PUMP_ON_LPS: f64 = 0.01;
+struct PumpAcc {
+    ix: i32,
+    on: bool,
+    on_s: f64,
+    r: PumpResult,
+}
+struct FmAcc {
+    ixs: Vec<i32>,
+    r: RisingMainResult,
 }
 
-/// Simulate the network. Gravity conduits and nodes only; every terminal node is a free
-/// outfall (hence the alias [`simulate_gpkg_free`]).
+/// Simulate the network: gravity conduits, pump stations (wet well, pumps, rising main);
+/// every other terminal node is a free outfall (hence the alias [`simulate_gpkg_free`]).
 pub fn simulate(input: &SimInput<'_>) -> Result<SimResult> {
     let built = build_inp(input)?;
     let o = &input.options;
@@ -98,11 +112,12 @@ pub fn simulate(input: &SimInput<'_>) -> Result<SimResult> {
         });
     }
     let mut nodes: Vec<NodeAcc> = Vec::new();
-    for n in &built.nodes {
+    for n in built.nodes.iter().filter(|n| !n.internal) {
         let name = CString::new(n.swmm.clone()).unwrap();
         let ix = unsafe { sys::swmm_getIndex(sys::SWMM_NODE, name.as_ptr()) };
         nodes.push(NodeAcc {
             ix,
+            max_hgl_t_min: 0.0,
             r: NodeResult {
                 node_id: n.orig.clone(),
                 invert_level: n.invert,
@@ -118,6 +133,44 @@ pub fn simulate(input: &SimInput<'_>) -> Result<SimResult> {
             },
         });
     }
+
+    let idx = |kind, name: &str| {
+        let c = CString::new(name).unwrap();
+        unsafe { sys::swmm_getIndex(kind, c.as_ptr()) }
+    };
+    let mut pumps: Vec<PumpAcc> = built
+        .pumps
+        .iter()
+        .map(|p| PumpAcc {
+            ix: idx(sys::SWMM_LINK, &p.swmm),
+            on: false,
+            on_s: 0.0,
+            r: PumpResult {
+                pump_id: p.orig.clone(),
+                ps_id: p.ps_id.clone(),
+                role: p.role.clone(),
+                max_flow_lps: 0.0,
+                starts: 0,
+                starts_per_hour: 0.0,
+                run_time_pct: 0.0,
+            },
+        })
+        .collect();
+    let mut fms: Vec<FmAcc> = built
+        .rising_mains
+        .iter()
+        .map(|m| FmAcc {
+            ixs: m.segments.iter().map(|s| idx(sys::SWMM_LINK, s)).collect(),
+            r: RisingMainResult {
+                rm_id: m.rm_id.clone(),
+                ps_id: m.ps_id.clone(),
+                length_m: m.length_m,
+                diameter_mm: m.diameter_m * 1000.0,
+                max_flow_lps: 0.0,
+                max_velocity_mps: 0.0,
+            },
+        })
+        .collect();
 
     let want = |id: &str| o.series_ids.is_empty() || o.series_ids.iter().any(|s| s == id);
     let mut series = o.keep_series.then(|| {
@@ -210,13 +263,41 @@ pub fn simulate(input: &SimInput<'_>) -> Result<SimResult> {
                 }
             }
         }
+        for p in pumps.iter_mut() {
+            let q = gv(sys::SWMM_LINK_FLOW, p.ix).abs();
+            let on = q > PUMP_ON_LPS;
+            if counted {
+                if on && !p.on {
+                    p.r.starts += 1;
+                }
+                if on {
+                    p.on_s += dt;
+                }
+                p.r.max_flow_lps = p.r.max_flow_lps.max(q);
+            }
+            // a pump running at the end of the warm-up is not a start
+            p.on = on;
+        }
+        for m in fms.iter_mut() {
+            if counted {
+                for &ix in &m.ixs {
+                    m.r.max_flow_lps = m.r.max_flow_lps.max(gv(sys::SWMM_LINK_FLOW, ix).abs());
+                    m.r.max_velocity_mps =
+                        m.r.max_velocity_mps
+                            .max(gv(sys::SWMM_LINK_VELOCITY, ix).abs());
+                }
+            }
+        }
         for n in nodes.iter_mut() {
             let h = gv(sys::SWMM_NODE_HEAD, n.ix);
             let y = gv(sys::SWMM_NODE_DEPTH, n.ix);
             let of = gv(sys::SWMM_NODE_OVERFLOW, n.ix);
             if counted {
                 let r = &mut n.r;
-                r.max_hgl = r.max_hgl.max(h);
+                if h > r.max_hgl {
+                    r.max_hgl = h;
+                    n.max_hgl_t_min = t / 60.0;
+                }
                 r.max_depth_m = r.max_depth_m.max(y);
                 if of > 1e-9 {
                     r.flood_volume_m3 += of * dt / 1000.0;
@@ -268,6 +349,35 @@ pub fn simulate(input: &SimInput<'_>) -> Result<SimResult> {
             l.r
         })
         .collect();
+    let pump_results: Vec<PumpResult> = pumps
+        .into_iter()
+        .map(|mut p| {
+            if stat_s > 0.0 {
+                p.r.run_time_pct = 100.0 * p.on_s / stat_s;
+                p.r.starts_per_hour = p.r.starts as f64 / (stat_s / 3600.0);
+            }
+            p.r
+        })
+        .collect();
+    let station_results: Vec<PumpStationResult> = built
+        .stations
+        .iter()
+        .filter_map(|st| {
+            let n = nodes.iter().find(|n| n.r.node_id == st.wet_well_node_id)?;
+            Some(PumpStationResult {
+                ps_id: st.ps_id.clone(),
+                wet_well_node_id: st.wet_well_node_id.clone(),
+                max_level_m: if n.r.max_hgl.is_finite() {
+                    n.r.max_hgl
+                } else {
+                    n.r.invert_level
+                },
+                max_depth_m: n.r.max_depth_m,
+                overflow_volume_m3: n.r.flood_volume_m3,
+                time_of_max_level_min: n.max_hgl_t_min,
+            })
+        })
+        .collect();
     let nodes: Vec<NodeResult> = nodes
         .into_iter()
         .map(|mut n| {
@@ -281,6 +391,9 @@ pub fn simulate(input: &SimInput<'_>) -> Result<SimResult> {
         swmm_version: version,
         links,
         nodes,
+        pumps: pump_results,
+        pump_stations: station_results,
+        rising_mains: fms.into_iter().map(|m| m.r).collect(),
         continuity_runoff_error_pct: re as f64,
         continuity_flow_error_pct: fe as f64,
         warnings,

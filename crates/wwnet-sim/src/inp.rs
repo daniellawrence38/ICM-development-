@@ -1,5 +1,6 @@
 //! SWMM `.inp` writer. Output ordering follows model order, so it is stable.
 #![allow(clippy::neg_cmp_op_on_partial_ord)] // deliberate: NaN must fail positivity checks
+use crate::pumps::{self, ExtraNode, PumpMeta, RisingMainMeta, StationBuild, StationMeta};
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -13,6 +14,14 @@ pub struct NodeMeta {
     /// Highest connected pipe crown level.
     pub soffit: f64,
     pub is_outfall: bool,
+    /// Plan area (m2) when the node is a pump-station wet well (a SWMM storage node).
+    pub storage_area_m2: Option<f64>,
+    /// SWMM junction surcharge depth, m.
+    pub sur_depth_m: f64,
+    /// Created for a rising main (not a model node); excluded from the results.
+    pub internal: bool,
+    /// Position of an internal node.
+    pub xy: Option<(f64, f64)>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +38,9 @@ pub struct BuiltInp {
     pub links: Vec<LinkMeta>,
     pub warnings: Vec<String>,
     pub id_map: Vec<IdMapEntry>,
+    pub pumps: Vec<PumpMeta>,
+    pub stations: Vec<StationMeta>,
+    pub rising_mains: Vec<RisingMainMeta>,
 }
 
 /// Make ids SWMM-safe (no whitespace/semicolons/quotes) and unique within `used`.
@@ -149,10 +161,6 @@ pub fn build_inp(input: &SimInput<'_>) -> Result<BuiltInp> {
     }
     let model = input.model;
     let mut warnings = Vec::new();
-    if !model.pump_stations.is_empty() || !model.rising_mains.is_empty() {
-        warnings.push("pump stations and rising mains are not modelled".to_string());
-    }
-
     let node_ix: HashMap<&str, usize> = {
         let mut m = HashMap::new();
         for (i, n) in model.nodes.iter().enumerate() {
@@ -198,6 +206,17 @@ pub fn build_inp(input: &SimInput<'_>) -> Result<BuiltInp> {
         }
     }
 
+    // pump stations: the wet well gets an outgoing (pumped) link, the discharge node an
+    // incoming one
+    let (plans, fm_eq) = pumps::plan_stations(model, &node_ix, &mut warnings);
+    let mut wet_of: HashMap<usize, usize> = HashMap::new();
+    for (pi, p) in plans.iter().enumerate() {
+        wet_of.insert(p.wet_ix, pi);
+        has_out[p.wet_ix] = true;
+        connected[p.wet_ix] = true;
+        connected[p.disch_ix] = true;
+    }
+
     let mut used_nodes = HashSet::new();
     let mut nodes: Vec<NodeMeta> = Vec::new();
     let mut node_swmm_ix: HashMap<usize, usize> = HashMap::new();
@@ -237,7 +256,12 @@ pub fn build_inp(input: &SimInput<'_>) -> Result<BuiltInp> {
         } else {
             invert
         };
-        let mut depth = match n.surface_level {
+        let wet = wet_of.get(&i).map(|&pi| &plans[pi]);
+        let top = match wet {
+            Some(p) => p.ps.overflow_level.or(n.surface_level),
+            None => n.surface_level,
+        };
+        let mut depth = match top {
             Some(s) if s > invert => s - invert,
             Some(_) => {
                 warnings.push(format!(
@@ -262,8 +286,53 @@ pub fn build_inp(input: &SimInput<'_>) -> Result<BuiltInp> {
             invert,
             soffit: crown,
             is_outfall: !has_out[i],
+            storage_area_m2: wet.map(|p| p.area_m2),
+            sur_depth_m: 0.0,
+            internal: false,
+            xy: None,
         });
         max_depths.push(depth);
+    }
+
+    // pump stations: internal junctions + stored build info (links are written below)
+    let mut used_links = HashSet::new();
+    let mut builds: Vec<StationBuild> = Vec::new();
+    for p in &plans {
+        let wi = node_swmm_ix[&p.wet_ix];
+        let di = node_swmm_ix[&p.disch_ix];
+        let (wet, wet_depth) = (nodes[wi].clone(), max_depths[wi]);
+        let disch = nodes[di].clone();
+        let dis_xy = p.ps.geom.or(model.nodes[p.wet_ix].geom).map(|g| (g.x, g.y));
+        let mut extra: Vec<ExtraNode> = Vec::new();
+        let b = pumps::build_station(
+            p,
+            (&wet.swmm, wet.invert),
+            (&disch.swmm, disch.invert),
+            wet_depth,
+            dis_xy,
+            fm_eq,
+            o,
+            &mut used_nodes,
+            &mut used_links,
+            &safe_id,
+            &mut extra,
+            &mut warnings,
+        );
+        for e in extra {
+            nodes.push(NodeMeta {
+                orig: e.orig,
+                swmm: e.swmm,
+                invert: e.invert,
+                soffit: e.invert + p.dia_m,
+                is_outfall: false,
+                storage_area_m2: None,
+                sur_depth_m: pumps::FM_NODE_SUR_DEPTH_M,
+                internal: true,
+                xy: e.xy,
+            });
+            max_depths.push(e.max_depth);
+        }
+        builds.push(b);
     }
 
     let mut out = String::new();
@@ -278,7 +347,7 @@ FLOW_UNITS           LPS\n\
 INFILTRATION         HORTON\n\
 FLOW_ROUTING         DYNWAVE\n\
 LINK_OFFSETS         ELEVATION\n\
-FORCE_MAIN_EQUATION  D-W\n\
+FORCE_MAIN_EQUATION  {fm_eq}\n\
 IGNORE_RAINFALL      YES\n\
 IGNORE_SNOWMELT      YES\n\
 IGNORE_GROUNDWATER   YES\n\
@@ -308,6 +377,7 @@ MIN_SURFAREA         0\n\
 MIN_SLOPE            0\n\
 SURCHARGE_METHOD     SLOT\n\
 \n",
+        fm_eq = fm_eq.keyword(),
         end_date = date_after(end_days),
         end_time = hms(end_rem),
         report = hms(o.report_step_s as f64),
@@ -316,8 +386,25 @@ SURCHARGE_METHOD     SLOT\n\
 
     out.push_str("[JUNCTIONS]\n;;Name  Invert  MaxDepth  InitDepth  SurDepth  Aponded\n");
     for (nm, md) in nodes.iter().zip(&max_depths) {
-        if !nm.is_outfall {
-            let _ = writeln!(out, "{}  {:.4}  {:.4}  0  0  0", nm.swmm, nm.invert, md);
+        if !nm.is_outfall && nm.storage_area_m2.is_none() {
+            let _ = writeln!(
+                out,
+                "{}  {:.4}  {:.4}  0  {:.1}  0",
+                nm.swmm, nm.invert, md, nm.sur_depth_m
+            );
+        }
+    }
+    // wet wells: constant plan area, a0 + a1*d^a2 with a1 = a2 = 0 (node.c storage_readParams)
+    out.push_str(
+        "\n[STORAGE]\n;;Name  Invert  MaxDepth  InitDepth  Shape  a1  a2  a0  SurDepth  Fevap\n",
+    );
+    for (nm, md) in nodes.iter().zip(&max_depths) {
+        if let Some(a) = nm.storage_area_m2 {
+            let _ = writeln!(
+                out,
+                "{}  {:.4}  {:.4}  0  FUNCTIONAL  0  0  {:.4}  0  0",
+                nm.swmm, nm.invert, md, a
+            );
         }
     }
     out.push_str("\n[OUTFALLS]\n;;Name  Invert  Type  Gated\n");
@@ -326,7 +413,6 @@ SURCHARGE_METHOD     SLOT\n\
     }
 
     // conduits
-    let mut used_links = HashSet::new();
     let mut links = Vec::new();
     let mut cond = String::from(
         "\n[CONDUITS]\n;;Name  From  To  Length  Roughness  InOffset  OutOffset  InitFlow  MaxFlow\n",
@@ -383,8 +469,59 @@ SURCHARGE_METHOD     SLOT\n\
             diameter_m: dia,
         });
     }
+    // rising mains (force mains): roughness is ks in mm (D-W) or C (H-W), Geom2 of the
+    // FORCE_MAIN cross section (xsect.c xsect_setParams stores p[1] in rBot; link.c
+    // conduit_validate divides D-W ks by UCF(RAINDEPTH) = 304.8 mm/ft, swmm5.c Ucf table)
+    for b in &builds {
+        for sg in &b.segs {
+            let _ = writeln!(
+                cond,
+                "{}  {}  {}  {:.3}  {:.4}  {:.4}  {:.4}  0  0",
+                sg.swmm,
+                sg.from,
+                sg.to,
+                sg.length_m,
+                pumps::FM_PLACEHOLDER_N,
+                sg.in_offset,
+                sg.out_offset
+            );
+            let _ = writeln!(
+                xs,
+                "{}  FORCE_MAIN  {:.4}  {:.4}  0  0  1",
+                sg.swmm, sg.dia_m, sg.roughness
+            );
+        }
+    }
     out.push_str(&cond);
     out.push_str(&xs);
+
+    // pumps: Name From To Curve Status Startup Shutoff (link.c pump_readParams)
+    if builds.iter().any(|b| !b.pumps.is_empty()) {
+        out.push_str(
+            "\n[PUMPS]\n;;Name  From  To  Curve  Status  Startup(depth)  Shutoff(depth)\n",
+        );
+        for b in &builds {
+            for p in &b.pumps {
+                let _ = writeln!(
+                    out,
+                    "{}  {}  {}  {}  OFF  {:.4}  {:.4}",
+                    p.swmm, p.from, p.to, p.curve, p.on_depth, p.off_depth
+                );
+            }
+        }
+        out.push_str("\n[CURVES]\n;;Name  Type  X-Value  Y-Value\n");
+        for b in &builds {
+            for c in &b.curves {
+                for (i, (x, y)) in c.points.iter().enumerate() {
+                    if i == 0 {
+                        let _ = writeln!(out, "{}  {}  {:.4}  {:.4}", c.name, c.kind, x, y);
+                    } else {
+                        let _ = writeln!(out, "{}  {:.4}  {:.4}", c.name, x, y);
+                    }
+                }
+            }
+        }
+    }
 
     // inflows + time series
     let by_orig: HashMap<&str, &NodeMeta> = nodes.iter().map(|n| (n.orig.as_str(), n)).collect();
@@ -432,9 +569,12 @@ SURCHARGE_METHOD     SLOT\n\
     out.push_str("\n[REPORT]\nINPUT NO\nCONTROLS NO\nSUBCATCHMENTS NONE\nNODES NONE\nLINKS NONE\n");
     out.push_str("\n[COORDINATES]\n;;Node  X  Y\n");
     for nm in &nodes {
-        let ni = node_ix[nm.orig.as_str()];
-        if let Some(g) = model.nodes[ni].geom {
-            let _ = writeln!(out, "{}  {:.3}  {:.3}", nm.swmm, g.x, g.y);
+        let xy = match node_ix.get(nm.orig.as_str()) {
+            Some(&ni) if !nm.internal => model.nodes[ni].geom.map(|g| (g.x, g.y)),
+            _ => nm.xy,
+        };
+        if let Some((x, y)) = xy {
+            let _ = writeln!(out, "{}  {:.3}  {:.3}", nm.swmm, x, y);
         }
     }
     out.push_str("\n[VERTICES]\n;;Link  X  Y\n");
@@ -463,11 +603,44 @@ SURCHARGE_METHOD     SLOT\n\
             swmm: l.swmm.clone(),
         });
     }
+    let mut pump_meta = Vec::new();
+    let mut stations = Vec::new();
+    let mut rising_mains = Vec::new();
+    for (p, b) in plans.iter().zip(&builds) {
+        stations.push(StationMeta {
+            ps_id: p.ps.ps_id.clone(),
+            wet_well_node_id: model.nodes[p.wet_ix].node_id.clone(),
+        });
+        for pm in &b.pumps {
+            id_map.push(IdMapEntry {
+                kind: "pump".into(),
+                original: pm.orig.clone(),
+                swmm: pm.swmm.clone(),
+            });
+            pump_meta.push(PumpMeta {
+                orig: pm.orig.clone(),
+                swmm: pm.swmm.clone(),
+                ps_id: pm.ps_id.clone(),
+                role: pm.role.clone(),
+            });
+        }
+        if let Some(rm) = &b.rm {
+            id_map.push(IdMapEntry {
+                kind: "force_main".into(),
+                original: rm.rm_id.clone(),
+                swmm: rm.segments.join(","),
+            });
+            rising_mains.push(rm.clone());
+        }
+    }
     Ok(BuiltInp {
         text: out,
         nodes,
         links,
         warnings,
         id_map,
+        pumps: pump_meta,
+        stations,
+        rising_mains,
     })
 }

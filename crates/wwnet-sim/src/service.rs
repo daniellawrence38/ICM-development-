@@ -83,6 +83,40 @@ pub struct SimNodeOut {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SimPumpOut {
+    pub pump_id: String,
+    pub ps_id: String,
+    pub role: String,
+    pub max_flow_lps: f64,
+    pub starts: u32,
+    pub starts_per_hour: f64,
+    pub run_time_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SimStationOut {
+    pub ps_id: String,
+    pub wet_well_node_id: String,
+    /// Maximum wet well level, m AHD.
+    pub max_level_m: f64,
+    /// Maximum depth above the wet well invert, m.
+    pub max_depth_m: f64,
+    pub overflow_volume_m3: f64,
+    /// Time of day (HH:MM) of the maximum level.
+    pub time_of_max_level: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SimRisingMainOut {
+    pub rm_id: String,
+    pub ps_id: String,
+    pub length_m: f64,
+    pub diameter_mm: f64,
+    pub max_flow_lps: f64,
+    pub max_velocity_mps: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SimulateOutput {
     /// Run id (UTC timestamp); `None` when nothing was written.
     pub run_id: Option<String>,
@@ -90,6 +124,9 @@ pub struct SimulateOutput {
     pub summary: SimSummary,
     pub links: Vec<SimLinkOut>,
     pub nodes: Vec<SimNodeOut>,
+    pub pumps: Vec<SimPumpOut>,
+    pub pump_stations: Vec<SimStationOut>,
+    pub rising_mains: Vec<SimRisingMainOut>,
     pub warnings: Vec<String>,
     /// Ids whose series were stored (empty when not written).
     pub series_ids: Vec<String>,
@@ -383,6 +420,14 @@ pub fn simulate_file(
     let mut series_ids: Vec<String> = Vec::new();
     if write {
         series_ids = downstream_most(&model, 5);
+        // wet well level series of every pump station
+        for ps in &model.pump_stations {
+            if let Some(w) = &ps.wet_well_node_id {
+                if !series_ids.contains(w) {
+                    series_ids.push(w.clone());
+                }
+            }
+        }
         for s in &opts.series_ids {
             if !series_ids.contains(s) {
                 series_ids.push(s.clone());
@@ -469,6 +514,43 @@ pub fn simulate_file(
         summary,
         links,
         nodes,
+        pumps: res
+            .pumps
+            .iter()
+            .map(|p| SimPumpOut {
+                pump_id: p.pump_id.clone(),
+                ps_id: p.ps_id.clone(),
+                role: p.role.clone(),
+                max_flow_lps: p.max_flow_lps,
+                starts: p.starts,
+                starts_per_hour: p.starts_per_hour,
+                run_time_pct: p.run_time_pct,
+            })
+            .collect(),
+        pump_stations: res
+            .pump_stations
+            .iter()
+            .map(|p| SimStationOut {
+                ps_id: p.ps_id.clone(),
+                wet_well_node_id: p.wet_well_node_id.clone(),
+                max_level_m: p.max_level_m,
+                max_depth_m: p.max_depth_m,
+                overflow_volume_m3: p.overflow_volume_m3,
+                time_of_max_level: hhmm(p.time_of_max_level_min),
+            })
+            .collect(),
+        rising_mains: res
+            .rising_mains
+            .iter()
+            .map(|m| SimRisingMainOut {
+                rm_id: m.rm_id.clone(),
+                ps_id: m.ps_id.clone(),
+                length_m: m.length_m,
+                diameter_mm: m.diameter_mm,
+                max_flow_lps: m.max_flow_lps,
+                max_velocity_mps: m.max_velocity_mps,
+            })
+            .collect(),
         warnings,
         series_ids: Vec::new(),
         inp_text: res.inp_text.clone(),
@@ -489,6 +571,7 @@ fn write_results(
     gpkg::upgrade(path)?;
     let mut c = gpkg::open(path)?;
     let tx = c.transaction()?;
+    ensure_pump_tables(&tx)?;
     let base: String = tx.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')", [], |r| {
         r.get(0)
     })?;
@@ -521,6 +604,24 @@ fn write_results(
             params![run_id, n.node_id, n.max_hgl_m, n.max_depth_m, n.flood_volume_m3, n.surcharged_min],
         )?;
     }
+    for p in &out.pumps {
+        tx.execute(
+            "INSERT INTO wwn_sim_pumps (run_id,pump_id,ps_id,role,max_flow_lps,starts,starts_per_hour,run_time_pct) VALUES (?,?,?,?,?,?,?,?)",
+            params![run_id, p.pump_id, p.ps_id, p.role, p.max_flow_lps, p.starts, p.starts_per_hour, p.run_time_pct],
+        )?;
+    }
+    for p in &out.pump_stations {
+        tx.execute(
+            "INSERT INTO wwn_sim_pump_stations (run_id,ps_id,wet_well_node_id,max_level_m,max_depth_m,overflow_volume_m3,time_of_max_level) VALUES (?,?,?,?,?,?,?)",
+            params![run_id, p.ps_id, p.wet_well_node_id, p.max_level_m, p.max_depth_m, p.overflow_volume_m3, p.time_of_max_level],
+        )?;
+    }
+    for m in &out.rising_mains {
+        tx.execute(
+            "INSERT INTO wwn_sim_rising_mains (run_id,rm_id,ps_id,length_m,diameter_mm,max_flow_lps,max_velocity_mps) VALUES (?,?,?,?,?,?,?)",
+            params![run_id, m.rm_id, m.ps_id, m.length_m, m.diameter_mm, m.max_flow_lps, m.max_velocity_mps],
+        )?;
+    }
     if let Some(s) = &res.series {
         let warm_min = out.options.warmup_h * 60.0;
         let keep: Vec<usize> = s
@@ -550,7 +651,14 @@ fn write_results(
         }
     }
     // keep the 10 most recent runs
-    for t in ["wwn_sim_links", "wwn_sim_nodes", "wwn_sim_series"] {
+    for t in [
+        "wwn_sim_links",
+        "wwn_sim_nodes",
+        "wwn_sim_series",
+        "wwn_sim_pumps",
+        "wwn_sim_pump_stations",
+        "wwn_sim_rising_mains",
+    ] {
         tx.execute(
             &format!("DELETE FROM {t} WHERE run_id NOT IN (SELECT run_id FROM wwn_sim_runs ORDER BY run_id DESC LIMIT 10)"),
             [],
@@ -562,6 +670,31 @@ fn write_results(
     )?;
     tx.commit()?;
     Ok(run_id)
+}
+
+/// Pump station result tables (created here, not in the template schema, so that older
+/// model files and `schema.sql` need no change). Statistics exclude the warm-up.
+fn ensure_pump_tables(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS wwn_sim_pumps (
+           run_id TEXT NOT NULL, pump_id TEXT NOT NULL, ps_id TEXT, role TEXT,
+           max_flow_lps REAL, starts INTEGER, starts_per_hour REAL, run_time_pct REAL,
+           PRIMARY KEY (run_id, pump_id));
+         CREATE TABLE IF NOT EXISTS wwn_sim_pump_stations (
+           run_id TEXT NOT NULL, ps_id TEXT NOT NULL, wet_well_node_id TEXT,
+           max_level_m REAL, max_depth_m REAL, overflow_volume_m3 REAL,
+           time_of_max_level TEXT,                 -- time of day (HH:MM)
+           PRIMARY KEY (run_id, ps_id));
+         CREATE TABLE IF NOT EXISTS wwn_sim_rising_mains (
+           run_id TEXT NOT NULL, rm_id TEXT NOT NULL, ps_id TEXT, length_m REAL,
+           diameter_mm REAL, max_flow_lps REAL, max_velocity_mps REAL,
+           PRIMARY KEY (run_id, rm_id));
+         INSERT OR IGNORE INTO gpkg_contents (table_name, data_type, identifier, srs_id) VALUES
+           ('wwn_sim_pumps','attributes','Simulation pump results',NULL),
+           ('wwn_sim_pump_stations','attributes','Simulation pump station results',NULL),
+           ('wwn_sim_rising_mains','attributes','Simulation rising main results',NULL);",
+    )?;
+    Ok(())
 }
 
 /// Pretty JSON of a simulation result (includes `options`, `summary`, `links`, `nodes`, `warnings`).

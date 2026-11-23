@@ -5,6 +5,7 @@
 //! engine in-process, post-processes the time series after the warm-up period) ->
 //! [`SimResult`].
 pub mod inp;
+pub mod pumps;
 pub mod run;
 pub mod service;
 pub mod types;
