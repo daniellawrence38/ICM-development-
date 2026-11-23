@@ -337,12 +337,14 @@ class ExportToICM(object):
         return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
                 _p("out_folder", "Output folder", "DEFolder"),
                 _p("out_sr", "Coordinate system (match your ICM network)", "GPString", required=False,
-                   default=labels[0], values=labels)]
+                   default=labels[0], values=labels),
+                _p("dem", "DEM to fill missing ground levels (optional)", ["GPRasterLayer", "DERasterDataset"],
+                   required=False)]
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl.export_icm(arcpy, Messages(arcpy), parameters[0].valueAsText, parameters[1].valueAsText,
-                        _text(parameters[2]) or "GDA2020 / MGA zone 50 (EPSG:7850)")
+                        _text(parameters[2]) or "GDA2020 / MGA zone 50 (EPSG:7850)", dem=_text(parameters[3]))
 
 
 class SetAssistantApiKey(object):

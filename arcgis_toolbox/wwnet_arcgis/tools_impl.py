@@ -661,15 +661,40 @@ def ask_assistant(arcpy, msgs: Messages, question: str, layer_name: str | None =
 
 
 def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
-               out_sr_label: str = "GDA2020 / MGA zone 50 (EPSG:7850)") -> dict:
+               out_sr_label: str = "GDA2020 / MGA zone 50 (EPSG:7850)", dem: str | None = None) -> dict:
     """Write <stem>_ICM.gdb (ICM_Nodes, ICM_Conduits), two CSVs and an import-notes file to out_folder."""
+    import time
     from . import icm_export, sewer_import
+    t0 = t = time.perf_counter()
+    tm = {}
+
+    def lap(k):
+        nonlocal t
+        now = time.perf_counter()
+        tm[k] = now - t
+        t = now
+
     if not gpkg_path or not os.path.isfile(gpkg_path):
         raise RuntimeError(f"Model not found: {gpkg_path}")
     os.makedirs(out_folder, exist_ok=True)
     data = icm_export.build(gpkg_path)
     if not data["nodes"] or not data["conduits"]:
         raise RuntimeError("The model has no nodes or no conduits to export.")
+    lap("read model")
+    if dem:
+        filled, nodata = icm_export.fill_ground_from_dem(arcpy, msgs, data["nodes"],
+                                                         gpkg.table_path(gpkg_path, "wwn_nodes"), dem)
+        blank = [n["node_id"] for n in data["nodes"] if n["ground_level"] is None]
+        data["warnings"] = [w for w in data["warnings"] if "node(s) have no surface level" not in w]
+        if filled or blank:
+            data["warnings"].append(
+                f"{filled} node(s) had no surface level: ground_level filled from the DEM (wwn_ground_source = DEM); "
+                f"{len(blank)} still blank" + (": " + ", ".join(blank[:20]) + (" ..." if len(blank) > 20 else "")
+                                              if blank else "") + ".")
+        if nodata:
+            data["warnings"].append(f"{len(nodata)} node(s) are outside the DEM or on NoData: "
+                                    + ", ".join(nodata[:20]) + (" ..." if len(nodata) > 20 else ""))
+    lap("DEM")
     code = icm_export.OUT_SR.get(out_sr_label, 7850)
     sr = arcpy.SpatialReference(code)
     if code != 7850:
@@ -687,8 +712,10 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
         msgs.info(f"Replacing ICM_Nodes / ICM_Conduits in the existing {gdb}")
     xy = icm_export.write_gdb(arcpy, gdb, "ICM_Nodes", "POINT", icm_export.NODE_FIELDS, data["nodes"],
                               "node_id", gpkg.table_path(gpkg_path, "wwn_nodes"), "node_id", sr)
+    lap("nodes")
     icm_export.write_gdb(arcpy, gdb, "ICM_Conduits", "POLYLINE", icm_export.CONDUIT_FIELDS, data["conduits"],
                          "wwn_conduit_id", gpkg.table_path(gpkg_path, "wwn_conduits"), "conduit_id", sr)
+    lap("conduits")
     nodes_csv = os.path.join(out_folder, f"{stem}_ICM_nodes.csv")
     conduits_csv = os.path.join(out_folder, f"{stem}_ICM_conduits.csv")
     icm_export.write_csv(nodes_csv, icm_export.NODE_FIELDS, data["nodes"], xy=xy)
@@ -703,4 +730,7 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
     msgs.info(f"Geodatabase: {gdb}")
     msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}")
     msgs.info(f"Import notes (field mapping for ICM's Open Data Import Centre): {notes}")
+    lap("CSV/notes")
+    msgs.info("Timing: " + ", ".join(f"{k} {v:.1f} s" for k, v in tm.items())
+              + f", total {time.perf_counter() - t0:.1f} s")
     return {"gdb": gdb, "nodes_csv": nodes_csv, "conduits_csv": conduits_csv, "notes": notes, **data}

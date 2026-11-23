@@ -104,3 +104,81 @@ def test_fake_add_field_rejects_reserved_and_duplicates():
             a.management.AddField("memory\\t", "x", "TEXT")
         with pytest.raises(Exception, match="ERROR 000012.*already exists"):
             a.management.AddField("memory\\t", bad, "TEXT")
+
+
+def test_write_gdb_uses_one_addfields_per_fc(fake_arcpy, demo_gpkg, tmp_path):
+    a = fake_arcpy([])
+    tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path))
+    assert a.addfields_calls == 2
+    assert not [x for x in a.added if x[0] == "field"]
+
+
+def test_write_gdb_falls_back_to_addfield(fake_arcpy, demo_gpkg, tmp_path):
+    a = fake_arcpy([])
+    del a.management.AddFields
+    tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path))
+    nodes_fc = a.memory[os.path.join(str(tmp_path / "demo_ICM.gdb"), "ICM_Nodes")]
+    assert [f for f, _ in nodes_fc["fields"]] == [f for f, _ in icm_export.NODE_FIELDS]
+
+
+def _null_two(demo_gpkg):
+    from fake_arcpy import gpkg_point_xy
+    con = sqlite3.connect(demo_gpkg)
+    con.execute("UPDATE wwn_nodes SET surface_level=NULL WHERE node_id IN ('N02','N03')")
+    con.commit()
+    xy = {nid: gpkg_point_xy(g) for nid, g in con.execute(
+        "SELECT node_id, geom FROM wwn_nodes WHERE node_id IN ('N02','N03')")}
+    con.close()
+    return xy
+
+
+def _icm_nodes(a, tmp_path):
+    return {r["node_id"]: r for r in
+            a.memory[os.path.join(str(tmp_path / "demo_ICM.gdb"), "ICM_Nodes")]["rows"]}
+
+
+def test_dem_fill_ground_levels(fake_arcpy, demo_gpkg, tmp_path):
+    xy = _null_two(demo_gpkg)
+    a = fake_arcpy([])
+
+    def dem(x, y):
+        px, py = xy["N02"]
+        return "30,5" if abs(x - px) < 1e-6 and abs(y - py) < 1e-6 else "NoData"
+    a.dem_fn = dem
+    r = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path), dem="C:/dem.tif")
+    rows = _icm_nodes(a, tmp_path)
+    assert rows["N02"]["ground_level"] == 30.5 and rows["N02"]["wwn_ground_source"] == "DEM"
+    assert rows["N03"]["ground_level"] is None and rows["N03"]["wwn_ground_source"] == ""
+    assert rows["N01"]["wwn_ground_source"] == "model"
+    assert len(a.array_calls) == 2 and a.cell_calls == []      # fast path, no GP tool calls
+    warns = " ".join(t for k, t in a.log if k == "warn")
+    assert "1 node(s) had no surface level" in warns and "1 still blank: N03" in warns
+    assert "have no surface level" not in " ".join(r["warnings"])
+
+
+def test_dem_low_ground_warning(fake_arcpy, demo_gpkg, tmp_path):
+    _null_two(demo_gpkg)
+    a = fake_arcpy([])
+    a.dem_fn = lambda x, y: "1.0"
+    tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path), dem="C:/dem.tif")
+    warns = [t for k, t in a.log if k == "warn"]
+    assert any("less than 0.3 m above the chamber floor at 2 node(s)" in t and "N02" in t for t in warns)
+
+
+def test_export_icm_timing_line(fake_arcpy, demo_gpkg, tmp_path):
+    a = fake_arcpy([])
+    tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path))
+    line = next(t for k, t in a.log if t.startswith("Timing:"))
+    for k in ("read model", "DEM", "nodes", "conduits", "CSV/notes", "total"):
+        assert k + " " in line
+
+
+def test_dem_fill_falls_back_to_getcellvalue(fake_arcpy, demo_gpkg, tmp_path):
+    _null_two(demo_gpkg)
+    a = fake_arcpy([])
+    a.dem_numpy = False
+    a.dem_fn = lambda x, y: "31.25"
+    tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path), dem="C:/dem.tif")
+    rows = _icm_nodes(a, tmp_path)
+    assert rows["N02"]["ground_level"] == rows["N03"]["ground_level"] == 31.25
+    assert len(a.cell_calls) == 2

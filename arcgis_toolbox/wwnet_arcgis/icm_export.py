@@ -27,7 +27,7 @@ ICM_NODE_TYPE = {"ac": "Manhole", "drop_ac": "Manhole", "ms": "Manhole", "wet_we
 NODE_FIELDS = [("node_id", "TEXT"), ("node_type", "TEXT"), ("ground_level", "DOUBLE"),
                ("flood_level", "DOUBLE"), ("chamber_floor", "DOUBLE"), ("chamber_area", "DOUBLE"),
                ("shaft_area", "DOUBLE"), ("wwn_node_type", "TEXT"), ("wwn_floor_source", "TEXT"),
-               ("asset_id", "TEXT"), ("status", "TEXT"), ("notes", "TEXT")]
+               ("wwn_ground_source", "TEXT"), ("asset_id", "TEXT"), ("status", "TEXT"), ("notes", "TEXT")]
 CONDUIT_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "TEXT"),
                   ("us_invert", "DOUBLE"), ("ds_invert", "DOUBLE"), ("conduit_length", "DOUBLE"),
                   ("conduit_shape", "TEXT"), ("conduit_width", "DOUBLE"), ("conduit_height", "DOUBLE"),
@@ -125,6 +125,7 @@ def build(gpkg_path: str) -> dict:
             "ground_level": _r(n["surface_level"]), "flood_level": _r(n["flood_level"]),
             "chamber_floor": _r(floor), "chamber_area": area, "shaft_area": area,
             "wwn_node_type": n["node_type"], "wwn_floor_source": src,
+            "wwn_ground_source": "model" if n["surface_level"] is not None else "",
             "asset_id": n["asset_id"], "status": n["status"], "notes": n["notes"]})
     n_fallback = sum(1 for n in out_nodes if n["wwn_floor_source"] == "lowest connected invert")
     if n_fallback:
@@ -233,11 +234,19 @@ def write_gdb(arcpy, gdb: str, table: str, geom_type: str, fields: list, rows: l
     if arcpy.Exists(fc):
         arcpy.management.Delete(fc)
     arcpy.management.CreateFeatureclass(gdb, table, geom_type, spatial_reference=sr)
-    for name, typ in fields:
-        if typ == "TEXT":
-            arcpy.management.AddField(fc, name, "TEXT", field_length=255 if name == "notes" else 64)
-        else:
-            arcpy.management.AddField(fc, name, typ)
+    desc = [[name, typ, "", (255 if name == "notes" else 64) if typ == "TEXT" else ""] for name, typ in fields]
+    try:
+        add_fields = arcpy.management.AddFields
+    except AttributeError:                      # older arcpy: one call per field (slow)
+        add_fields = None
+    if add_fields is not None:
+        add_fields(fc, desc)
+    else:
+        for name, typ in fields:
+            if typ == "TEXT":
+                arcpy.management.AddField(fc, name, "TEXT", field_length=255 if name == "notes" else 64)
+            else:
+                arcpy.management.AddField(fc, name, typ)
     by_id = {r[key]: r for r in rows}
     cols = [f for f, _ in fields] + ["SHAPE@"]
     xy = {}
@@ -252,3 +261,64 @@ def write_gdb(arcpy, gdb: str, table: str, geom_type: str, fields: list, rows: l
             if geom_type == "POINT" and rec[2] is not None:
                 xy[rec[0]] = rec[2]
     return xy
+
+
+def _cell_value(arcpy, dem, x: float, y: float):
+    """DEM value at (x, y) in the DEM's SR, or None for NoData. RasterToNumPyArray (1 x 1 window,
+    not a geoprocessing tool, so fast); falls back to GetCellValue (a GP tool: seconds per call)."""
+    try:
+        arr = arcpy.RasterToNumPyArray(dem, arcpy.Point(x, y), 1, 1, float("nan"))
+        v = float(arr.flat[0])
+        return None if v != v else round(v, 3)      # NaN -> NoData
+    except Exception:  # noqa: BLE001 - unsupported source: use the GP tool
+        pass
+    try:
+        txt = str(arcpy.management.GetCellValue(dem, f"{x} {y}").getOutput(0)).strip()
+        if txt.lower() == "nodata":
+            return None
+        return round(float(txt.replace(",", ".")), 3)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def fill_ground_from_dem(arcpy, msgs, nodes: list, nodes_ds: str, dem: str):
+    """Fill blank ground_level of `nodes` (dicts, edited in place) from a DEM via GetCellValue (no
+    Spatial Analyst needed). Returns (filled count, [node ids with NoData / unreadable cell])."""
+    from . import sewer_import
+    todo = {n["node_id"]: n for n in nodes if n.get("ground_level") is None}
+    if not todo:
+        return 0, []
+    desc = arcpy.Describe(dem)
+    sr = desc.spatialReference
+    src = getattr(desc, "catalogPath", None) or dem      # a raster layer name -> its dataset path
+    if sewer_import.is_gda94(sr) and getattr(sr, "factoryCode", None) not in (7850, 0, None):
+        name = sewer_import.choose_gda_transformation(arcpy, sr)
+        if name:
+            arcpy.env.geographicTransformations = name
+            msgs.info(f"Reading the DEM in GDA94 using {name}.")
+        else:
+            msgs.warn("No GDA94 <-> GDA2020 transformation is listed by ArcGIS; DEM heights may be taken "
+                      "from a cell ~1.5 m away.")
+    pts = {}
+    with arcpy.da.SearchCursor(nodes_ds, ["node_id", "SHAPE@XY"], spatial_reference=sr) as cur:
+        for nid, xy in cur:
+            if nid in todo and xy is not None:
+                pts[nid] = xy
+    filled, nodata = 0, []
+    for nid in sorted(todo):
+        xy = pts.get(nid)
+        val = None
+        if xy is not None:
+            val = _cell_value(arcpy, src, xy[0], xy[1])
+        if val is None:
+            nodata.append(nid)
+            continue
+        todo[nid]["ground_level"] = val
+        todo[nid]["wwn_ground_source"] = "DEM"
+        filled += 1
+    low = [n["node_id"] for n in nodes if n.get("wwn_ground_source") == "DEM"
+           and n.get("chamber_floor") is not None and n["ground_level"] < n["chamber_floor"] + 0.3]
+    if low:
+        msgs.warn(f"DEM ground level is less than 0.3 m above the chamber floor at {len(low)} node(s) "
+                  "- check: " + ", ".join(low[:20]) + (" ..." if len(low) > 20 else ""))
+    return filled, nodata

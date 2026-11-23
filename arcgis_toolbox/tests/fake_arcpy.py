@@ -314,6 +314,35 @@ def make_fake(layers=None, map_name="Map"):
         else:
             a.added.append(("field", name))
 
+    a.addfields_calls = 0
+
+    def add_fields(table, desc, *args, **kw):
+        a.addfields_calls += 1
+        for ent in desc:
+            add_field(table, ent[0], ent[1])
+
+    a.dem_fn = lambda x, y: "NoData"
+    a.cell_calls = []
+
+    def get_cell(raster, xy):
+        x, y = (float(v) for v in xy.split())
+        a.cell_calls.append((raster, x, y))
+        return NS(getOutput=lambda i: a.dem_fn(x, y))
+
+    a.dem_numpy = True        # False: RasterToNumPyArray raises -> code must fall back to GetCellValue
+    a.array_calls = []
+
+    def raster_to_numpy(raster, lower_left=None, ncols=None, nrows=None, nodata_to_value=None):
+        if not a.dem_numpy:
+            raise RuntimeError("fake arcpy: RasterToNumPyArray unsupported for this source")
+        assert (ncols, nrows) == (1, 1)
+        a.array_calls.append((raster, lower_left.X, lower_left.Y))
+        txt = a.dem_fn(lower_left.X, lower_left.Y)
+        v = nodata_to_value if txt.lower() == "nodata" else float(txt.replace(",", "."))
+        return NS(flat=[v])
+
+    a.RasterToNumPyArray = raster_to_numpy
+
     a.gdbs = set()
 
     def create_gdb(folder, name):
@@ -328,7 +357,7 @@ def make_fake(layers=None, map_name="Map"):
         SelectLayerByAttribute=lambda lyr, mode, where="": a.selections.append((lyr.name, mode, where)),
         AddJoin=lambda *args: a.joins.append(args),
         CreateTable=lambda folder, name: a.added.append(("table", folder, name)),
-        AddField=add_field, Delete=delete_fc, CreateFeatureclass=create_fc, CreateFileGDB=create_gdb)
+        AddField=add_field, AddFields=add_fields, GetCellValue=get_cell, Delete=delete_fc, CreateFeatureclass=create_fc, CreateFileGDB=create_gdb)
 
     layers = layers if layers is not None else []
 
