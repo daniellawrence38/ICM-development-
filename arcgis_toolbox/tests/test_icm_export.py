@@ -21,7 +21,7 @@ def test_build_maps_demo_model(demo_gpkg):
     assert nodes["OUT1"]["chamber_area"] is None
     p = links["P03"]
     assert (p["us_node_id"], p["link_suffix"], p["ds_node_id"]) == ("N03", "1", "N04")
-    assert p["conduit_width"] == p["conduit_height"] == 225 and p["shape"] == "CIRC"
+    assert p["conduit_width"] == p["conduit_height"] == 225 and p["conduit_shape"] == "CIRC"
     assert p["roughness_type"] == "CW" and p["bottom_roughness_CW"] == 1.0 and p["conduit_length"] == 70.0
     assert any("wwn_subcatchments: 4" in w for w in d["warnings"])
 
@@ -87,3 +87,20 @@ def test_export_icm_missing_model(fake_arcpy, tmp_path):
     a = fake_arcpy([])
     with pytest.raises(RuntimeError, match="not found"):
         tools_impl.export_icm(a, Messages(a), str(tmp_path / "nope.gpkg"), str(tmp_path))
+
+
+def test_field_names_avoid_reserved():
+    names = [n for n, _ in icm_export.NODE_FIELDS + icm_export.CONDUIT_FIELDS]
+    assert not [n for n in names if n.lower() in icm_export.RESERVED_FIELDS]
+    assert "shape" not in [n.lower() for n, _ in icm_export.CONDUIT_FIELDS]
+
+
+def test_fake_add_field_rejects_reserved_and_duplicates():
+    from fake_arcpy import make_fake
+    a = make_fake()
+    a.management.CreateFeatureclass("memory", "t", "POINT")
+    for bad in ("Shape", "OBJECTID", "x"):
+        if bad == "x":
+            a.management.AddField("memory\\t", "x", "TEXT")
+        with pytest.raises(Exception, match="ERROR 000012.*already exists"):
+            a.management.AddField("memory\\t", bad, "TEXT")

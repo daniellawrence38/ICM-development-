@@ -30,10 +30,22 @@ NODE_FIELDS = [("node_id", "TEXT"), ("node_type", "TEXT"), ("ground_level", "DOU
                ("asset_id", "TEXT"), ("status", "TEXT"), ("notes", "TEXT")]
 CONDUIT_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "TEXT"),
                   ("us_invert", "DOUBLE"), ("ds_invert", "DOUBLE"), ("conduit_length", "DOUBLE"),
-                  ("shape", "TEXT"), ("conduit_width", "DOUBLE"), ("conduit_height", "DOUBLE"),
+                  ("conduit_shape", "TEXT"), ("conduit_width", "DOUBLE"), ("conduit_height", "DOUBLE"),
                   ("roughness_type", "TEXT"), ("bottom_roughness_CW", "DOUBLE"),
                   ("top_roughness_CW", "DOUBLE"), ("material", "TEXT"), ("wwn_conduit_id", "TEXT"),
                   ("asset_id", "TEXT"), ("status", "TEXT"), ("notes", "TEXT")]
+
+# Names that clash (case-insensitively) with geodatabase system fields -> AddField ERROR 000012.
+RESERVED_FIELDS = {"shape", "objectid", "oid", "fid", "shape_length", "shape_area", "globalid"}
+
+
+def check_reserved_fields():
+    bad = [n for n, _ in NODE_FIELDS + CONDUIT_FIELDS if n.lower() in RESERVED_FIELDS]
+    if bad:
+        raise RuntimeError(f"ICM export field name(s) clash with reserved geodatabase fields: {bad}")
+
+
+check_reserved_fields()
 
 OUT_SR = {"GDA2020 / MGA zone 50 (EPSG:7850)": 7850, "GDA94 / MGA zone 50 (EPSG:28350)": 28350}
 
@@ -143,7 +155,7 @@ def build(gpkg_path: str) -> dict:
         out_links.append({
             "us_node_id": c["us_node_id"], "link_suffix": SUFFIX_CHARS[k], "ds_node_id": c["ds_node_id"],
             "us_invert": _r(c["us_invert"]), "ds_invert": _r(c["ds_invert"]), "conduit_length": _r(length, 2),
-            "shape": "CIRC", "conduit_width": _r(dia, 1), "conduit_height": _r(dia, 1),
+            "conduit_shape": "CIRC", "conduit_width": _r(dia, 1), "conduit_height": _r(dia, 1),
             "roughness_type": "CW", "bottom_roughness_CW": ks, "top_roughness_CW": ks,
             "material": (c["material"] or "").upper() or None, "wwn_conduit_id": c["conduit_id"],
             "asset_id": c["asset_id"], "status": c["status"], "notes": c["notes"]})
@@ -202,7 +214,7 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
         "Conduit table",
         "  us_node_id + link_suffix -> US node ID + Link suffix (unique per US node) | ds_node_id -> DS node ID",
         "  us_invert / ds_invert -> US / DS invert level | conduit_length -> Length (m)",
-        "  shape = CIRC | conduit_width / conduit_height -> Width / Height (mm; internal diameter, else DN)",
+        "  conduit_shape = CIRC -> Shape | conduit_width / conduit_height -> Width / Height (mm; internal diameter, else DN)",
         "  roughness_type = CW | bottom/top_roughness_CW -> Colebrook-White ks (mm)",
         "  wwn_conduit_id / asset_id -> a user text field or Asset ID (optional)",
         "",

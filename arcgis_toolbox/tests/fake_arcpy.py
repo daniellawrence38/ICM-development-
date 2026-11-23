@@ -306,6 +306,10 @@ def make_fake(layers=None, map_name="Map"):
 
     def add_field(table, name, ftype=None, *args, **kw):
         if table in a.memory:
+            low = name.lower()
+            if low in ("shape", "objectid", "shape_length", "shape_area") or \
+                    low in [f.lower() for f, _ in a.memory[table]["fields"]]:
+                raise RuntimeError(f"ERROR 000012: {name} already exists  Failed to execute (AddField)")
             a.memory[table]["fields"].append((name, ftype))
         else:
             a.added.append(("field", name))
