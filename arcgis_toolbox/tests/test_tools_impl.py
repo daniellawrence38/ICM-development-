@@ -34,7 +34,7 @@ def test_new_model_creates_valid_gpkg_and_adds_layers(fake_arcpy, tmp_path):
     added = [p for k, p in a.added if k == "data"]
     assert [os.path.basename(p) for p in added] == [
         f"main.{t}" for t in ("wwn_subcatchments", "wwn_rising_mains", "wwn_conduits",
-                              "wwn_pump_stations", "wwn_nodes", "wwn_node_loads")]
+                              "wwn_pump_stations", "wwn_nodes", "wwn_node_loads", "wwn_pumps")]
     warns = [t for lv, t in a.log if lv == "warn"]
     assert any("Symbology" in w for w in warns)        # fake layers have no symbology -> warn, no raise
     with pytest.raises(FileExistsError):

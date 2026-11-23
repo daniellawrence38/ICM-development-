@@ -11,6 +11,7 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
 |---|---|
 | Import Diurnal Profile | (category Data) Imports a diurnal profile (CSV / TXT file or text pasted from ICM: `Time<TAB>Factor`; hh:mm or minutes; any interval) into a model, optionally as the default profile; warns if the mean is not 1 (tick *Normalise* to divide by the mean). Example: `templates/profiles/example_residential.csv` (APPROXIMATE, digitised from a screenshot) |
 | Import Sewer Data | (category Data) Converts Water Corporation gravity-sewer layers into a new WWNet GeoPackage, checks it and adds it to the map; see [Import Sewer Data](#import-sewer-data) |
+| Import Pressure Data | (category Data) Adds Water Corporation pump stations and pressure mains (rising mains) to an EXISTING model made by Import Sewer Data: chains main segments from each pump station, links wet wells and discharge nodes; see [Import Pressure Data](#import-pressure-data) |
 | New Model | Creates a GeoPackage from `schema.sql` (sqlite3, schema v2) and adds the layers to the active map in a `WWNet` group layer |
 | Add Model To Map | Adds the `wwn_*` layers (`<file>.gpkg\main.<table>`) of an existing model and applies symbology: nodes by `node_type`, conduits by DN with an Arcade label `DN225 1:300`. Symbology failures only warn |
 | Check Model | `wwnet_native.check` (same output as `wwnet check --json`); messages via AddMessage/AddWarning/AddError; optional output issues table |
@@ -24,6 +25,41 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
 | Self Test | (category Assistant) Runs every tool against the bundled demo model in a scratch folder (optionally also the map steps) and writes one report file to paste back |
 | Update WWNet | (category Assistant) Applies a downloaded update zip (CI artifact `wwnet-arcgis-update`) to the installed toolbox: no extracting, no Unblock, no restart for Python changes; locked native files are staged and swapped in at the next Pro start. Backs up changed files to `.update_backup/` |
 | Ask WWNet Assistant | DS 50 assistant with tools `list_layers`, `get_selected_features`, `query_features`, `get_feature`, `pipe_capacity`, `check_conduit`, `residential_gsdf`, `lookup_ds50`, `propose_edits` |
+
+## Import Pressure Data
+
+Adds the Water Corporation (WA) layers *Sewer Pump Station* (points) and *Sewer Pressure Main* (polylines, segmented) to an
+**existing** WWNet GeoPackage (run Import Sewer Data first). Logic: `wwnet_arcgis/pressure_import.py`; field defaults in the
+`[pressure]` section of `templates/import/watercorp_sewer.toml` (materials reuse `[codes.material]`).
+
+**Parameters**: model `.gpkg`, pump stations, pressure mains, *Use selected features only* (on; a layer with nothing
+selected is read by spatial filter on the model extent, never in full), search distance pump station -> main end / gravity
+terminal node (30 m), snap tolerance between main segments (1 m), discharge search distance main end -> gravity node (10 m),
+*Include not-in-use* (off; only STATUS `A` is imported, `N` too when ticked, never `R` / others), *Add / refresh layers on map*,
+then one **Field** parameter per role (ps id / fallback id / names / status; main id / status / diameter / internal diameter /
+material / length / name).
+
+**Rules**
+- `ps_id` = `SAP_ID`, else the integer `ID`. A pump station is imported even when no main is found (warning).
+- Segments are chained by an endpoint graph (ends within the snap tolerance are one point). A rising main starts at a
+  segment end within the search distance of a pump station (dead ends preferred; an end belongs to its nearest station) and
+  continues through degree-2 joins to a dead end or a junction (3 or more segments: the chain stops and warns). It is oriented
+  from the pump station end; `rm_id` = `RM_<ps_id>` (`_2`, `_3` for more mains), `dn` = most common valid DIAMETER (warns if
+  they differ), `internal_diameter_mm` = INDIAM1, `length_m` = sum of LENGTH (geometry length where LENGTH is 0 / unknown),
+  `roughness_type` `ks` with NULL roughness (engine default).
+- The mains' UPSTREAM / DOWNSTREAM levels are **not used** (unreliable): `profile_json` stays NULL.
+- Discharge: nearest existing node within the discharge distance of the main's far end, else a new `junction` node
+  `D_<rm_id>` (warning: not connected to the gravity model).
+- Wet well: the nearest gravity terminal node (no outgoing conduit) within the search distance becomes `wet_well`
+  (`wet_well_node_id`); otherwise a `wet_well` node `WW_<ps_id>` is created at the station (no levels, warning).
+- Sentinels (-99.9 levels, -9996 / -9998, zero diameters / lengths) are treated as NULL. Re-running replaces the
+  rows and tool-created nodes of the same `ps_id`s; hydraulic values and `wwn_pumps` rows already entered are kept.
+
+**Pump hydraulics are not in the GIS.** After the import fill in, per pump station, in the `wwn_pump_stations` attribute table
+`wet_well_area_m2`, `start_level`, `stop_level` and `pump_rate_lps` (and optionally `overflow_level`, `emergency_storage_m3`),
+or add `wwn_pumps` rows (`pump_id`, `ps_id`, `role` duty / assist / standby, `curve_json` `[[q_lps, head_m], ...]`). The tool
+lists the stations still missing them. The layers `wwn_pump_stations`, `wwn_rising_mains` and the `wwn_pumps` table are added
+to the map (Add Model To Map also shows `wwn_pumps`).
 
 ## Import Sewer Data
 

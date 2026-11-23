@@ -88,7 +88,7 @@ def test_end_to_end_valid_gpkg_and_messages(world, tmp_path):
     assert all(sr.factoryCode == 7850 for _, sr in a.cursor_calls)
     assert {f[-1] for f, _ in a.cursor_calls} == {"SHAPE@XY", "SHAPE@"}
     # added to the map
-    assert len([k for k, _ in a.added if k == "data"]) == 6   # 5 layers + the node loads table
+    assert len([k for k, _ in a.added if k == "data"]) == 7   # 5 layers + the node loads and pumps tables
     assert a.env.geographicTransformations is None
 
 

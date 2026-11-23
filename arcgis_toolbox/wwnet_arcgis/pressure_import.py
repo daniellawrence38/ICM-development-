@@ -12,7 +12,6 @@ Rules (see arcgis_toolbox/README.md, "Import Pressure Data"):
 """
 from __future__ import annotations
 
-import json
 import math
 import re
 import sqlite3
