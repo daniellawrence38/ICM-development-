@@ -81,7 +81,7 @@ class Toolbox(object):
         self.label = "WWNet"
         self.alias = "wwnet"
         self.tools = [NewModel, ImportSewerData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity, ExportToICM,
-                      SetAssistantApiKey, AskWWNetAssistant, VerifySetup, UpdateWWNet]
+                      SetAssistantApiKey, AskWWNetAssistant, VerifySetup, SelfTest, UpdateWWNet]
 
 
 class NewModel(object):
@@ -433,6 +433,26 @@ class VerifySetup(object):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl = _impl()
         impl.verify_setup(impl.Messages(arcpy), bool(parameters[0].value))
+
+
+class SelfTest(object):
+    def __init__(self):
+        self.label = "Self Test"
+        self.description = ("Run every WWNet tool against the bundled demo model in a scratch folder and write "
+                            "one report file to paste back when something does not work.")
+        self.category = "Assistant"
+
+    def getParameterInfo(self):
+        return [_p("include_map", "Also test map steps (adds and removes layers in the active map)", "GPBoolean",
+                   required=False, default=False),
+                _p("out_folder", "Output folder (optional; default: a temp folder)", "DEFolder", required=False)]
+
+    def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        impl = _impl()
+        from wwnet_arcgis import selftest  # after _impl(): the module cache was purged, so this is fresh
+        selftest.run(arcpy, impl.Messages(arcpy), _HERE, out_dir=_text(parameters[1]),
+                     include_map=bool(parameters[0].value))
 
 
 class UpdateWWNet(object):

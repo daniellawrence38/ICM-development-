@@ -21,6 +21,7 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
 | Export To ICM | (category Data) Writes the model's nodes and gravity sewers with InfoWorks ICM field names to `<model>_ICM.gdb` (`ICM_Nodes`, `ICM_Conduits`; keeps blanks and vertices) plus `<model>_ICM_nodes.csv` (x / y) / `_conduits.csv` and `<model>_ICM_import_notes.txt` (Open Data Import Centre field mapping). Output in GDA2020 or GDA94 MGA 50. Node types: chambers → Manhole, tees / IS ends → Break, outfall → Outfall; chamber/shaft area from `chamber_diameter_mm`; chamber floor falls back to the lowest connected invert. Conduits: unique single-character `link_suffix` per US node, CIRC, width = height = internal diameter (else DN), Colebrook-White ks (default 1.0 mm). Optional DEM parameter fills blank ground levels (`GetCellValue`, no Spatial Analyst; `wwn_ground_source` = `model` / `DEM`; warns if the DEM ground is < 0.3 m above the chamber floor). A timing line is logged. Abandoned conduits, pump stations, rising mains and sub-catchments are not exported |
 | Set Assistant API Key | Stores the Anthropic key (`GPEncryptedString`) with Windows DPAPI; default model / effort; optional fallback CLI path |
 | Verify Setup | Prints where `wwnet_native` / `anthropic` / dependencies are loaded from and whether they import; optional live API test (tiny request, key never shown) |
+| Self Test | (category Assistant) Runs every tool against the bundled demo model in a scratch folder (optionally also the map steps) and writes one report file to paste back |
 | Update WWNet | (category Assistant) Applies a downloaded update zip (CI artifact `wwnet-arcgis-update`) to the installed toolbox: no extracting, no Unblock, no restart for Python changes; locked native files are staged and swapped in at the next Pro start. Backs up changed files to `.update_backup/` |
 | Ask WWNet Assistant | DS 50 assistant with tools `list_layers`, `get_selected_features`, `query_features`, `get_feature`, `pipe_capacity`, `check_conduit`, `residential_gsdf`, `lookup_ds50`, `propose_edits` |
 
@@ -162,7 +163,7 @@ Windows; for older SDKs the toolbox calls `truststore.inject_into_ssl()` only du
 1. Download the artifact `wwnet-arcgis-update` from the latest green CI run (leave it as a `.zip`; do not extract it
    and no Windows *Unblock* is needed).
 2. In ArcGIS Pro run **Update WWNet** and pick the downloaded zip. Changed files are written in place (old copies go
-   to `.update_backup/<timestamp>/`); the new Python code is used from the next tool run, no restart.
+   to `.update_backup/<timestamp>/`); the new Python code is used from the next tool run, no restart. After an update, run Self Test and paste the report.
 3. If the tool says `WWNet.pyt` changed, right-click the toolbox in the Catalog pane > Refresh.
 
 When the native module (`wwnet_native`) changes you still need the full bundle `wwnet-arcgis-bundle-win-py311`

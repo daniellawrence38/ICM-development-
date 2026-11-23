@@ -37,7 +37,7 @@ Branch: `ccr-974cdaeb-c682le` (all work pushed; last commit `d900db8`). Plan: `d
 | `templates/import/watercorp_sewer.toml` | Field-role defaults + code maps for Water Corp import |
 | `templates/profiles/example_residential.csv` | **APPROXIMATE** diurnal profile digitised from a screenshot |
 
-ArcGIS tools: Update WWNet (2026-11-23, `wwnet_arcgis/updater.py`: applies the `wwnet-arcgis-update` CI artifact in place, modules purged per run via `_impl()` in WWNet.pyt, locked native files staged as `.pending` and swapped in `vendor.activate`; commit c3e5f7a is complete despite its WIP title), Export To ICM (new 2026-11-23, `wwnet_arcgis/icm_export.py`; not yet tried in Pro/ICM), New Model, Import Sewer Data, Import Diurnal Profile, Add Model To Map, Check Model, Run Design, Run Simulation, Trace, Pipe Capacity, Set Assistant API Key, Ask WWNet Assistant, Verify Setup.
+ArcGIS tools: Self Test (2026-11-23, `wwnet_arcgis/selftest.py`: runs every tool on templates/demo/demo.gpkg in a temp folder, writes WWNet_selftest_report.txt — ask the user to run it after each update and paste the report), Update WWNet (2026-11-23, `wwnet_arcgis/updater.py`: applies the `wwnet-arcgis-update` CI artifact in place, modules purged per run via `_impl()` in WWNet.pyt, locked native files staged as `.pending` and swapped in `vendor.activate`; commit c3e5f7a is complete despite its WIP title), Export To ICM (new 2026-11-23, `wwnet_arcgis/icm_export.py`; not yet tried in Pro/ICM), New Model, Import Sewer Data, Import Diurnal Profile, Add Model To Map, Check Model, Run Design, Run Simulation, Trace, Pipe Capacity, Set Assistant API Key, Ask WWNet Assistant, Verify Setup.
 
 ## 4. Verified in real ArcGIS Pro vs not
 

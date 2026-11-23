@@ -150,7 +150,7 @@ def test_pyt_compiles_and_defines_tools(fake_arcpy):
     tb = mod.Toolbox()
     labels = [t().label for t in tb.tools]
     assert labels == ["New Model", "Import Sewer Data", "Import Diurnal Profile", "Add Model To Map", "Check Model", "Run Design", "Run Simulation", "Trace",
-                      "Pipe Capacity", "Export To ICM", "Set Assistant API Key", "Ask WWNet Assistant", "Verify Setup", "Update WWNet"]
+                      "Pipe Capacity", "Export To ICM", "Set Assistant API Key", "Ask WWNet Assistant", "Verify Setup", "Self Test", "Update WWNet"]
     for t in tb.tools:
         params = t().getParameterInfo()
         assert params and all(p.name and p.datatype for p in params)
