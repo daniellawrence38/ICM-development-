@@ -509,3 +509,37 @@ def test_pyt_layer_obj_accepts_path_and_skips_unsupported_layers(fake_arcpy, dem
     layers[:] = [_ProBasemapLayer()]
     p.value = gpkg.table_path(demo_gpkg, "wwn_nodes")
     assert mod._layer_obj(p).dataSource.endswith("wwn_nodes")  # stand-in when not on the map
+
+
+def pro_sqlite_source(gpkg_path, table):
+    """dataSource as real Pro reports a SQLite-family layer (shape copied from a mobile-gdb layer
+    on the user's PC: connection properties, then the dataset after the last separator)."""
+    return (f"AUTHENTICATION_MODE=OSA;main;DB_CONNECTION_PROPERTIES={gpkg_path};"
+            f"INSTANCE=sde:sqlite:{gpkg_path};IS_GEODATABASE=false;IS_NOSERVER=0;SERVER=C:\\main.{table}")
+
+
+def test_split_datasource_pro_connection_string():
+    p = r"C:\Users\x\Desktop\WWNet\models\Dunkley Ave PS4.gpkg"
+    assert gpkg.split_datasource(pro_sqlite_source(p, "wwn_nodes")) == (p, "wwn_nodes")
+    assert gpkg.dataset_path(pro_sqlite_source(p, "wwn_conduits")) == gpkg.table_path(p, "wwn_conduits")
+    # the real mobile-gdb string from the user's map is not a GeoPackage
+    real = (r"AUTHENTICATION_MODE=OSA;main;DB_CONNECTION_PROPERTIES=C:\Users\u\Desktop\Shapefiles\WWLine.geodatabase;"
+            r"INSTANCE=sde:sqlite:C:\Users\u\Desktop\Shapefiles\WWLine.geodatabase;IS_GEODATABASE=true;"
+            r"IS_NOSERVER=0;SERVER=C:\main.WWProjects")
+    assert gpkg.split_datasource(real) == (None, None) and gpkg.dataset_path(real) == real
+    # only the file is given: path but no table
+    assert gpkg.split_datasource(f"AUTHENTICATION_MODE=OSA;DATABASE={p};SERVER=C:") == (p, None)
+
+
+def test_trace_with_pro_connection_string_layers(fake_arcpy, wwnet_exe, demo_gpkg):
+    """Open bug from 2026-11-20: Trace reported 'not in the active map' because Pro's GeoPackage
+    dataSource is a connection string, not '<file>.gpkg\\main.<table>'."""
+    layers = [fa.make_layer("Nodes", pro_sqlite_source(demo_gpkg, "wwn_nodes")),
+              fa.make_layer("Gravity sewers", pro_sqlite_source(demo_gpkg, "wwn_conduits"))]
+    a = fake_arcpy(layers)
+    layers.insert(0, _ProBasemapLayer())
+    assert "N06" in tools_impl.node_ids(a, layers[1])
+    r = tools_impl.trace(a, Messages(a), layers[1], "N03", "Downstream", True, wwnet_exe)
+    assert "OUT1" in r["nodes"]
+    assert [s[0] for s in a.selections] == ["Nodes", "Gravity sewers"]
+    assert not any("not in the active map" in t for _, t in a.log)

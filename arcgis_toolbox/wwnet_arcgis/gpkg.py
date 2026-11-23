@@ -18,14 +18,50 @@ def table_path(gpkg: str, table: str) -> str:
 
 
 _SPLIT = re.compile(r"^(.*?\.gpkg)(?:[\\/]+(?:main\.)?([^\\/]+))?$", re.IGNORECASE)
+_CONN_FILE_KEYS = ("DB_CONNECTION_PROPERTIES", "INSTANCE", "DATABASE")
+
+
+def _split_connection_string(ds: str):
+    """Pro reports SQLite-family layers (GeoPackage, mobile gdb) as a connection string with the
+    dataset appended after the last separator, e.g.
+    'AUTHENTICATION_MODE=OSA;main;DB_CONNECTION_PROPERTIES=C:\\m\\a.gpkg;INSTANCE=sde:sqlite:C:\\m\\a.gpkg;
+    IS_GEODATABASE=false;IS_NOSERVER=0;SERVER=C:\\main.wwn_nodes'."""
+    props = {}
+    for part in ds.split(";"):
+        k, sep, v = part.partition("=")
+        if sep:
+            props.setdefault(k.strip().upper(), v.strip())
+    path = None
+    for k in _CONN_FILE_KEYS:
+        v = props.get(k, "")
+        if v.lower().startswith("sde:sqlite:"):
+            v = v[len("sde:sqlite:"):]
+        if v.lower().endswith(".gpkg"):
+            path = v
+            break
+    if path is None:
+        return None, None
+    tail = ds.rsplit(";", 1)[-1].partition("=")[2] or ds.rsplit(";", 1)[-1]
+    last = re.sub(r"^main\.", "", re.split(r"[\\/]", tail)[-1], flags=re.IGNORECASE)
+    return path, (last if re.fullmatch(r"[A-Za-z_]\w*", last) else None)
 
 
 def split_datasource(ds: str):
-    """'C:\\m\\a.gpkg\\main.wwn_nodes' -> ('C:\\m\\a.gpkg', 'wwn_nodes'); else (None, None)."""
-    m = _SPLIT.match(ds or "")
+    """'C:\\m\\a.gpkg\\main.wwn_nodes' -> ('C:\\m\\a.gpkg', 'wwn_nodes'); also Pro's SQLite
+    connection-string form (see _split_connection_string); else (None, None)."""
+    ds = ds or ""
+    if "=" in ds and ";" in ds:
+        return _split_connection_string(ds)
+    m = _SPLIT.match(ds)
     if not m:
         return None, None
     return m.group(1), m.group(2)
+
+
+def dataset_path(ds: str) -> str:
+    """A path arcpy cursors accept: '<file>.gpkg\\main.<table>' for GeoPackage sources, else `ds`."""
+    path, table = split_datasource(ds)
+    return table_path(path, table) if path and table else ds
 
 
 def table_of(ds: str):

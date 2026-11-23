@@ -175,7 +175,7 @@ def check_model(arcpy, msgs: Messages, gpkg_path: str, out_table: str | None = N
 
 
 def _select(arcpy, layer, ids, field):
-    ds = layer.dataSource
+    ds = gpkg.dataset_path(maplayers.layer_source(layer))
     where = gpkg.in_clause(arcpy.AddFieldDelimiters(ds, field), ids)
     arcpy.management.SelectLayerByAttribute(layer, "NEW_SELECTION" if ids else "CLEAR_SELECTION",
                                             where if ids else "")
@@ -470,7 +470,7 @@ def report_issues_sorted(issues):
 
 
 def node_ids(arcpy, layer) -> list:
-    with arcpy.da.SearchCursor(layer.dataSource if hasattr(layer, "dataSource") else layer,
+    with arcpy.da.SearchCursor(gpkg.dataset_path(layer.dataSource) if hasattr(layer, "dataSource") else layer,
                                ["node_id"]) as cur:
         return sorted({r[0] for r in cur if r[0]})
 
