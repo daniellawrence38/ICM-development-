@@ -207,6 +207,21 @@ def make_fake(layers=None, map_name="Map"):
     a.sources = {}   # data source path -> {"fields": [(name, type)], "rows": [dict], "sr": NS(...)}
     a.env = NS(overwriteOutput=False, geographicTransformations=None)
 
+    a.log_history, a.log_metadata = True, True   # geoprocessing log settings (export disables, restores)
+    a.log_settings = []                          # ("history" | "metadata", value) per Set call
+    a.GetLogHistory = lambda: a.log_history
+    a.GetLogMetadata = lambda: a.log_metadata
+
+    def set_log_history(v):
+        a.log_settings.append(("history", v))
+        a.log_history = bool(v)
+
+    def set_log_metadata(v):
+        a.log_settings.append(("metadata", v))
+        a.log_metadata = bool(v)
+
+    a.SetLogHistory, a.SetLogMetadata = set_log_history, set_log_metadata
+
     def src_of(ds):
         return a.sources.get(getattr(ds, "dataSource", ds))
 

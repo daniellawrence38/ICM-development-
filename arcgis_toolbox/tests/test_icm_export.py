@@ -182,3 +182,19 @@ def test_dem_fill_falls_back_to_getcellvalue(fake_arcpy, demo_gpkg, tmp_path):
     rows = _icm_nodes(a, tmp_path)
     assert rows["N02"]["ground_level"] == rows["N03"]["ground_level"] == 31.25
     assert len(a.cell_calls) == 2
+
+
+def test_export_icm_timing_lines_and_log_settings_restored(fake_arcpy, demo_gpkg, tmp_path):
+    a = fake_arcpy([])
+    tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path / "icm"))
+    nodes = [t for k, t in a.log if t.startswith("Timing ICM_Nodes:")]
+    conduits = [t for k, t in a.log if t.startswith("Timing ICM_Conduits:")]
+    assert len(nodes) == 1 and len(conduits) == 1
+    for k in ("create gdb", "exists", "delete", "create", "fields", "copy"):
+        assert k in nodes[0]
+    assert nodes[0].startswith("Timing ICM_Nodes: create gdb ")
+    for k in ("exists", "delete", "create", "fields", "copy"):
+        assert k in conduits[0]
+    assert "create gdb" not in conduits[0]
+    assert a.log_settings[:2] and set(a.log_settings[:2]) == {("history", False), ("metadata", False)}
+    assert a.log_history is True and a.log_metadata is True

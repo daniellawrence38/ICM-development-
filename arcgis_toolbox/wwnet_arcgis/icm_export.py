@@ -12,6 +12,7 @@ import os
 import re
 import sqlite3
 import struct
+import time
 
 from . import gpkg
 
@@ -227,14 +228,26 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
 
 
 def write_gdb(arcpy, gdb: str, table: str, geom_type: str, fields: list, rows: list, key: str,
-              src_ds: str, src_key: str, sr) -> dict:
+              src_ds: str, src_key: str, sr, timings: dict | None = None) -> dict:
     """Create <gdb>\\<table> (replacing it) and fill it with `rows`, taking geometry from `src_ds`
-    (projected by the cursor to `sr`). Returns {id: (x, y)} for POINT tables (else {})."""
+    (projected by the cursor to `sr`). Returns {id: (x, y)} for POINT tables (else {}).
+    If `timings` is a dict, it receives seconds for: exists, delete (0.0 if not called), create,
+    fields, copy."""
+    pc = time.perf_counter
+    tm = {"delete": 0.0}
     fc = os.path.join(gdb, table)
-    if arcpy.Exists(fc):
+    t0 = pc()
+    exists = arcpy.Exists(fc)
+    tm["exists"] = pc() - t0
+    if exists:
+        t0 = pc()
         arcpy.management.Delete(fc)
+        tm["delete"] = pc() - t0
+    t0 = pc()
     arcpy.management.CreateFeatureclass(gdb, table, geom_type, spatial_reference=sr)
+    tm["create"] = pc() - t0
     desc = [[name, typ, "", (255 if name == "notes" else 64) if typ == "TEXT" else ""] for name, typ in fields]
+    t0 = pc()
     try:
         add_fields = arcpy.management.AddFields
     except AttributeError:                      # older arcpy: one call per field (slow)
@@ -247,10 +260,12 @@ def write_gdb(arcpy, gdb: str, table: str, geom_type: str, fields: list, rows: l
                 arcpy.management.AddField(fc, name, "TEXT", field_length=255 if name == "notes" else 64)
             else:
                 arcpy.management.AddField(fc, name, typ)
+    tm["fields"] = pc() - t0
     by_id = {r[key]: r for r in rows}
     cols = [f for f, _ in fields] + ["SHAPE@"]
     xy = {}
     src_fields = [src_key, "SHAPE@"] + (["SHAPE@XY"] if geom_type == "POINT" else [])
+    t0 = pc()
     with arcpy.da.SearchCursor(src_ds, src_fields, spatial_reference=sr) as src, \
             arcpy.da.InsertCursor(fc, cols) as ins:
         for rec in src:
@@ -260,6 +275,9 @@ def write_gdb(arcpy, gdb: str, table: str, geom_type: str, fields: list, rows: l
             ins.insertRow([r.get(f) for f, _ in fields] + [rec[1]])
             if geom_type == "POINT" and rec[2] is not None:
                 xy[rec[0]] = rec[2]
+    tm["copy"] = pc() - t0
+    if isinstance(timings, dict):
+        timings.update(tm)
     return xy
 
 

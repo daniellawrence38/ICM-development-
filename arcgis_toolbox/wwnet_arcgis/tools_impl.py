@@ -660,6 +660,22 @@ def ask_assistant(arcpy, msgs: Messages, question: str, layer_name: str | None =
     return res
 
 
+def _log_get(arcpy, name: str):
+    """Current geoprocessing log setting (GetLogHistory / GetLogMetadata), or None when arcpy lacks
+    it or the call fails. Logging control must never break an export."""
+    try:
+        return getattr(arcpy, name)() if hasattr(arcpy, name) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _log_set(arcpy, name: str, value) -> None:
+    try:
+        getattr(arcpy, name)(value)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
                out_sr_label: str = "GDA2020 / MGA zone 50 (EPSG:7850)", dem: str | None = None) -> dict:
     """Write <stem>_ICM.gdb (ICM_Nodes, ICM_Conduits), two CSVs and an import-notes file to out_folder."""
@@ -704,33 +720,54 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
             msgs.info(f"Projecting GDA2020 -> GDA94 with {name}.")
         else:
             msgs.warn("No GDA94 <-> GDA2020 transformation is listed by ArcGIS; coordinates may be ~1.5 m out.")
-    stem = icm_export.safe_stem(gpkg_path)
-    gdb = os.path.join(out_folder, f"{stem}_ICM.gdb")
-    if not arcpy.Exists(gdb):
-        arcpy.management.CreateFileGDB(out_folder, f"{stem}_ICM.gdb")
-    else:
-        msgs.info(f"Replacing ICM_Nodes / ICM_Conduits in the existing {gdb}")
-    xy = icm_export.write_gdb(arcpy, gdb, "ICM_Nodes", "POINT", icm_export.NODE_FIELDS, data["nodes"],
-                              "node_id", gpkg.table_path(gpkg_path, "wwn_nodes"), "node_id", sr)
-    lap("nodes")
-    icm_export.write_gdb(arcpy, gdb, "ICM_Conduits", "POLYLINE", icm_export.CONDUIT_FIELDS, data["conduits"],
-                         "wwn_conduit_id", gpkg.table_path(gpkg_path, "wwn_conduits"), "conduit_id", sr)
-    lap("conduits")
-    nodes_csv = os.path.join(out_folder, f"{stem}_ICM_nodes.csv")
-    conduits_csv = os.path.join(out_folder, f"{stem}_ICM_conduits.csv")
-    icm_export.write_csv(nodes_csv, icm_export.NODE_FIELDS, data["nodes"], xy=xy)
-    icm_export.write_csv(conduits_csv, icm_export.CONDUIT_FIELDS, data["conduits"])
-    notes = os.path.join(out_folder, f"{stem}_ICM_import_notes.txt")
-    with open(notes, "w", encoding="utf-8") as fh:
-        fh.write(icm_export.notes_text(gpkg_path, out_sr_label, gdb, nodes_csv, conduits_csv, data["warnings"]))
-    msgs.info(f"Exported {len(data['nodes'])} node(s) and {len(data['conduits'])} conduit(s) "
-              f"in {out_sr_label}.")
-    for w in data["warnings"]:
-        msgs.warn(w)
-    msgs.info(f"Geodatabase: {gdb}")
-    msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}")
-    msgs.info(f"Import notes (field mapping for ICM's Open Data Import Centre): {notes}")
-    lap("CSV/notes")
+    prev_hist = _log_get(arcpy, "GetLogHistory")
+    prev_meta = _log_get(arcpy, "GetLogMetadata")
+    if prev_hist is not None:
+        _log_set(arcpy, "SetLogHistory", False)
+    if prev_meta is not None:
+        _log_set(arcpy, "SetLogMetadata", False)
+    node_tm, conduit_tm, gdb_s = {}, {}, 0.0
+    try:
+        stem = icm_export.safe_stem(gpkg_path)
+        gdb = os.path.join(out_folder, f"{stem}_ICM.gdb")
+        if not arcpy.Exists(gdb):
+            t_gdb = time.perf_counter()
+            arcpy.management.CreateFileGDB(out_folder, f"{stem}_ICM.gdb")
+            gdb_s = time.perf_counter() - t_gdb
+        else:
+            msgs.info(f"Replacing ICM_Nodes / ICM_Conduits in the existing {gdb}")
+        xy = icm_export.write_gdb(arcpy, gdb, "ICM_Nodes", "POINT", icm_export.NODE_FIELDS, data["nodes"],
+                                  "node_id", gpkg.table_path(gpkg_path, "wwn_nodes"), "node_id", sr,
+                                  timings=node_tm)
+        lap("nodes")
+        icm_export.write_gdb(arcpy, gdb, "ICM_Conduits", "POLYLINE", icm_export.CONDUIT_FIELDS, data["conduits"],
+                             "wwn_conduit_id", gpkg.table_path(gpkg_path, "wwn_conduits"), "conduit_id", sr,
+                             timings=conduit_tm)
+        lap("conduits")
+        nodes_csv = os.path.join(out_folder, f"{stem}_ICM_nodes.csv")
+        conduits_csv = os.path.join(out_folder, f"{stem}_ICM_conduits.csv")
+        icm_export.write_csv(nodes_csv, icm_export.NODE_FIELDS, data["nodes"], xy=xy)
+        icm_export.write_csv(conduits_csv, icm_export.CONDUIT_FIELDS, data["conduits"])
+        notes = os.path.join(out_folder, f"{stem}_ICM_import_notes.txt")
+        with open(notes, "w", encoding="utf-8") as fh:
+            fh.write(icm_export.notes_text(gpkg_path, out_sr_label, gdb, nodes_csv, conduits_csv, data["warnings"]))
+        msgs.info(f"Exported {len(data['nodes'])} node(s) and {len(data['conduits'])} conduit(s) "
+                  f"in {out_sr_label}.")
+        for w in data["warnings"]:
+            msgs.warn(w)
+        msgs.info(f"Geodatabase: {gdb}")
+        msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}")
+        msgs.info(f"Import notes (field mapping for ICM's Open Data Import Centre): {notes}")
+        lap("CSV/notes")
+    finally:
+        if prev_hist is not None:
+            _log_set(arcpy, "SetLogHistory", prev_hist)
+        if prev_meta is not None:
+            _log_set(arcpy, "SetLogMetadata", prev_meta)
     msgs.info("Timing: " + ", ".join(f"{k} {v:.1f} s" for k, v in tm.items())
               + f", total {time.perf_counter() - t0:.1f} s")
+    tkeys = ("exists", "delete", "create", "fields", "copy")
+    msgs.info("Timing ICM_Nodes: " + ", ".join([f"create gdb {gdb_s:.1f} s"]
+                                              + [f"{k} {node_tm.get(k, 0.0):.1f} s" for k in tkeys]))
+    msgs.info("Timing ICM_Conduits: " + ", ".join(f"{k} {conduit_tm.get(k, 0.0):.1f} s" for k in tkeys))
     return {"gdb": gdb, "nodes_csv": nodes_csv, "conduits_csv": conduits_csv, "notes": notes, **data}
