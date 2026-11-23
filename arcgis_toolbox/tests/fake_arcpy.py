@@ -30,6 +30,16 @@ def gpkg_line_length(blob: bytes):
     return sum(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5 for a, b in zip(pts, pts[1:]))
 
 
+def gpkg_point_xy(blob: bytes):
+    if blob is None:
+        return None
+    env = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}[(blob[3] >> 1) & 7]
+    wkb = blob[8 + env:]
+    bo = "<" if wkb[0] == 1 else ">"
+    assert struct.unpack(bo + "I", wkb[1:5])[0] == 1
+    return struct.unpack(bo + "dd", wkb[5:21])
+
+
 class _Cursor:
     def __init__(self, arcpy, ds, fields, where_clause=None, writable=False):
         self.arcpy, self.writable = arcpy, writable
@@ -45,7 +55,8 @@ class _Cursor:
         self.i = -1
 
     def _convert(self, raw):
-        return [gpkg_line_length(v) if f == "SHAPE@LENGTH" else v for f, v in zip(self.fields, raw)]
+        return [gpkg_line_length(v) if f == "SHAPE@LENGTH" else gpkg_point_xy(v) if f == "SHAPE@XY" else v
+                for f, v in zip(self.fields, raw)]
 
     def __iter__(self):
         for i, r in enumerate(self.rows):
@@ -225,7 +236,7 @@ def make_fake(layers=None, map_name="Map"):
     a.cursor_calls = []
     a.memory = {}   # "memory\\name" -> {"fields": [(name, type)], "rows": [row], "sr": ..., "geom": ...}
     a.deleted = []
-    a.Exists = lambda p: p in a.memory
+    a.Exists = lambda p: p in a.memory or p in a.gdbs
     a.SpatialReference = lambda code: NS(factoryCode=code, name=f"EPSG:{code}")
     a.transformations = ["GDA_1994_To_GDA2020_1", "GDA_1994_To_GDA2020_NTv2_Conformal",
                          "GDA_1994_To_GDA2020_NTv2_Conformal_and_Distortion"]
@@ -288,14 +299,22 @@ def make_fake(layers=None, map_name="Map"):
               Editor=FakeEditor, InsertCursor=Insert)
     def create_fc(workspace, name, geometry_type="POLYLINE", template=None, has_m=None, has_z=None,
                   spatial_reference=None):
-        assert workspace == "memory", "fake arcpy: only the memory workspace is supported"
-        a.memory["memory\\" + name] = {"fields": [], "rows": [], "sr": spatial_reference, "geom": geometry_type}
+        key = "memory\\" + name if workspace == "memory" else os.path.join(workspace, name)
+        if workspace != "memory":
+            assert workspace in a.gdbs, f"fake arcpy: workspace {workspace!r} does not exist"
+        a.memory[key] = {"fields": [], "rows": [], "sr": spatial_reference, "geom": geometry_type}
 
     def add_field(table, name, ftype=None, *args, **kw):
         if table in a.memory:
             a.memory[table]["fields"].append((name, ftype))
         else:
             a.added.append(("field", name))
+
+    a.gdbs = set()
+
+    def create_gdb(folder, name):
+        assert os.path.isdir(folder), f"fake arcpy: folder {folder!r} does not exist"
+        a.gdbs.add(os.path.join(folder, name))
 
     def delete_fc(path):
         a.deleted.append(path)
@@ -305,7 +324,7 @@ def make_fake(layers=None, map_name="Map"):
         SelectLayerByAttribute=lambda lyr, mode, where="": a.selections.append((lyr.name, mode, where)),
         AddJoin=lambda *args: a.joins.append(args),
         CreateTable=lambda folder, name: a.added.append(("table", folder, name)),
-        AddField=add_field, Delete=delete_fc, CreateFeatureclass=create_fc)
+        AddField=add_field, Delete=delete_fc, CreateFeatureclass=create_fc, CreateFileGDB=create_gdb)
 
     layers = layers if layers is not None else []
 

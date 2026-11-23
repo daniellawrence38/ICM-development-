@@ -73,7 +73,7 @@ class Toolbox(object):
     def __init__(self):
         self.label = "WWNet"
         self.alias = "wwnet"
-        self.tools = [NewModel, ImportSewerData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity,
+        self.tools = [NewModel, ImportSewerData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity, ExportToICM,
                       SetAssistantApiKey, AskWWNetAssistant, VerifySetup]
 
 
@@ -322,6 +322,27 @@ class PipeCapacity(object):
         res = impl.pipe_capacity(Messages(arcpy), parameters[0].value, parameters[1].value,
                                  parameters[2].value, parameters[3].value)
         parameters[4].value = res["full_flow_lps"]
+
+
+class ExportToICM(object):
+    def __init__(self):
+        self.label = "Export To ICM"
+        self.description = ("Write the model's nodes and gravity sewers with InfoWorks ICM field names "
+                            "(file geodatabase + CSV + field-mapping notes) for ICM's Open Data Import Centre.")
+        self.category = "Data"
+
+    def getParameterInfo(self):
+        from wwnet_arcgis import icm_export as ie
+        labels = list(ie.OUT_SR)
+        return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
+                _p("out_folder", "Output folder", "DEFolder"),
+                _p("out_sr", "Coordinate system (match your ICM network)", "GPString", required=False,
+                   default=labels[0], values=labels)]
+
+    def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        impl.export_icm(arcpy, Messages(arcpy), parameters[0].valueAsText, parameters[1].valueAsText,
+                        _text(parameters[2]) or "GDA2020 / MGA zone 50 (EPSG:7850)")
 
 
 class SetAssistantApiKey(object):

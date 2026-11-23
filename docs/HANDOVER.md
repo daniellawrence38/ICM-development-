@@ -37,14 +37,14 @@ Branch: `ccr-974cdaeb-c682le` (all work pushed; last commit `d900db8`). Plan: `d
 | `templates/import/watercorp_sewer.toml` | Field-role defaults + code maps for Water Corp import |
 | `templates/profiles/example_residential.csv` | **APPROXIMATE** diurnal profile digitised from a screenshot |
 
-ArcGIS tools: New Model, Import Sewer Data, Import Diurnal Profile, Add Model To Map, Check Model, Run Design, Run Simulation, Trace, Pipe Capacity, Set Assistant API Key, Ask WWNet Assistant, Verify Setup.
+ArcGIS tools: Export To ICM (new 2026-11-23, `wwnet_arcgis/icm_export.py`; not yet tried in Pro/ICM), New Model, Import Sewer Data, Import Diurnal Profile, Add Model To Map, Check Model, Run Design, Run Simulation, Trace, Pipe Capacity, Set Assistant API Key, Ask WWNet Assistant, Verify Setup.
 
 ## 4. Verified in real ArcGIS Pro vs not
 
 Verified by the user: toolbox loads; Verify Setup (vendor imports OK); Add Model To Map (demo); Run Design (calc + messages); **Import Sewer Data** on a 61-sewer selection (final run: 0 unknown directions, 25 tees, model check clean); **Run Simulation** engine (86 conduits, 7.7 s, continuity 0.07 %, ADWF 1.12 L/s, peak 3.07 L/s @ 07:40).
 
 Not yet working / unverified in Pro:
-- **FIX PUSHED 2026-11-23, awaiting re-test in Pro:** real Pro 3.x GeoPackage `layer.dataSource` is `Instance=C:\...\import_test.gpkg,Dataset=main.%wwn_nodes` (pasted by the user). `gpkg.split_datasource` now parses this (plus the SQLite connection-string form seen on mobile-gdb layers); arcpy reads go through `gpkg.dataset_path`. Regression tests use the real string.
+- **FIXED 2026-11-23 (user confirmed Trace works):** real Pro 3.x GeoPackage `layer.dataSource` is `Instance=C:\...\import_test.gpkg,Dataset=main.%wwn_nodes` (pasted by the user). `gpkg.split_datasource` now parses this (plus the SQLite connection-string form seen on mobile-gdb layers); arcpy reads go through `gpkg.dataset_path`. Regression tests use the real string.
 - (was) **OPEN BUG:** after the latest build (`d900db8`), Trace/Run Simulation complete but report the model layer is "not in the active map", so nothing is selected / no results layer. Likely `maplayers.find_layer_for` not matching Pro's `layer.dataSource` string for GeoPackage layers (format differs from `gpkg.split_datasource` regex `...\.gpkg\main.<table>`), or `layer.supports("DATASOURCE")` returning False. **First step next session:** ask the user to paste the output of this one-liner in Pro's Python window, then fix `gpkg.split_datasource` / `maplayers.layer_source` and add a test with the real string:
   ```python
   import arcpy; m=arcpy.mp.ArcGISProject("CURRENT").activeMap; print([(l.name, l.supports("DATASOURCE"), l.dataSource if l.supports("DATASOURCE") else None) for l in m.listLayers() if l.supports("NAME")])
