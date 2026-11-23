@@ -83,6 +83,8 @@ Not yet working / unverified in Pro:
 - Unsupported Layer properties raise (`AttributeError: The attribute 'name' is not supported on this instance of Layer`) — always use `maplayers.layer_name/layer_source`.
 - Pro's Python is 3.11: check new Python with `/usr/bin/python3.11 -c "import ast; ast.parse(...)"`.
 - The fake arcpy is permissive — when a real-Pro failure is found, make the fake stricter and add a regression test.
+- Standalone map tables: `Map.removeTable()`, never `removeLayer()` (fake now enforces it; `maplayers.remove_item`).
+- Each geoprocessing tool call costs 2-6 s on the user's PC (Self Test 2026-11-23: CreateFeatureclass 2.3-2.8 s, AddFields 5.5-6.2 s, row copy 0.5 s); minimise GP calls. Suspect: their project has ~90 network-share layers — blank-project test pending.
 - Multi-line code in Pro's Python window needs an extra Enter; give users one-liners.
 
 ## 9. Dev commands
