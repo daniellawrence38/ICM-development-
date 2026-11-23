@@ -377,7 +377,7 @@ def make_fake(layers=None, map_name="Map"):
     layers = layers if layers is not None else []
     tables = []                 # standalone (non-spatial) tables in the map
     a.tables = tables
-    TABLE_NAMES = ("wwn_node_loads", "wwn_results_conduits")
+    TABLE_NAMES = ("wwn_node_loads", "wwn_results_conduits", "wwn_pumps")
 
     def _is(item, seq):
         return any(item is x for x in seq)

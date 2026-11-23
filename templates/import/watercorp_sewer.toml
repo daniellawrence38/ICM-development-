@@ -80,3 +80,29 @@ RC = "rcpl"
 RCP = "rcpl"
 RCPL = "rcpl"
 CONC = "rcpl"
+
+# ---------------------------------------------------------------------------------------------
+# Pressure data (Import Pressure Data tool): Sewer Pump Station points + Sewer Pressure Main polylines.
+# Material codes reuse [codes.material] above. UPSTREAM / DOWNSTREAM levels of pressure mains are NOT used (unreliable; profile_json stays NULL).
+# Sentinels treated as NULL: diameters / lengths <= 0 or <= -99 (-9996, -9998). Only STATUS "A" (actual) is imported
+# ("N- not in use" too when the tool option is ticked); never R (removed) or abandoned codes.
+[pressure]
+search_distance_m = 30.0        # pump station -> pressure main end, and pump station -> gravity terminal node (wet well)
+snap_tolerance_m = 1.0          # pressure main segment ends within this distance are joined
+discharge_distance_m = 10.0     # pressure main far end -> gravity node (discharge); else a new junction node is made
+
+[pressure.fields.pump_stations]
+id = "SAP_ID"                   # ps_id; when empty the ID field below is used (integer text)
+alt_id = "ID"
+name = "SAP_NAME"
+name2 = "PSNAME"
+status = "STATUS"
+
+[pressure.fields.mains]
+id = "ID"
+status = "STATUS"
+diameter = "DIAMETER"           # nominal, mm
+internal_diameter = "INDIAM1"   # mm
+material = "MATERIAL"
+length = "LENGTH"               # m
+main_name = "MAINNAME"          # e.g. "SPS NO2"

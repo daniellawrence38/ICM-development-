@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 
 from . import (arcpy_tools, assistant_run, capacity, cli, dpapi, gpenv, gpkg, issues_table, maplayers,
-               settings, shared, sewer_import, symbology, vendor)
+               pressure_import, settings, shared, sewer_import, symbology, vendor)
 from .messages import Messages
 
 MAX_LINES = 300
@@ -142,6 +142,95 @@ def sewer_field_defaults(arcpy, layer) -> dict:
     """role -> Water Corporation default field name that exists in `layer` ('' if absent)."""
     return sewer_import.pick_defaults(sewer_import.layer_field_names(arcpy, layer),
                                       sewer_import.template_defaults())
+
+
+def pressure_field_defaults(arcpy, layer, layer_key: str) -> dict:
+    """role -> Water Corporation default field name present in `layer` ('' if absent), for the roles of
+    `layer_key` ('ps' | 'main')."""
+    pi = pressure_import
+    names = sewer_import.layer_field_names(arcpy, layer)
+    defaults = {r: d for r, d in pi.template_defaults().items() if pi.ROLE_LAYER[r] == layer_key}
+    return sewer_import.pick_defaults(names, defaults)
+
+
+def import_pressure_data(arcpy, msgs: Messages, gpkg_path: str, ps_layer, main_layer, fields: dict | None = None,
+                         use_selected: bool = True, search_distance: float | None = None,
+                         snap_tolerance: float | None = None, discharge_distance: float | None = None,
+                         include_not_in_use: bool = False, add_to_map: bool = True) -> dict:
+    """Water Corporation pump stations + pressure mains -> wwn_pump_stations / wwn_rising_mains (+ nodes) of an
+    existing model (see arcgis_toolbox/README.md). Re-running replaces the same ps_ids."""
+    pi = pressure_import
+    if not gpkg_path or not os.path.exists(gpkg_path):
+        raise RuntimeError(f"The model {gpkg_path!r} does not exist. Run Import Sewer Data (or New Model) first.")
+    if not pi.model_has_tables(gpkg_path):
+        raise RuntimeError(f"{gpkg_path} is not a WWNet model (no wwn_nodes / wwn_conduits tables).")
+    defaults = pi.template_options()
+
+    def num(v, key, fallback):
+        return float(v) if v is not None else float(defaults.get(key, fallback))
+    opts = pi.Options(search_m=num(search_distance, "search_distance_m", 30.0),
+                      snap_m=num(snap_tolerance, "snap_tolerance_m", 1.0),
+                      discharge_m=num(discharge_distance, "discharge_distance_m", 10.0),
+                      include_not_in_use=bool(include_not_in_use))
+    roles_fields = {r: d for r, d in pi.template_defaults().items()}
+    roles_fields.update({k: (v or "") for k, v in (fields or {}).items() if k in pi.ROLE_LAYER})
+    if not roles_fields.get("ps_id"):
+        raise RuntimeError("Choose the pump station ID field.")
+    with gpenv.quiet(arcpy):
+        sewer_import.prepare_projection(arcpy, msgs, [("Pump stations", ps_layer), ("Pressure mains", main_layer)])
+        for key, layer, label in (("ps", ps_layer, "Pump stations"), ("main", main_layer, "Pressure mains")):
+            have = {n.lower() for n in sewer_import.layer_field_names(arcpy, layer)}
+            for role, k, _l, _q in pi.FIELD_ROLES:
+                f = roles_fields.get(role)
+                if k == key and f and f.lower() not in have:
+                    if role == "ps_id":
+                        raise RuntimeError(f"{label}: field {f!r} (role {role}) does not exist. "
+                                           f"Available: {', '.join(sorted(have))}")
+                    msgs.warn(f"{label}: field {f!r} (role {role}) does not exist; that role is not used.")
+                    roles_fields[role] = ""
+        model = pi.read_model(gpkg_path)
+        mext = model["extent"]
+        ext = None
+        if mext is not None:
+            b = opts.search_m + opts.discharge_m
+            ext = (mext[0] - b, mext[1] - b, mext[2] + b, mext[3] + b)
+        ps_rows, main_rows = pi.read_sources(arcpy, msgs, ps_layer, main_layer, roles_fields, ext, use_selected, opts)
+        if not ps_rows:
+            raise RuntimeError("No pump stations were read (nothing selected / none within the model area?).")
+        res = pi.build_pressure(ps_rows, main_rows, model["nodes"], model["conduits"], opts,
+                                {k.upper(): v for k, v in pi.template_config().get("codes", {})
+                                 .get("material", {}).items()})
+        try:
+            stats = pi.write_result(gpkg_path, res)
+        except Exception as exc:  # noqa: BLE001
+            raise RuntimeError(f"Could not write to {gpkg_path}: {exc}. Close other users of the file (remove its "
+                               "layers from maps, stop edits) and run the tool again.") from exc
+        for line in res.infos:
+            msgs.info(line)
+        for w in res.warnings[:sewer_import.MAX_WARNING_LINES]:
+            msgs.warn(w)
+        if len(res.warnings) > sewer_import.MAX_WARNING_LINES:
+            msgs.warn(f"... {len(res.warnings) - sewer_import.MAX_WARNING_LINES} more warning(s) not shown.")
+        msgs.info(f"Imported {len(res.pump_stations)} pump station(s) and {len(res.rising_mains)} rising main(s); "
+                  f"{len(res.new_nodes)} node(s) created, {len(res.retype_nodes)} gravity node(s) set to wet_well.")
+        if stats["replaced_pump_stations"] or stats["replaced_rising_mains"]:
+            msgs.info(f"Replaced earlier import: {stats['replaced_pump_stations']} pump station(s), "
+                      f"{stats['replaced_rising_mains']} rising main(s), {stats['deleted_nodes']} node(s). "
+                      "Hydraulic values and pumps entered earlier were kept.")
+        missing = pi.missing_hydraulic(gpkg_path, [p["ps_id"] for p in res.pump_stations])
+        if missing:
+            shown = ", ".join(missing[:pi.MAX_LIST]) + (f" ... (+{len(missing) - pi.MAX_LIST} more)"
+                                                        if len(missing) > pi.MAX_LIST else "")
+            msgs.warn("Enter wet_well_area_m2, start_level, stop_level, pump_rate_lps (or wwn_pumps rows with "
+                      f"curve_json) for: {shown}")
+        if add_to_map:
+            try:
+                maplayers.add_model(arcpy, gpkg_path, msgs, True,
+                                    only=("wwn_nodes", "wwn_pump_stations", "wwn_rising_mains", "wwn_pumps"),
+                                    skip_existing=True)
+            except Exception as exc:  # noqa: BLE001
+                msgs.warn(f"Could not add the layers to the active map: {exc}")
+        return {"path": gpkg_path, "result": res, "missing": missing, "stats": stats}
 
 
 def report_issues(msgs: Messages, issues: list):

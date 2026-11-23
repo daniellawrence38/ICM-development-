@@ -79,7 +79,7 @@ class Toolbox(object):
     def __init__(self):
         self.label = "WWNet"
         self.alias = "wwnet"
-        self.tools = [NewModel, ImportSewerData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity, ExportToICM,
+        self.tools = [NewModel, ImportSewerData, ImportPressureData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity, ExportToICM,
                       SetAssistantApiKey, AskWWNetAssistant, VerifySetup, SelfTest, UpdateWWNet]
 
 
@@ -177,6 +177,68 @@ class ImportSewerData(object):
                                load_connection_points=bool(parameters[k].value) if parameters[k].value is not None
                                else True,
                                cp_load_search_m=parameters[k + 1].value)
+
+
+class ImportPressureData(object):
+    # fixed positions: 0 model, 1 pump stations, 2 pressure mains, 3 selected only, 4 search distance,
+    # 5 snap tolerance, 6 discharge distance, 7 include not in use, 8 add to map, 9.. Field parameters
+    _LAYER_PARAM = {"ps": 1, "main": 2}
+    _LAYER_NAME = {"ps": "ps_layer", "main": "main_layer"}
+
+    def __init__(self):
+        self.label = "Import Pressure Data"
+        self.description = ("Add Water Corporation (WA) sewer pump stations and pressure mains (rising mains) to an "
+                            "existing WWNet GeoPackage made by Import Sewer Data: chains the main segments, links "
+                            "wet wells and discharge nodes. Pump hydraulics are not in the GIS and must be entered.")
+        self.category = "Data"
+
+    def getParameterInfo(self):
+        from wwnet_arcgis import pressure_import as pi
+        ps = _p("ps_layer", "Sewer pump stations", "GPFeatureLayer")
+        ps.filter.list = ["Point"]
+        mn = _p("main_layer", "Sewer pressure mains", "GPFeatureLayer")
+        mn.filter.list = ["Polyline"]
+        params = [_p("gpkg", "WWNet GeoPackage (existing model)", "DEFile", filetype=["gpkg"]), ps, mn,
+                  _p("use_selected", "Use selected features only", "GPBoolean", required=False, default=True),
+                  _p("search", "Search distance pump station to main end / wet well (m)", "GPDouble",
+                     required=False, default=30.0),
+                  _p("snap", "Snap tolerance between main segments (m)", "GPDouble", required=False, default=1.0),
+                  _p("discharge", "Discharge search distance main end to gravity node (m)", "GPDouble",
+                     required=False, default=10.0),
+                  _p("include_n", "Include not-in-use (N) pump stations and mains", "GPBoolean", required=False,
+                     default=False),
+                  _p("add_to_map", "Add / refresh layers on map", "GPBoolean", required=False, default=True)]
+        for role, layer_key, label, required in pi.FIELD_ROLES:
+            f = _p("f_" + role, label, "Field", required=required)
+            f.parameterDependencies = [self._LAYER_NAME[layer_key]]  # Pro requires parameter NAMES
+            f.category = "Source fields"
+            params.append(f)
+        return params
+
+    def updateParameters(self, parameters):
+        from wwnet_arcgis import pressure_import as pi
+        for layer_key, idx in self._LAYER_PARAM.items():
+            p = parameters[idx]
+            if p.value is None or p.hasBeenValidated:
+                continue
+            try:
+                found = impl.pressure_field_defaults(arcpy, _source(p), layer_key)
+            except Exception:
+                continue
+            for n, (role, k, _l, _q) in enumerate(pi.FIELD_ROLES):
+                if k == layer_key:
+                    parameters[9 + n].value = found.get(role) or None
+        return
+
+    def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        impl = _impl()
+        from wwnet_arcgis import pressure_import as pi
+        fields = {role: (parameters[9 + n].valueAsText or "") for n, (role, _k, _l, _q) in enumerate(pi.FIELD_ROLES)}
+        impl.import_pressure_data(arcpy, impl.Messages(arcpy), parameters[0].valueAsText, _source(parameters[1]),
+                                  _source(parameters[2]), fields, bool(parameters[3].value),
+                                  parameters[4].value, parameters[5].value, parameters[6].value,
+                                  bool(parameters[7].value), bool(parameters[8].value))
 
 
 class ImportDiurnalProfile(object):

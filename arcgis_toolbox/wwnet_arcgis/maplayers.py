@@ -69,8 +69,9 @@ def _ensure_group(m, msgs):
         return None
 
 
-def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True) -> list:
-    """Add every wwn_* feature table present in the file. Returns the added layers."""
+def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True, only=None, skip_existing: bool = False) -> list:
+    """Add every wwn_* feature table present in the file (or just `only`; with `skip_existing`, not those the
+    active map already shows). Returns the added layers."""
     present = gpkg.contents(gpkg_path)
     if "wwn_subcatchments" in present:
         try:
@@ -79,11 +80,17 @@ def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True) -> list:
                 present = gpkg.contents(gpkg_path)
         except Exception as exc:  # noqa: BLE001 - e.g. read-only file: show the layers anyway
             msgs.warn(f"Could not upgrade the model to schema v2 ({exc}); new fields may be missing.")
-    tables = [t for t in gpkg.FEATURE_ORDER if t in present]
-    if not tables:
+
+    def wanted(t):
+        if only is not None and t not in only:
+            return False
+        return not (skip_existing and find_layer_for(arcpy, gpkg_path, t) is not None)
+
+    tables = [t for t in gpkg.FEATURE_ORDER if t in present and wanted(t)]
+    if not any(t in present for t in gpkg.FEATURE_ORDER):
         raise RuntimeError(f"{gpkg_path} contains no WWNet feature tables (wwn_nodes, wwn_conduits, ...).")
     m = active_map(arcpy)
-    group = _ensure_group(m, msgs)
+    group = _ensure_group(m, msgs) if tables else None
     added = []
     for t in tables:
         try:
@@ -104,7 +111,7 @@ def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True) -> list:
         for t, lyr in added:
             symbology.apply(t, lyr, msgs)
     for t in gpkg.ATTRIBUTE_ORDER:
-        if t in present:
+        if t in present and wanted(t):
             try:
                 m.addDataFromPath(gpkg.table_path(gpkg_path, t))
                 msgs.info(f"Added table {present[t][0] or t}")
