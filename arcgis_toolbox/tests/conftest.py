@@ -48,14 +48,16 @@ def _find_exe():
 
 
 @pytest.fixture
-def no_native(monkeypatch):
-    """Simulate wwnet_native being unavailable so the CLI fallback is exercised."""
-    from wwnet_arcgis import cli
-    monkeypatch.setattr(cli, "native_service", lambda: None)
+def flows_gpkg(tmp_path):
+    """The flow-modelling demo: node loads on every manhole and the example diurnal profile."""
+    dst = tmp_path / "demo_flows.gpkg"
+    shutil.copy(REPO / "examples" / "demo" / "demo_flows.gpkg", dst)
+    return str(dst)
 
 
 @pytest.fixture(scope="session")
 def wwnet_exe():
+    """The developer CLI (only for binding / CLI parity tests)."""
     exe = _find_exe()
     if not exe:
         pytest.skip("wwnet CLI not built (cargo build -p wwnet-cli, or set WWNET_EXE)")

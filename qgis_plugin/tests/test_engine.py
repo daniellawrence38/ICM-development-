@@ -5,7 +5,7 @@ import pytest
 
 from wwnet.assistant import client as client_mod
 from wwnet.assistant import prompt, tools
-from wwnet.assistant.engine import Engine, ToolError, ToolResult, build_request
+from wwnet.assistant.engine import Engine, ToolError, ToolResult, build_request  # noqa: F401
 
 SYSTEM = [{"type": "text", "text": "sys", "cache_control": {"type": "ephemeral"}}]
 
@@ -216,7 +216,7 @@ def test_tool_definitions_strict_and_unique():
     assert len(set(names)) == len(names)
     assert set(names) == {"list_layers", "get_selected_features", "query_features", "get_feature",
                           "check_conduit", "pipe_capacity", "residential_gsdf", "lookup_ds50",
-                          "propose_edits"}
+                          "propose_edits", *tools.FLOW_TOOLS}
     for d in defs:
         assert d["strict"] is True and d["input_schema"]["additionalProperties"] is False
         assert set(d["input_schema"]["required"]) <= set(d["input_schema"]["properties"])
@@ -240,10 +240,43 @@ def test_pure_tool_handlers():
     assert cap["capacity_lps"] == pytest.approx(21.7, abs=0.15)
     at = h["pipe_capacity"]({"dn_mm": 225, "grade_1in": 300, "flow_lps": 10})
     assert 0.3 < at["depth_ratio_at_flow"] < 0.5 and at["full_flow_lps"] > 25
-    assert h["check_conduit"]({"dn_mm": 150, "grade_1in": 200})["source"] in ("python-fallback", "wwnet")
+    assert h["check_conduit"]({"dn_mm": 150, "grade_1in": 200})["source"] == "wwnet"
     assert h["lookup_ds50"]({"table": "grades", "key": "150"})["max_ac_spacing_m"] == 100
     assert h["residential_gsdf"]({"net_area_ha": 5, "rcode": "R30", "ground": "wet",
                                   "region": "north"})["gsdf_lps"] == pytest.approx(2.325)
+
+
+def test_flow_tools_on_demo(tmp_path):
+    pytest.importorskip("wwnet_native")
+    import shutil
+    import wwnet_native
+    from conftest import REPO
+    f = tmp_path / "flows.gpkg"
+    shutil.copy(REPO / "examples" / "demo" / "demo_flows.gpkg", f)
+    h = tools.flow_handlers(lambda: str(f))
+    assert set(h) == set(tools.FLOW_TOOLS)
+    d = h["design_summary"]({})
+    assert d["summary"]["conduits"] == 11
+    r = h["get_design_result"]({"conduit_id": "P01"})
+    assert r["conduit_id"] == "P01" and r["checks"]
+    with pytest.raises(ToolError):
+        h["get_design_result"]({"conduit_id": "nope"})
+    with pytest.raises(ToolError, match="No stored simulation runs"):
+        h["get_sim_result"]({"object_id": "P01"})
+    for label, scale in (("base", 1.0), ("x2", 2.0)):
+        wwnet_native.simulate(str(f), 12.0, 6.0, flow_scale=scale, label=label)
+    runs = h["list_sim_runs"]({})
+    assert runs["count"] == 2 and runs["runs"][0]["label"] == "x2"
+    sr = h["get_sim_result"]({"object_id": "P01", "run": "base"})
+    assert sr["run"].startswith("base (") and sr["conduit"]["max_flow_lps"] > 0
+    node = h["get_sim_result"]({"object_id": "N01"})
+    assert "freeboard_m" in node["node"]
+    cmp_ = h["compare_sim_runs"]({"run_a": "base", "run_b": "x2"})
+    assert cmp_["counts"].get("worse", 0) + cmp_["counts"].get("new_surcharge", 0) > 0
+    t = h["trace_network"]({"start_id": "P08", "direction": "upstream"})
+    assert t["summary"]["start_conduit"] == "P08" and t["summary"]["adwf_lps"] > 0
+    assert tools.conduit_derived({"length_m": 50, "us_invert": 10, "ds_invert": 9.5}) == \
+        {"length_m_used": 50, "grade_1in": 100.0}
 
 
 def test_validate_edits():

@@ -73,31 +73,8 @@ def lookup(table: str, key: str | None = None, rs: dict | None = None):
 
 def residential_gsdf(net_area_ha: float, rcode: str, ground: str = "dry",
                      region: str = "south") -> dict:
-    """GSDF (L/s) for a residential net area. Uses wwnet extension if present."""
-    try:
-        fn = getattr(native.get(), "residential_gsdf", None)
-        if callable(fn):
-            res = fn(net_area_ha, rcode, ground, region)
-            if isinstance(res, dict):
-                res.setdefault("source", "wwnet")
-                return res
-    except Exception:
-        pass
-    rs = load_ruleset()
-    min_r = rs["loading"].get("min_rcode", "R15")
-    rows = {r["rcode"]: r for r in _rows_as_dicts(rs["loading"]["residential"][region.lower()])}
-    code = rcode.upper()
-    note = None
-    if code not in rows:
-        raise KeyError(f"R-Code {rcode!r} not in Table for region {region}: {sorted(rows)}")
-    # cl. 4.2.1(c): codes below the minimum are loaded at the minimum
-    if int(code[1:]) < int(min_r[1:]):
-        code, note = min_r, f"R-Code loaded at {min_r} (cl. 4.2.1(c))"
-    rate = rows[code]["dry_gsdf_lps_ha" if ground.lower() == "dry" else "wet_gsdf_lps_ha"]
-    out = {"gsdf_lps": round(net_area_ha * rate, 4), "rate_lps_per_net_ha": rate,
-           "rcode_used": code, "ground": ground, "region": region,
-           "clause": "Table 4.1" if region.lower() == "south" else "Table 4.2",
-           "source": "python-fallback"}
-    if note:
-        out["note"] = note
-    return out
+    """GSDF (L/s) for a residential net area (DS 50 Tables 4.1 / 4.2), from the engine."""
+    res = native.require("residential_gsdf").residential_gsdf(net_area_ha, rcode, ground, region)
+    res = dict(res)
+    res.setdefault("source", "wwnet")
+    return res

@@ -1,34 +1,31 @@
-"""wwnet_native is the first choice; the CLI is only a fallback."""
+"""The engine (wwnet_native) is the only backend: the toolbox's engine wrapper and the native API."""
 import json
 import shutil
+import sqlite3
 import subprocess
 
 import pytest
 
 from conftest import REPO
-from wwnet_arcgis import cli
+from wwnet_arcgis import engine
 
 nat = pytest.importorskip("wwnet_native")
 
 
-def _copy(demo_gpkg, tmp_path, name):
+def _copy(src, tmp_path, name):
     dst = tmp_path / name
-    shutil.copy(demo_gpkg, dst)
+    shutil.copy(src, dst)
     return str(dst)
 
 
-def _cli_json(exe, *args):
-    return json.loads(subprocess.run([exe, *args], capture_output=True, text=True).stdout)
-
-
 def test_native_matches_cli(wwnet_exe, demo_gpkg, tmp_path):
+    """The binding and the developer CLI are the same Rust services."""
     a, b = _copy(demo_gpkg, tmp_path, "a.gpkg"), _copy(demo_gpkg, tmp_path, "b.gpkg")
-    assert nat.check(a) == _cli_json(wwnet_exe, "check", b, "--json")
-    assert nat.design(a) == _cli_json(wwnet_exe, "design", b, "--json")
-    t = subprocess.run([wwnet_exe, "trace", a, "N03"], capture_output=True, text=True).stdout
-    assert nat.trace(a, "N03", False, False) == cli.parse_trace(t)
-    assert set(nat.trace(a, "N03", True, False)) == {"upstream"}
-    assert nat.version()
+    cli = lambda *args: json.loads(subprocess.run([wwnet_exe, *args], capture_output=True, text=True).stdout)  # noqa: E731
+    assert nat.check(a) == cli("check", b, "--json")
+    assert nat.design(a) == cli("design", b, "--json")
+    assert set(nat.trace(a, "N03", True, False)) == {"upstream", "conduits", "summary"}
+    assert nat.version() and nat.SCHEMA_VERSION == 3
 
 
 def test_native_errors(demo_gpkg, tmp_path):
@@ -40,55 +37,35 @@ def test_native_errors(demo_gpkg, tmp_path):
         nat.design(demo_gpkg, str(tmp_path / "missing.toml"))
     p = str(tmp_path / "new.gpkg")
     nat.new_model(p)
-    assert nat.check(p, False) is not None
+    assert nat.check(p, False) is not None and nat.schema_version(p) == 3
 
 
-def test_frontend_prefers_native(monkeypatch, demo_gpkg):
-    def boom(*a, **k):
-        raise AssertionError("CLI used although native is available")
-    monkeypatch.setattr(cli, "_run", boom)
-    monkeypatch.setattr(cli, "find_exe", boom)
-    issues, rc = cli.run_check(demo_gpkg)
-    assert rc == 0 and all("table" in i for i in issues)
-    assert cli.run_design(demo_gpkg)["summary"]["conduits"] > 0
-    assert cli.run_trace(demo_gpkg, "N03", up=True, down=True)["downstream"]
-    with pytest.raises(cli.CliError, match="not found"):
-        cli.run_trace(demo_gpkg, "ZZ")
+def test_engine_wrapper_maps_errors(demo_gpkg, monkeypatch):
+    assert engine.run_design(demo_gpkg)["summary"]["conduits"] > 0
+    assert all("table" in i for i in engine.run_check(demo_gpkg))
+    assert engine.run_trace(demo_gpkg, "N03", up=True, down=True)["downstream"]
+    with pytest.raises(engine.EngineError, match="neither a node nor a conduit"):
+        engine.run_trace(demo_gpkg, "ZZ")
+    with pytest.raises(engine.EngineError, match="no stored simulation runs"):
+        engine.show_sim_run(demo_gpkg)
+    from wwnet_arcgis import shared
+    monkeypatch.setattr(shared.core("native"), "get", lambda refresh=False: None)
+    with pytest.raises(engine.EngineError, match="Verify Setup"):
+        engine.run_design(demo_gpkg)
+    assert engine.available() is False
 
 
-def test_cli_only_as_fallback(monkeypatch, wwnet_exe, demo_gpkg):
-    monkeypatch.setattr(cli, "native_service", lambda: None)
-    calls = []
-    real = cli._run
-    monkeypatch.setattr(cli, "_run", lambda args, timeout=600: calls.append(args[1]) or real(args, timeout))
-    cli.run_check(demo_gpkg, wwnet_exe)
-    cli.run_design(demo_gpkg, wwnet_exe)
-    cli.run_trace(demo_gpkg, "N03", exe=wwnet_exe)
-    assert calls == ["check", "design", "trace"]
-
-
-def test_neither_available_explains_wheel(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli, "native_service", lambda: None)
-    monkeypatch.setenv("PATH", str(tmp_path))
-    monkeypatch.setattr(cli, "TOOLBOX_ROOT", tmp_path)
-    for fn in (lambda: cli.run_check("x.gpkg", None), lambda: cli.run_design("x.gpkg"),
-               lambda: cli.run_trace("x.gpkg", "N1")):
-        with pytest.raises(cli.CliError) as ei:
-            fn()
-        msg = str(ei.value)
-        assert "wwnet_native" in msg and "pip install" in msg and "no .exe required" in msg
-
-
-def test_native_simulate(demo_gpkg, tmp_path):
-    import sqlite3
+def test_native_simulate_runs_and_settings(demo_gpkg, tmp_path):
     inp = tmp_path / "m.inp"
-    r = nat.simulate(demo_gpkg, duration_h=12.0, warmup_h=6.0, write_inp=str(inp), series_ids=["P01"])
+    r = nat.simulate(demo_gpkg, duration_h=12.0, warmup_h=6.0, write_inp=str(inp), series_ids=["P01"],
+                     label="base")
     assert r["summary"]["conduits"] == 11 and abs(r["summary"]["continuity_error_pct"]) < 1.0
-    assert "P01" in r["series_ids"] and r["run_id"]
+    assert "P01" in r["series_ids"] and r["run_id"] and r["label"] == "base"
+    assert r["options"]["roughness"] == "ks"
     assert "[CONDUITS]" in inp.read_text()
     con = sqlite3.connect(demo_gpkg)
     assert con.execute("select count(*) from wwn_sim_links").fetchone() == (11,)
-    assert con.execute("select count(*) from wwn_sim_runs").fetchone() == (1,)
+    assert con.execute("select count(*) from wwn_sim_conduit_results where geom is not null").fetchone() == (11,)
     con.close()
     nowrite = nat.simulate(demo_gpkg, duration_h=12.0, warmup_h=6.0, write=False, flow_scale=2.0)
     assert nowrite["run_id"] is None and nowrite["summary"]["inflow_simulated_lps"] == pytest.approx(
@@ -97,17 +74,12 @@ def test_native_simulate(demo_gpkg, tmp_path):
         nat.simulate(demo_gpkg, roughness="chezy", write=False)
     with pytest.raises(RuntimeError, match="loading"):
         nat.simulate(str(tmp_path / "missing.gpkg"))
-
-
-def test_run_simulate_native_matches_cli(wwnet_exe, demo_gpkg, tmp_path):
-    a = _copy(demo_gpkg, tmp_path, "a.gpkg")
-    b = _copy(demo_gpkg, tmp_path, "b.gpkg")
-    n = cli.run_simulate(a, 12.0, 6.0)
-    import wwnet_arcgis.cli as c
-    orig = c.native_service
-    c.native_service = lambda: None
-    try:
-        f = cli.run_simulate(b, 12.0, 6.0, exe=wwnet_exe)
-    finally:
-        c.native_service = orig
-    assert n["summary"] == f["summary"] and n["links"] == f["links"]
+    runs = engine.sim_runs(demo_gpkg)
+    assert len(runs) == 1 and runs[0]["label"] == "base" and runs[0]["shown"]
+    st = engine.set_settings(demo_gpkg, 500.0, None, None)
+    assert st["adwf_per_connection_lpd"] == 500.0 and st["peaking_factor"] == 1.5
+    with pytest.raises(engine.EngineError, match="profile"):
+        engine.set_settings(demo_gpkg, default_profile="nope")
+    cap = nat.pipe_capacity(225, 300, 1.0, 0.6667)
+    assert cap["capacity_lps"] == pytest.approx(21.7, abs=0.15)
+    assert REPO.is_dir()

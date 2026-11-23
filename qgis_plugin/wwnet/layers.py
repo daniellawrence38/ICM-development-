@@ -7,25 +7,20 @@ from qgis.core import (Qgis, QgsCategorizedSymbolRenderer, QgsCoordinateReferenc
                        QgsTextBufferSettings, QgsTextFormat, QgsVectorLayer,
                        QgsVectorLayerSimpleLabeling)
 
-from .core import ruleset, schema
+from .core import calc, schema, style
 
 GROUP_NAME = "WWNet"
 TABLE_PROP = "wwnet/table"
-# Add order = draw order (first added is drawn on top).
-LOAD_ORDER = ("wwn_nodes", "wwn_pump_stations", "wwn_conduits", "wwn_rising_mains",
-              "wwn_subcatchments", "wwn_pumps", "wwn_results_conduits", "wwn_issues", "wwn_meta")
+# Add order = draw order (first added is drawn on top). Result layers (schema v3) are hidden until a
+# run fills them.
+LOAD_ORDER = ("wwn_issues", "wwn_nodes", "wwn_sim_node_results", "wwn_pump_stations", "wwn_conduits",
+              "wwn_results_conduits", "wwn_sim_conduit_results", "wwn_sim_compare", "wwn_rising_mains",
+              "wwn_subcatchments", "wwn_pumps", "wwn_node_loads", "wwn_profile_info", "wwn_sim_runs",
+              "wwn_meta")
+HIDDEN_AT_LOAD = schema.RESULT_LAYERS + ("wwn_pumps", "wwn_node_loads", "wwn_profile_info", "wwn_sim_runs",
+                                         "wwn_meta")
 
-NODE_STYLE = {  # node_type: (shape, colour, size)
-    "ac": ("circle", "#1f77b4", 3.0), "ms": ("circle", "#2ca02c", 3.0),
-    "drop_ac": ("circle", "#9467bd", 3.4), "junction": ("circle", "#7f7f7f", 2.0),
-    "wet_well": ("square", "#d62728", 3.6), "outfall": ("triangle", "#000000", 3.6),
-    "io_end": ("diamond", "#ff7f0e", 2.8), "is_end": ("diamond", "#bcbd22", 2.8),
-}
-DN_STYLE = {150: ("#4c9be8", 0.35), 225: ("#2e7d32", 0.5), 300: ("#f9a825", 0.7),
-            375: ("#ef6c00", 0.9), 450: ("#c62828", 1.1), 600: ("#6a1b9a", 1.4)}
-LAND_USE_COLOUR = {"residential": "255,235,150,70", "commercial": "100,150,255,70",
-                   "hotel_motel": "255,150,200,70", "perth_cba": "200,100,255,70",
-                   "industrial": "170,170,170,90"}
+NODE_SIZE = {"junction": 2.0, "drop_ac": 3.4, "wet_well": 3.6, "outfall": 3.6, "io_end": 2.8, "is_end": 2.8}
 
 CONDUIT_LABEL = (
     "'DN' || \"dn\" || CASE WHEN \"us_invert\" IS NOT NULL AND \"ds_invert\" IS NOT NULL "
@@ -62,8 +57,9 @@ def _label(layer, expr, is_expr=True, line=False, size=8.0, max_scale_denom=None
 
 def style_nodes(layer):
     cats = []
-    for val, (shape, col, size) in NODE_STYLE.items():
-        sym = QgsMarkerSymbol.createSimple({"name": shape, "color": col, "size": str(size),
+    for val, col in style.NODE.items():
+        sym = QgsMarkerSymbol.createSimple({"name": style.NODE_SHAPE.get(val, "circle"), "color": col,
+                                            "size": str(NODE_SIZE.get(val, 3.0)),
                                             "outline_color": "#222222", "outline_width": "0.2"})
         cats.append(QgsRendererCategory(val, sym, val))
     other = QgsMarkerSymbol.createSimple({"name": "circle", "color": "#999999", "size": "2"})
@@ -74,8 +70,8 @@ def style_nodes(layer):
 
 def style_conduits(layer):
     cats = []
-    for dn, (col, width) in DN_STYLE.items():
-        sym = QgsLineSymbol.createSimple({"line_color": col, "line_width": str(width),
+    for dn, col in style.DN.items():
+        sym = QgsLineSymbol.createSimple({"line_color": col, "line_width": str(style.dn_width_mm(dn)),
                                           "capstyle": "round"})
         cats.append(QgsRendererCategory(dn, sym, f"DN{dn}"))
     cats.append(QgsRendererCategory("", QgsLineSymbol.createSimple(
@@ -85,7 +81,7 @@ def style_conduits(layer):
 
 
 def style_pump_stations(layer):
-    sym = QgsMarkerSymbol.createSimple({"name": "square", "color": "#d81b60", "size": "5",
+    sym = QgsMarkerSymbol.createSimple({"name": "square", "color": style.PUMP_STATION, "size": "5",
                                         "outline_color": "#ffffff", "outline_width": "0.4"})
     layer.renderer().setSymbol(sym)
     _label(layer, "ps_id", is_expr=False)
@@ -93,23 +89,70 @@ def style_pump_stations(layer):
 
 def style_rising_mains(layer):
     layer.renderer().setSymbol(QgsLineSymbol.createSimple(
-        {"line_color": "#c2185b", "line_width": "0.7", "line_style": "dash"}))
+        {"line_color": style.RISING_MAIN, "line_width": "0.7", "line_style": "dash"}))
 
 
 def style_subcatchments(layer):
     cats = []
-    for lu, col in LAND_USE_COLOUR.items():
+    for lu, col in style.LAND_USE.items():
+        r, g, b = style.rgb(col)
         cats.append(QgsRendererCategory(lu, QgsFillSymbol.createSimple(
-            {"color": col, "outline_color": "#555555", "outline_width": "0.2"}), lu))
+            {"color": f"{r},{g},{b},70", "outline_color": "#555555", "outline_width": "0.2"}), lu))
     cats.append(QgsRendererCategory("", QgsFillSymbol.createSimple(
         {"color": "200,200,200,50", "outline_color": "#555555"}), "other"))
     layer.setRenderer(QgsCategorizedSymbolRenderer("land_use", cats))
     _label(layer, "subcatchment_id", is_expr=False, size=8.0)
 
 
+def _categories_line(layer, field, colours, labels=None, width="0.9"):
+    cats = [QgsRendererCategory(v, QgsLineSymbol.createSimple({"line_color": c, "line_width": width,
+                                                               "capstyle": "round"}), (labels or {}).get(v, v))
+            for v, c in colours.items()]
+    layer.setRenderer(QgsCategorizedSymbolRenderer(field, cats))
+
+
+def _categories_point(layer, field, colours, size="3.2"):
+    cats = [QgsRendererCategory(v, QgsMarkerSymbol.createSimple({"name": "circle", "color": c, "size": size,
+                                                                 "outline_color": "#ffffff"}), v)
+            for v, c in colours.items()]
+    layer.setRenderer(QgsCategorizedSymbolRenderer(field, cats))
+
+
+def style_design_results(layer):
+    _categories_line(layer, "result", {k: v for k, v in style.RESULT.items() if k != "info"})
+    _label(layer, "\"conduit_id\" || ' ' || format_number(\"total_lps\", 2) || '/' || "
+                  "format_number(\"capacity_lps\", 1) || ' L/s d/D ' || format_number(\"d_over_d\", 2)",
+           line=True, size=7.5, max_scale_denom=3000)
+
+
+def style_sim_conduits(layer):
+    _categories_line(layer, "d_class", style.SIM_CLASS, style.SIM_CLASS_LABEL)
+    _label(layer, "format_number(\"max_flow_lps\", 1) || ' L/s d/D ' || format_number(\"max_d_over_d\", 2)",
+           line=True, size=7.5, max_scale_denom=3000)
+
+
+def style_sim_nodes(layer):
+    sym = QgsMarkerSymbol.createSimple({"name": "circle", "color": style.SIM_CLASS["surcharged"], "size": "3"})
+    from qgis.core import QgsRuleBasedRenderer
+    root = QgsRuleBasedRenderer.Rule(None)
+    rule = QgsRuleBasedRenderer.Rule(sym, 0, 0, "\"flood_volume_m3\" > 0", "flooding")
+    root.appendChild(rule)
+    layer.setRenderer(QgsRuleBasedRenderer(root))
+
+
+def style_compare(layer):
+    _categories_line(layer, "change", style.COMPARE)
+
+
+def style_issues(layer):
+    _categories_point(layer, "severity", style.ISSUE)
+
+
 STYLERS = {"wwn_nodes": style_nodes, "wwn_conduits": style_conduits,
            "wwn_pump_stations": style_pump_stations, "wwn_rising_mains": style_rising_mains,
-           "wwn_subcatchments": style_subcatchments}
+           "wwn_subcatchments": style_subcatchments, "wwn_results_conduits": style_design_results,
+           "wwn_sim_conduit_results": style_sim_conduits, "wwn_sim_node_results": style_sim_nodes,
+           "wwn_sim_compare": style_compare, "wwn_issues": style_issues}
 
 
 def setup_forms(layer, table):
@@ -125,9 +168,9 @@ def setup_forms(layer, table):
                 "ValueMap", {"map": [{v: v} for v in values]}))
     if table == "wwn_conduits":
         try:
-            dns = [g["dn"] for g in ruleset.load_ruleset()["grades"]]
+            dns = calc.ds50_dns()
         except Exception:
-            dns = list(DN_STYLE)
+            dns = list(style.DN)
         idx = fields.indexFromName("dn")
         if idx >= 0:
             layer.setEditorWidgetSetup(idx, QgsEditorWidgetSetup(
@@ -159,6 +202,15 @@ def load_model(gpkg: str, iface=None) -> list:
     project = QgsProject.instance()
     root = project.layerTreeRoot()
     group = root.findGroup(GROUP_NAME) or root.insertGroup(0, GROUP_NAME)
+    if schema.schema_version(gpkg) < schema.SCHEMA_VERSION:
+        try:
+            schema.upgrade_model(gpkg)
+            if iface:
+                iface.messageBar().pushInfo("WWNet", f"Upgraded {gpkg} to schema v{schema.SCHEMA_VERSION} "
+                                                     "(result and issue layers).")
+        except Exception as exc:  # noqa: BLE001 - e.g. engine missing / read-only file: load what is there
+            if iface:
+                iface.messageBar().pushWarning("WWNet", f"Could not upgrade the model ({exc}).")
     present = schema.table_identifiers(gpkg)
     existing = {(l.customProperty(TABLE_PROP), gpkg_of(l)) for l in wwnet_layers()}
     first_load = not wwnet_layers()
@@ -179,7 +231,7 @@ def load_model(gpkg: str, iface=None) -> list:
             STYLERS[table](lyr)
         setup_forms(lyr, table)
         loaded.append(lyr)
-        if table in schema.READ_ONLY_TABLES + ("wwn_pumps",):
+        if table in HIDDEN_AT_LOAD:
             node = root.findLayer(lyr.id())
             if node:
                 node.setItemVisibilityChecked(False)

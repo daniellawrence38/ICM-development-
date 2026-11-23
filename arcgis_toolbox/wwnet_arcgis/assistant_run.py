@@ -19,10 +19,8 @@ wwnet_native in its vendor folder) and run the 'Verify Setup' tool. Alternative:
   1. In ArcGIS Pro: Settings > Package Manager > Environment Manager > Clone Default
      (give it a name such as arcgispro-py3-wwnet) and activate the clone. Restart Pro.
   2. Open 'Python Command Prompt' from the ArcGIS start-menu folder (it uses the active environment) and run:
-         pip install anthropic
-  3. Optional, for the fast Rust hydraulics (a pure-Python fallback is used without it):
-         pip install path\\to\\wwnet_native-<version>-cp3xx-abi3-win_amd64.whl
-  4. Restart ArcGIS Pro and run the tool again.
+         pip install anthropic path\\to\\wwnet_native-<version>-cp39-abi3-win_amd64.whl
+  3. Restart ArcGIS Pro and run the tool again.
 If your IT policy blocks pip, ask IT to install 'anthropic' into the cloned environment and to allow
 outbound HTTPS to api.anthropic.com."""
 
@@ -34,8 +32,9 @@ HOST_NOTES = """\
   dn = 225 AND status = 'proposed'. Pass an empty string to list the first rows.
 - propose_edits records proposals. Whether they are written depends on the engineer ticking
   'Apply proposed edits' when running the tool; the tool result says which happened. Never claim data
-  changed unless the result says "applied": true. If edits were only proposed, tell the engineer to re-run
-  the tool with 'Apply proposed edits' ticked to apply them.
+  changed unless the result says "applied": true. If edits were only proposed, tell the engineer they can
+  apply exactly these proposals with the tool's 'Apply the proposals from the last run' option (no new
+  question needed).
 """
 
 _TOOL_OVERRIDES = {
@@ -48,8 +47,8 @@ _TOOL_OVERRIDES = {
                       "dn = 225 AND status = 'proposed'. Use limit to cap rows (default 50, max 200).",
     "propose_edits": "Propose attribute edits. Each edit: id = business id value (e.g. conduit_id "
                      "'C12'), field, value. The tool records proposals; they are written only if the "
-                     "engineer ran the tool with 'Apply proposed edits' ticked. The result states "
-                     "whether edits were applied.",
+                     "engineer ran the tool with 'Apply proposed edits' ticked, or later applies them with "
+                     "'Apply the proposals from the last run'. The result states whether edits were applied.",
 }
 
 
@@ -101,10 +100,32 @@ def save_history(key: str, messages: list, user: str, assistant: str):
 
 
 def reset_history(key: str):
+    for p in (settings.history_path(key), settings.proposals_path(key)):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def save_proposals(key: str, proposals: list):
+    """Remember the not-yet-applied proposals of the last run (replaces earlier ones; [] clears)."""
+    p = settings.proposals_path(key)
+    if not proposals:
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        return
+    settings._atomic_write(p, json.dumps({"version": 1, "proposals": proposals}, ensure_ascii=False,
+                                         indent=1, default=str).encode("utf-8"))
+
+
+def load_proposals(key: str) -> list:
     try:
-        settings.history_path(key).unlink()
-    except FileNotFoundError:
-        pass
+        data = json.loads(settings.proposals_path(key).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [d for d in data.get("proposals") or [] if isinstance(d, dict)]
 
 
 @dataclass

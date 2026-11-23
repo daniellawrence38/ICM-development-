@@ -80,12 +80,12 @@ def test_sample_rows_basic_mapping():
     assert "invert derived from lowest incoming sewer ds invert" in n["A2"]["notes"]
     assert "lowest outgoing sewer us invert" in n["A1"]["notes"]
     # both sample sewers disagree with FLOW_GRADE by more than 10%: 1 in 100 vs 120 and 1 in 172 vs 150
-    gm = {w.object_id: w.message for w in rep.warnings if w.code == "grade_mismatch"}
+    gm = {w.object_id: w.message for w in rep.warnings if w.code == "GRADE_MISMATCH"}
     assert set(gm) == {"22030208", "22030223"}
     assert "1 in 100.1" in gm["22030208"] and "120" in gm["22030208"]
     assert "1 in 172.1" in gm["22030223"] and "150" in gm["22030223"]
     _, loose = build_model(acs, [], pipes, FieldMap(diameter="HEIGHT"), ImportOptions(grade_tolerance_pct=20))
-    assert not [w for w in loose.warnings if w.code == "grade_mismatch"]
+    assert not [w for w in loose.warnings if w.code == "GRADE_MISMATCH"]
     assert rep.counts["nodes"] == 4 and rep.counts["conduits"] == 2
     assert not rep.unknown_codes
 
@@ -109,13 +109,13 @@ def test_dn_normalisation_and_unmapped():
     assert c["P0"]["dn"] == 150 and "internal_diameter_mm" not in c["P0"]
     assert c["P1"]["dn"] == 150 and c["P1"]["internal_diameter_mm"] == 152.0
     assert c["P2"]["dn"] == 225 and c["P2"]["internal_diameter_mm"] == 240.0 and "source diameter 240" in c["P2"]["notes"]
-    assert c["P3"]["dn"] == 150 and "dn_assumed" in codes_of(rep)
-    assert sum(w.code == "dn_assumed" for w in rep.warnings) == 2
+    assert c["P3"]["dn"] == 150 and "DN_ASSUMED" in codes_of(rep)
+    assert sum(w.code == "DN_ASSUMED" for w in rep.warnings) == 2
     assert any("P1" in i for i in rep.infos)
     # field not mapped at all: loud single warning with the count
     model, rep = build_model(acs, [], rows, FieldMap())
     assert all(x["dn"] == 150 for x in model["conduits"])
-    w = [w for w in rep.warnings if w.code == "dn_not_mapped"]
+    w = [w for w in rep.warnings if w.code == "DN_NOT_MAPPED"]
     assert len(w) == 1 and "5 conduit" in w[0].message and "ASSUMED" in w[0].message
     assert rep.counts["dn_assumed"] == 5
 
@@ -192,12 +192,13 @@ def test_grade_source_field_derives_missing_ds_invert():
     model, rep = build_model(acs, [], [p], options=ImportOptions(grade_source="field"))
     c = model["conduits"][0]
     assert c["ds_invert"] == pytest.approx(4.7) and c["data_source"] == "assumed"
-    assert "derived" in c["notes"] and "invert_derived" in codes_of(rep)
+    assert "derived" in c["notes"] and "INVERT_DERIVED" in codes_of(rep)
     n = by_id(model["nodes"], "node_id")
     assert n["B"]["invert_level"] == pytest.approx(4.7)
     # levels source leaves it missing and warns
     model, rep = build_model(acs, [], [p])
-    assert "ds_invert" not in model["conduits"][0] and "missing_invert" in codes_of(rep)
+    assert "ds_invert" not in model["conduits"][0]
+    assert "missing_invert" not in codes_of(rep)  # reported by the model check (MISSING_INVERT)
     assert "invert_level" not in by_id(model["nodes"], "node_id")["B"]
 
 
@@ -320,10 +321,10 @@ def test_segmented_run_junctions_direction_and_inverts():
     assert "incoming" in n["B"]["notes"] and "outgoing" in n["J1"]["notes"]
     # the inspection shaft is skipped silently (counted), ids are not required for it
     codes = codes_of(rep)
-    assert "ac_no_id" not in codes and rep.counts["inspection_shafts_skipped"] == 1
+    assert "AC_NO_ID" not in codes and rep.counts["inspection_shafts_skipped"] == 1
     assert "skipped 1 inspection shaft(s)" in "\n".join(rep.summary_lines()).lower()
-    assert "id_mismatch" not in codes and "end_far_from_node" not in codes
-    assert codes.count("direction_unknown") == 0      # BR2: no usable id, but the dead-end rule orients it
+    assert "ID_MISMATCH" not in codes and "END_FAR_FROM_NODE" not in codes
+    assert codes.count("DIRECTION_UNKNOWN") == 0      # BR2: no usable id, but the dead-end rule orients it
     assert rep.counts["direction_dead_end"] == 1 and "dead-end rule" in c["BR2"]["notes"]
 
 
@@ -352,10 +353,10 @@ def test_chamber_type_codes():
     assert (n["M1"]["node_type"], n["J1x"]["node_type"], n["Q1"]["node_type"]) == ("ac", "ms", "ac")
     assert rep.counts["inspection_shafts_skipped"] == 2
     assert rep.unknown_codes == {"CHAMBER_TY": {"Q": 1}}
-    assert codes_of(rep).count("unknown_code") == 1 and codes_of(rep).count("ac_no_id") == 1
+    assert codes_of(rep).count("UNKNOWN_CODE") == 1 and codes_of(rep).count("AC_NO_ID") == 1
     # field role unmapped: everything is an access chamber, no warnings about types
     model, rep = build_model(acs[:4], [], [], FieldMap(chamber_type=""))
-    assert {x["node_type"] for x in model["nodes"]} == {"ac"} and "unknown_code" not in codes_of(rep)
+    assert {x["node_type"] for x in model["nodes"]} == {"ac"} and "UNKNOWN_CODE" not in codes_of(rep)
     assert FieldMap.from_config().chamber_type == "CHAMBER_TY"
 
 
@@ -363,7 +364,7 @@ def test_id_mismatch_warned_once_per_segment():
     acs = [ac("A", 0, 0), ac("B", 10, 0), ac("C", 20, 0)]
     p = seg("P", [(0, 0), (10, 0)], "A", "C", 5.0, 4.9)      # ends at A and B; B is neither US nor DS id
     model, rep = build_model(acs, [], [p])
-    mm = [w for w in rep.warnings if w.code == "id_mismatch"]
+    mm = [w for w in rep.warnings if w.code == "ID_MISMATCH"]
     assert len(mm) == 1 and mm[0].object_id == "P"
     c = model["conduits"][0]
     assert (c["us_node_id"], c["ds_node_id"]) == ("A", "B")        # geometry wins
@@ -377,10 +378,10 @@ def test_direction_from_neighbours_and_unknown():
     model, rep = build_model(acs, [], sew)
     c = by_id(model["conduits"], "conduit_id")
     assert c["P2"]["geom"][0] == [50, 0] and "direction from neighbouring" in c["P2"]["notes"]
-    assert "direction_unknown" not in codes_of(rep) and rep.counts["reversed"] == 1
+    assert "DIRECTION_UNKNOWN" not in codes_of(rep) and rep.counts["reversed"] == 1
     # isolated segment without ids: digitised direction kept with a warning
     model, rep = build_model([], [], [seg("Z", [(0, 0), (10, 0)], None, None, 5.0, 4.0)])
-    assert model["conduits"][0]["geom"][0] == [0, 0] and "direction_unknown" in codes_of(rep)
+    assert model["conduits"][0]["geom"][0] == [0, 0] and "DIRECTION_UNKNOWN" in codes_of(rep)
     assert "reversed" not in rep.counts
 
 
@@ -403,16 +404,16 @@ def test_maintype_codes_e_is_branch_and_main():
 def test_warning_summary_spread_across_codes():
     rep = imp.ImportReport()
     for i in range(28):
-        rep.warn("end_far_from_node", "conduit", f"P{i}", "far")
+        rep.warn("END_FAR_FROM_NODE", "conduit", f"P{i}", "far")
     for i in range(3):
-        rep.warn("grade_mismatch", "conduit", f"G{i}", "grade")
-    rep.warn("dn_not_mapped", "import", "", "no dn")
+        rep.warn("GRADE_MISMATCH", "conduit", f"G{i}", "grade")
+    rep.warn("DN_NOT_MAPPED", "import", "", "no dn")
     lines = rep.summary_lines(max_warnings=40)
     text = "\n".join(lines)
-    assert "32 warning(s): dn_not_mapped x1, end_far_from_node x28, grade_mismatch x3" in text
+    assert "32 warning(s): DN_NOT_MAPPED x1, END_FAR_FROM_NODE x28, GRADE_MISMATCH x3" in text
     ex = rep.example_warnings(40)
-    assert len(ex) == 5 + 3 + 1 and [w.code for w in ex].count("end_far_from_node") == 5
-    assert ex[0].code == "dn_not_mapped"
+    assert len(ex) == 5 + 3 + 1 and [w.code for w in ex].count("END_FAR_FROM_NODE") == 5
+    assert ex[0].code == "DN_NOT_MAPPED"
     assert "... 23 more warning(s)" in text
     many = imp.ImportReport()
     for k in range(12):
@@ -428,7 +429,7 @@ def test_dead_end_rule_orients_from_dangling_end():
     sew = [seg("P1", [(0, 0), (30, 0)], None, None, 5.0, 4.5)]
     model, rep = build_model(acs, [], sew)
     c = model["conduits"][0]
-    assert c["ds_node_id"] == "A" and c["geom"][0] == [30, 0] and "direction_unknown" not in codes_of(rep)
+    assert c["ds_node_id"] == "A" and c["geom"][0] == [30, 0] and "DIRECTION_UNKNOWN" not in codes_of(rep)
     assert rep.counts["direction_dead_end"] == 1 and "dead-end rule" in c["notes"]
     assert rep.counts["dangling_dead_end"] == 1 and rep.counts["dangling_other"] == 0
     assert any("0 IS/IO upstream ends (expected), 1 dead-end upstream starts, 0 other" in x
@@ -438,7 +439,7 @@ def test_dead_end_rule_orients_from_dangling_end():
     model, rep = build_model(acs, [], sew)
     c = by_id(model["conduits"], "conduit_id")
     assert c["Q1"]["ds_node_id"] == "A" and c["Q2"]["ds_node_id"] == c["Q1"]["us_node_id"]
-    assert "direction_unknown" not in codes_of(rep)
+    assert "DIRECTION_UNKNOWN" not in codes_of(rep)
 
 
 def test_is_sewer_blank_us_orientation_and_breakdown():
@@ -452,7 +453,7 @@ def test_is_sewer_blank_us_orientation_and_breakdown():
     assert rep.counts["dangling_is_io"] == 1 and rep.counts["dangling_other"] == 0
     # IS sewer with both ends dangling is not oriented by the rules; IS rule needs exactly one chamber end
     model, rep = build_model([], [], [seg("S2", [(0, 0), (5, 0)], None, None, 2.0, 1.0, MAINTYPE="IS")])
-    assert "direction_unknown" in codes_of(rep) and rep.counts["direction_unknown"] == 1
+    assert "DIRECTION_UNKNOWN" in codes_of(rep) and rep.counts["direction_unknown"] == 1
 
 
 def test_dangling_other_listed_with_coordinates():
@@ -460,12 +461,12 @@ def test_dangling_other_listed_with_coordinates():
     # P1 ends at A (id says A is upstream) and dangles downstream at (50, 0): suspicious
     sew = [seg("P1", [(0, 0), (50, 0)], "A", None, 5.0, 4.5), seg("P2", [(70, 0), (100, 0)], "A", "B", 4.4, 4.0)]
     model, rep = build_model(acs, [], sew)
-    d = [w for w in rep.warnings if w.code == "dangling_end"]
+    d = [w for w in rep.warnings if w.code == "DANGLING_END"]
     assert rep.counts["dangling_other"] >= 1 and d and any(w.object_id == "P1" and "50.00, 0.00" in w.message
                                                            for w in d)
     many = [seg(f"M{i}", [(1000 + 10 * i, 0), (1005 + 10 * i, 0)], "A", "B", 5.0, 4.0) for i in range(30)]
     _m, rep = build_model(acs, [], many)
-    assert len([w for w in rep.warnings if w.code == "dangling_end"]) <= 20
+    assert len([w for w in rep.warnings if w.code == "DANGLING_END"]) <= 20
     assert rep.counts["dangling_other"] >= 20
 
 
@@ -552,8 +553,8 @@ def test_tee_splits_main_and_orients_branch(reverse, tmp_path):
     assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 1
     assert rep.counts.get("dangling_ends", 0) == 0 and rep.counts["dangling_other"] == 0
     assert rep.counts["direction_tee"] == 1 and rep.counts["conduits"] == 3
-    assert "tee_joined" in codes_of(rep) and "tee_adverse" not in codes_of(rep)
-    assert "direction_unknown" not in codes_of(rep)
+    assert "TEE_JOINED" in codes_of(rep) and "TEE_ADVERSE" not in codes_of(rep)
+    assert "DIRECTION_UNKNOWN" not in codes_of(rep)
     assert any(x.startswith("Tees: 1 branch end(s) joined mid-line to 1 sewer(s)") for x in rep.summary_lines(0))
     _check_clean(model, tmp_path)
 
@@ -561,7 +562,7 @@ def test_tee_splits_main_and_orients_branch(reverse, tmp_path):
 def test_tee_adverse_branch_invert_warns():
     acs, sew = tee_world(lambda x, off: [(x, 20), (x, off)], branch_levels=(19.5, 19.0))
     _m, rep = build_model(acs, [], sew)
-    assert "tee_adverse" in codes_of(rep)
+    assert "TEE_ADVERSE" in codes_of(rep)
 
 
 def test_two_tees_on_one_main_and_reversed_main(tmp_path):
@@ -630,7 +631,7 @@ def test_is_sewer_tee_downstream_free_upstream_is_end(tmp_path):
         c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
         assert c["IS1"]["ds_node_id"] == "T1" and n[c["IS1"]["us_node_id"]]["node_type"] == "is_end"
         assert rep.counts["direction_tee"] == 1 and rep.counts["dangling_is_io"] == 1
-        assert rep.counts["dangling_other"] == 0 and "direction_unknown" not in codes_of(rep)
+        assert rep.counts["dangling_other"] == 0 and "DIRECTION_UNKNOWN" not in codes_of(rep)
         assert c["M"]["length_m"] == pytest.approx(60) and c["M~2"]["length_m"] == pytest.approx(40)
 
 
@@ -724,7 +725,7 @@ def test_cp_radius_unassigned_and_example_cap():
     cps = [cp("N%d" % i, 20 + i, 30) for i in range(15)] + [cp("NEAR", 20, 10.0)]
     model, rep = build_model(acs, cps, pipes, FieldMap(diameter="HEIGHT"))
     assert rep.counts["cp_loads_unassigned"] == 15 and rep.counts["cp_loads_assigned"] == 1
-    assert sum(w.code == "cp_not_assigned" for w in rep.warnings) == 10
+    assert sum(w.code == "CP_NOT_ASSIGNED" for w in rep.warnings) == 10
     assert any("15 unassigned" in x for x in rep.summary_lines(0))
     # a wider radius picks them all up
     model, rep = build_model(acs, cps, pipes, FieldMap(diameter="HEIGHT"), ImportOptions(cp_load_search_m=40))

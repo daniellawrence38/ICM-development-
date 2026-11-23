@@ -6,7 +6,18 @@ import json
 import os
 from pathlib import Path
 
-DEFAULTS = {"model": "claude-opus-5-5", "effort": "medium", "wwnet_exe": ""}
+from . import shared
+
+DEFAULTS = {"model": "", "effort": ""}
+
+
+def _defaults() -> dict:
+    """Model / effort defaults from the shared assistant client (one list for both front ends)."""
+    try:
+        c = shared.assistant("client")
+        return {"model": c.DEFAULT_MODEL, "effort": c.DEFAULT_EFFORT}
+    except Exception:  # noqa: BLE001 - settings must load even if the shared modules are missing
+        return {"model": "claude-opus-5-5", "effort": "medium"}
 
 
 def appdata_dir() -> Path:
@@ -21,11 +32,11 @@ def settings_path() -> Path:
 
 
 def load() -> dict:
-    out = dict(DEFAULTS)
+    out = _defaults()
     try:
         data = json.loads(settings_path().read_text(encoding="utf-8"))
         if isinstance(data, dict):
-            out.update({k: v for k, v in data.items() if k in DEFAULTS and isinstance(v, str)})
+            out.update({k: v for k, v in data.items() if k in DEFAULTS and isinstance(v, str) and v})
     except (OSError, ValueError):
         pass
     return out
@@ -49,3 +60,8 @@ def history_path(map_key: str) -> Path:
     d = appdata_dir() / "history"
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{h}.json"
+
+
+def proposals_path(map_key: str) -> Path:
+    """Edits the assistant proposed in the last run for this project + map (applied on request)."""
+    return history_path(map_key).with_suffix(".proposals.json")

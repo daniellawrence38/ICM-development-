@@ -30,7 +30,7 @@ def test_end_to_end_apply_false(fake_arcpy, demo_gpkg, monkeypatch):
     assert a.writes == []
     assert rows(demo_gpkg, "select dn from wwn_conduits where conduit_id='P01'") == [(150,)]
     text_log = "\n".join(t for _, t in a.log)
-    assert "PROPOSED EDITS (1) - NOT applied" in text_log and "Apply proposed edits" in text_log
+    assert "PROPOSED EDITS (1) - NOT applied" in text_log and "Apply the proposals from the last run" in text_log
     assert "P01" in text_log and "225" in text_log
     assert "Done: proposed DN225" in text_log                      # streamed text
     assert res.stop_reason == "end_turn" and res.tool_calls == 1
@@ -43,6 +43,49 @@ def test_end_to_end_apply_false(fake_arcpy, demo_gpkg, monkeypatch):
     assert "SQL WHERE" in qf["description"] and "QGIS" not in qf["description"]
     assert "ArcGIS Pro" in c0["system"][0]["text"] and "embedded in QGIS" not in c0["system"][0]["text"]
     assert c0["model"] == "claude-sonnet-5-5"
+
+
+def test_apply_last_writes_exactly_the_saved_proposals(fake_arcpy, demo_gpkg, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    a, layers, client, factory = env(fake_arcpy, demo_gpkg, False, PROPOSE)
+    tools_impl.ask_assistant(a, Messages(a), "upsize P01", apply=False, client_factory=factory,
+                             layers_fn=lambda: layers)
+    assert rows(demo_gpkg, "select dn from wwn_conduits where conduit_id='P01'") == [(150,)]
+    n_calls = len(client.calls)
+    n = tools_impl.ask_assistant(a, Messages(a), "", apply_last=True, layers_fn=lambda: layers)
+    assert n == 1 and len(client.calls) == n_calls          # no new API call
+    assert rows(demo_gpkg, "select dn from wwn_conduits where conduit_id='P01'") == [(225,)]
+    with pytest.raises(RuntimeError, match="No saved proposals"):       # consumed
+        tools_impl.ask_assistant(a, Messages(a), "", apply_last=True, layers_fn=lambda: layers)
+
+
+def test_apply_last_refuses_when_data_changed(fake_arcpy, demo_gpkg, monkeypatch):
+    import sqlite3
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    a, layers, client, factory = env(fake_arcpy, demo_gpkg, False, PROPOSE)
+    tools_impl.ask_assistant(a, Messages(a), "upsize P01", apply=False, client_factory=factory,
+                             layers_fn=lambda: layers)
+    con = sqlite3.connect(demo_gpkg)
+    con.execute("update wwn_conduits set dn=300 where conduit_id='P01'")
+    con.commit()
+    con.close()
+    with pytest.raises(RuntimeError, match="no longer match"):
+        tools_impl.ask_assistant(a, Messages(a), "", apply_last=True, layers_fn=lambda: layers)
+    assert rows(demo_gpkg, "select dn from wwn_conduits where conduit_id='P01'") == [(300,)]
+    assert any("now 300" in t for lv, t in a.log if lv == "warn")
+
+
+def test_flow_tools_use_the_map_model(fake_arcpy, flows_gpkg, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    script = [msg([tool_use("t1", "trace_network", {"start_id": "P08"}),
+                   tool_use("t2", "design_summary", {})], "tool_use"),
+              msg([text("P08 carries the whole catchment.")])]
+    a, layers, client, factory = env(fake_arcpy, flows_gpkg, False, script)
+    tools_impl.ask_assistant(a, Messages(a), "what flows in P08?", client_factory=factory,
+                             layers_fn=lambda: layers)
+    results = client.calls[1]["messages"][-1]["content"]
+    assert not any(r.get("is_error") for r in results)
+    assert '"start_conduit": "P08"' in results[0]["content"] and '"conduits": 11' in results[1]["content"]
 
 
 def test_end_to_end_apply_true(fake_arcpy, demo_gpkg, monkeypatch):

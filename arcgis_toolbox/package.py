@@ -10,7 +10,6 @@ Layout inside the zip (extract anywhere, then add WWNet.pyt as a toolbox in Pro)
     WWNet-ArcGIS/templates/import/*.toml       import templates (Import Sewer Data)
     WWNet-ArcGIS/templates/profiles/*.csv      example diurnal profile (APPROXIMATE)
     WWNet-ArcGIS/rulesets/*.toml
-    WWNet-ArcGIS/bin/wwnet.exe                only with --cli <path>
     WWNet-ArcGIS/vendor/...                   only with --vendor-dir <path> (no-install bundle: anthropic,
                                               pydantic, httpx2, jiter, truststore, typing_extensions,
                                               wwnet_native ...; wwnet_arcgis/vendor.py puts it first on sys.path)
@@ -20,7 +19,7 @@ Layout inside the zip (extract anywhere, then add WWNet.pyt as a toolbox in Pro)
 (for Pro's Python: 3.11 win_amd64). anyio*, sniffio*, idna* and certifi* are never copied, even if present:
 Pro's own versions must stay in use (see wwnet_arcgis/vendor.py).
 
-Usage: python package.py [--cli path/to/wwnet.exe] [--vendor-dir vendor] [--out dist]
+Usage: python package.py [--vendor-dir vendor] [--out dist]
 """
 from __future__ import annotations
 
@@ -66,7 +65,7 @@ def vendor_files(vendor_dir: Path) -> dict:
     return out
 
 
-def collect(cli: Path | None = None, vendor_dir: Path | None = None) -> dict:
+def collect(vendor_dir: Path | None = None) -> dict:
     """Return {archive path inside TOP: bytes or Path}."""
     files: dict = {}
     files["WWNet.pyt"] = HERE / "WWNet.pyt"
@@ -85,19 +84,17 @@ def collect(cli: Path | None = None, vendor_dir: Path | None = None) -> dict:
         files[f"templates/profiles/{p.name}"] = p
     for p in sorted((REPO / "rulesets").glob("*.toml")):
         files[f"rulesets/{p.name}"] = p
-    if cli:
-        files[f"bin/{cli.name}"] = cli
     if vendor_dir:
         files.update(vendor_files(vendor_dir))
     return files
 
 
-def build(out_dir: Path | None = None, cli: Path | None = None, vendor_dir: Path | None = None) -> Path:
+def build(out_dir: Path | None = None, vendor_dir: Path | None = None) -> Path:
     out_dir = out_dir or HERE / "dist"
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / f"wwnet-arcgis-{version()}.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        for arc, src in collect(cli, vendor_dir).items():
+        for arc, src in collect(vendor_dir).items():
             data = src if isinstance(src, bytes) else Path(src).read_bytes()
             z.writestr(f"{TOP}/{arc}", data)
     return out
@@ -105,12 +102,9 @@ def build(out_dir: Path | None = None, cli: Path | None = None, vendor_dir: Path
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cli", type=Path, help="wwnet.exe to bundle under bin/")
     ap.add_argument("--vendor-dir", type=Path, help="prepared vendor folder to copy to vendor/")
     ap.add_argument("--out", type=Path)
     a = ap.parse_args()
-    if a.cli and not a.cli.is_file():
-        sys.exit(f"--cli {a.cli} not found")
     if a.vendor_dir and not a.vendor_dir.is_dir():
         sys.exit(f"--vendor-dir {a.vendor_dir} not found")
-    print(f"wrote {build(a.out, a.cli, a.vendor_dir)}")
+    print(f"wrote {build(a.out, a.vendor_dir)}")

@@ -101,7 +101,7 @@ def test_set_settings_never_echoes_key(fake_win):
     from wwnet_arcgis.messages import Messages
     import fake_arcpy
     a = fake_arcpy.make_fake()
-    tools_impl.set_settings(Messages(a), "sk-ant-TOPSECRET", False, "claude-haiku-5-5", "low", "")
+    tools_impl.set_settings(Messages(a), "sk-ant-TOPSECRET", False, "claude-haiku-5-5", "low")
     text = "\n".join(t for _, t in a.log)
     assert "TOPSECRET" not in text and "stored encrypted" in text
     assert settings.load()["model"] == "claude-haiku-5-5"

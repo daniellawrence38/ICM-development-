@@ -16,82 +16,75 @@ from wwnet_arcgis import settings as _settings  # noqa: E402
 from wwnet_arcgis import tools_impl as impl  # noqa: E402
 from wwnet_arcgis.messages import Messages  # noqa: E402
 
-MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
-EFFORTS = ["low", "medium", "high"]
+try:  # one model list for both front ends (the shared assistant client)
+    from wwnet_arcgis import shared as _shared  # noqa: E402
+    _client = _shared.assistant("client")
+    MODELS = [m for m, _ in _client.MODELS]
+    EFFORTS = list(_client.EFFORTS)
+except Exception:  # noqa: BLE001 - the toolbox must still open
+    MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
+    EFFORTS = ["low", "medium", "high"]
 MULTILINE = "{E5456E51-0C41-4797-9EE4-5269820C6F0E}"
 
 
 def _p(name, label, datatype, direction="Input", required=True, multi=False, default=None,
-       values=None, filetype=None):
+       values=None, filetype=None, category=None):
     p = arcpy.Parameter(displayName=label, name=name, datatype=datatype,
                         parameterType="Required" if required else "Optional",
                         direction=direction, multiValue=multi)
     if default is not None:
         p.value = default
-    if values:
+    if values is not None:
         p.filter.type = "ValueList"
         p.filter.list = list(values)
     if filetype:
         p.filter.list = list(filetype)
+    if category:
+        p.category = category
     return p
 
 
-def _text(p):
-    return p.valueAsText if p.value is not None else None
+def _model_param(label="WWNet model (GeoPackage)"):
+    """The model: browse to a .gpkg, or leave the model shown in the active map (filled in on open)."""
+    return _p("gpkg", label, "DEFile", filetype=["gpkg"])
 
 
-def _layer_obj(param):
-    """Resolve a layer parameter to a map Layer (has .name / .dataSource). Accepts a map layer, a
-    layer name, or a dataset path (e.g. C:\\m.gpkg\\main.wwn_nodes): a path is matched to the map
-    layer showing it, else returned as a lightweight stand-in so tools can still read the table."""
-    import types
-    from wwnet_arcgis import maplayers as _ml
-    v = param.value
-    if _ml.layer_source(v):
-        return v
-    text = param.valueAsText
-    layers = list(arcpy.mp.ArcGISProject("CURRENT").activeMap.listLayers())
-    for lyr in layers:
-        if _ml.layer_name(lyr) == text:
-            return lyr
-    norm = (text or "").replace("/", "\\").lower()
-    for lyr in layers:
-        if _ml.layer_source(lyr).replace("/", "\\").lower() == norm:
-            return lyr
-    if ".gpkg" in norm:
-        return types.SimpleNamespace(name=os.path.basename(text), dataSource=text, isFeatureLayer=True,
-                                     isGroupLayer=False, isBroken=False, supports=lambda prop: True)
-    raise RuntimeError(f"Layer {text!r} not found in the active map.")
+def _model_out():
+    """Derived output = the model, so tools chain in ModelBuilder (Import > Check > Design > Simulate)."""
+    return _p("out_gpkg", "Model (output)", "DEFile", "Output", required=False)
 
 
-def _ml_name(lyr):
-    from wwnet_arcgis import maplayers as _ml
-    return _ml.layer_name(lyr)
+class _Params(object):
+    """Parameters by name."""
 
+    def __init__(self, parameters):
+        self.by = {p.name: p for p in parameters}
 
-class Toolbox(object):
-    def __init__(self):
-        self.label = "WWNet"
-        self.alias = "wwnet"
-        self.tools = [NewModel, ImportSewerData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity,
-                      SetAssistantApiKey, AskWWNetAssistant, VerifySetup]
+    def __getitem__(self, name):
+        return self.by[name]
 
+    def __contains__(self, name):
+        return name in self.by
 
-class NewModel(object):
-    def __init__(self):
-        self.label = "New Model"
-        self.description = "Create an empty WWNet GeoPackage (EPSG:7850) and add it to the map."
-        self.category = "Model"
+    def text(self, name, default=None):
+        p = self.by.get(name)
+        return p.valueAsText if p is not None and p.value is not None else default
 
-    def getParameterInfo(self):
-        out = _p("out_gpkg", "Output GeoPackage", "DEFile", "Output", filetype=["gpkg"])
-        return [out, _p("add_to_map", "Add to active map", "GPBoolean", required=False, default=True),
-                _p("overwrite", "Overwrite if it exists", "GPBoolean", required=False, default=False)]
+    def val(self, name, default=None):
+        p = self.by.get(name)
+        return p.value if p is not None and p.value is not None else default
 
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.new_model(arcpy, Messages(arcpy), parameters[0].valueAsText,
-                       bool(parameters[1].value), bool(parameters[2].value))
+    def flag(self, name, default=False):
+        return bool(self.val(name, default))
+
+    def num(self, name, default=None):
+        v = self.val(name, default)
+        return None if v is None else float(v)
+
+    def fresh(self, name):
+        """True when the parameter has a value the user has not validated yet (just changed)."""
+        p = self.by.get(name)
+        return p is not None and p.value is not None and not p.hasBeenValidated
 
 
 def _source(param):
@@ -101,18 +94,147 @@ def _source(param):
     return param.value if hasattr(param.value, "dataSource") else param.valueAsText
 
 
-class ImportSewerData(object):
-    # fixed parameter positions: 0 ACs, 1 connection points, 2 sewers, 3 output, 4 snap, 5 grade source,
-    # 6 selected only, 7 add to map, 8.. one Field parameter per role in sewer_import.FIELD_ROLES
-    _LAYER_PARAM = {"ac": 0, "cp": 1, "sewer": 2}
-    _LAYER_NAME = {"ac": "ac_layer", "cp": "cp_layer", "sewer": "sewer_layer"}
+class _Tool(object):
+    """Base: label / description / category from class attributes; the vendor folder is re-activated
+    before every run (Pro restores sys.path); the model parameter defaults to the model in the map."""
+    label = ""
+    description = ""
+    category = ""
 
     def __init__(self):
-        self.label = "Import Sewer Data"
-        self.description = ("Convert Water Corporation (WA) gravity sewer GIS layers (access chambers, "
-                            "connection points, gravity sewers) into a new WWNet GeoPackage (EPSG:7850), "
-                            "validate it and add it to the map. Source field roles are selectable.")
-        self.category = "Data"
+        self.label, self.description, self.category = type(self).label, type(self).description, type(self).category
+        self.canRunInBackground = False
+
+    def getParameterInfo(self):
+        return []
+
+    def isLicensed(self):
+        return True
+
+    def updateParameters(self, parameters):
+        p = _Params(parameters)
+        if "gpkg" in p and p["gpkg"].direction == "Input" and p["gpkg"].value is None \
+                and not getattr(p["gpkg"], "altered", False):
+            try:
+                from wwnet_arcgis import maplayers
+                found = maplayers.default_model(arcpy)
+                if found:
+                    p["gpkg"].value = found
+            except Exception:  # noqa: BLE001 - validation must never fail
+                pass
+        try:
+            self.update(p)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def update(self, p):
+        pass
+
+    def updateMessages(self, parameters):
+        return
+
+    def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        p = _Params(parameters)
+        out = self.run(p, Messages(arcpy))
+        if "out_gpkg" in p and out:
+            p["out_gpkg"].value = out
+
+    def run(self, p, msgs):
+        raise NotImplementedError
+
+
+def _runs_list(p, *names):
+    """Fill run value lists ('label (run_id)', newest first) when the model changes."""
+    from wwnet_arcgis import gpkg
+    if not p.val("gpkg") or not (p.fresh("gpkg") or any(not p[n].filter.list for n in names)):
+        return []
+    titles = gpkg.run_titles(p.text("gpkg"))
+    for n in names:
+        p[n].filter.list = titles
+    return titles
+
+
+# ---------------------------------------------------------------------- Model
+
+class NewModel(_Tool):
+    label = "New Model"
+    description = "Create an empty WWNet GeoPackage (EPSG:7850) and add it to the map."
+    category = "Model"
+
+    def getParameterInfo(self):
+        return [_p("out_gpkg", "Output GeoPackage", "DEFile", "Output", filetype=["gpkg"]),
+                _p("add_to_map", "Add to active map", "GPBoolean", required=False, default=True),
+                _p("overwrite", "Overwrite if it exists", "GPBoolean", required=False, default=False)]
+
+    def run(self, p, msgs):
+        return impl.new_model(arcpy, msgs, p.text("out_gpkg"), p.flag("add_to_map", True), p.flag("overwrite"))
+
+
+class AddModelToMap(_Tool):
+    label = "Add Model To Map"
+    description = ("Add the layers of a WWNet GeoPackage to the active map (WWNet group): model layers, and the "
+                   "Design / Simulation results and Issues layers once they hold data. Upgrades older models.")
+    category = "Model"
+
+    def getParameterInfo(self):
+        return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
+                _p("symbolize", "Apply symbology", "GPBoolean", required=False, default=True)]
+
+    def updateParameters(self, parameters):   # no map default: the point is adding a model that is not there
+        return
+
+    def run(self, p, msgs):
+        impl.add_model_to_map(arcpy, msgs, p.text("gpkg"), p.flag("symbolize", True))
+
+
+class ModelSettings(_Tool):
+    label = "Model Settings"
+    description = ("Show and change the model's loading settings: ADWF per connection (L/day), peaking factor "
+                   "(GSDF = ADWF x factor) and the default diurnal profile. Lists the profiles in the model.")
+    category = "Model"
+
+    def getParameterInfo(self):
+        return [_model_param(),
+                _p("adwf_per_connection_lpd", "ADWF per connection (L/day)", "GPDouble", required=False),
+                _p("peaking_factor", "Peaking factor (GSDF = ADWF x factor)", "GPDouble", required=False),
+                _p("default_profile", "Default diurnal profile", "GPString", required=False,
+                   values=[impl.NONE_PROFILE]),
+                _model_out()]
+
+    def update(self, p):
+        if not p.val("gpkg") or not p.fresh("gpkg"):
+            return
+        from wwnet_arcgis import gpkg
+        path = p.text("gpkg")
+        m = gpkg.meta(path)
+        p["default_profile"].filter.list = [impl.NONE_PROFILE] + gpkg.profile_ids(path)
+        for name, key in (("adwf_per_connection_lpd", "adwf_per_connection_lpd"),
+                          ("peaking_factor", "peaking_factor")):
+            if not getattr(p[name], "altered", False):
+                try:
+                    p[name].value = float(m.get(key))
+                except (TypeError, ValueError):
+                    pass
+        if not getattr(p["default_profile"], "altered", False):
+            p["default_profile"].value = m.get("default_profile") or impl.NONE_PROFILE
+
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.model_settings(msgs, path, p.num("adwf_per_connection_lpd"), p.num("peaking_factor"),
+                            p.text("default_profile"))
+        return path
+
+
+# ---------------------------------------------------------------------- Data
+
+class ImportSewerData(_Tool):
+    label = "Import Sewer Data"
+    description = ("Convert Water Corporation (WA) gravity sewer GIS layers (access chambers, connection points, "
+                   "gravity sewers) into a new WWNet GeoPackage (EPSG:7850) with connection point loads, check it "
+                   "and add it to the map. Import warnings and check issues go to the model's Issues layer.")
+    category = "Data"
+    _LAYER_NAME = {"ac": "ac_layer", "cp": "cp_layer", "sewer": "sewer_layer"}
 
     def getParameterInfo(self):
         from wwnet_arcgis import sewer_import as si
@@ -124,269 +246,346 @@ class ImportSewerData(object):
         sw.filter.list = ["Polyline"]
         params = [ac, cp, sw,
                   _p("out_gpkg", "Output GeoPackage", "DEFile", "Output", filetype=["gpkg"]),
-                  _p("snap", "Snap tolerance (m)", "GPDouble", required=False, default=0.5),
-                  _p("grade_source", "Grade source", "GPString", required=False, default="levels",
-                     values=["levels", "field"]),
                   _p("use_selected", "Use selected features only", "GPBoolean", required=False, default=False),
-                  _p("add_to_map", "Add to map", "GPBoolean", required=False, default=True)]
+                  _p("add_to_map", "Add to map", "GPBoolean", required=False, default=True),
+                  _p("load_cps", "Create loads from connection points", "GPBoolean", required=False, default=True,
+                     category="Connection point loads"),
+                  _p("cp_radius", "Connection point search distance (m)", "GPDouble", required=False, default=10.0,
+                     category="Connection point loads"),
+                  _p("snap", "Snap tolerance (m)", "GPDouble", required=False, default=0.5, category="Options"),
+                  _p("grade_source", "Grade source", "GPString", required=False, default="levels",
+                     values=["levels", "field"], category="Options")]
         for role, layer_key, label, required in si.FIELD_ROLES:
-            f = _p("f_" + role, label, "Field", required=required)
+            f = _p("f_" + role, label, "Field", required=required, category="Source fields")
             f.parameterDependencies = [self._LAYER_NAME[layer_key]]  # Pro requires parameter NAMES
-            f.category = "Source fields"
             params.append(f)
-        loads = _p("load_cps", "Create loads from connection points", "GPBoolean", required=False, default=True)
-        loads.category = "Connection point loads"
-        radius = _p("cp_radius", "Connection point search distance (m)", "GPDouble", required=False, default=10.0)
-        radius.category = "Connection point loads"
-        return params + [loads, radius]
+        return params
 
-    def updateParameters(self, parameters):
+    def update(self, p):
         from wwnet_arcgis import sewer_import as si
-        for layer_key, idx in self._LAYER_PARAM.items():
-            p = parameters[idx]
-            if p.value is None or p.hasBeenValidated:
+        for layer_key, pname in self._LAYER_NAME.items():
+            if not p.fresh(pname):
                 continue
             try:
-                found = impl.sewer_field_defaults(arcpy, _source(p))
-            except Exception:
+                found = impl.sewer_field_defaults(arcpy, _source(p[pname]))
+            except Exception:  # noqa: BLE001
                 continue
-            for n, (role, k, _l, _q) in enumerate(si.FIELD_ROLES):
+            for role, k, _l, _q in si.FIELD_ROLES:
                 if k == layer_key:
-                    parameters[8 + n].value = found.get(role) or None
-        return
+                    p["f_" + role].value = found.get(role) or None
 
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+    def run(self, p, msgs):
         from wwnet_arcgis import sewer_import as si
-        fields = {role: (parameters[8 + n].valueAsText or "")
-                  for n, (role, _k, _l, _q) in enumerate(si.FIELD_ROLES)}
-        k = 8 + len(si.FIELD_ROLES)       # first connection-point-load parameter
-        impl.import_sewer_data(arcpy, Messages(arcpy), _source(parameters[0]), _source(parameters[1]),
-                               _source(parameters[2]), parameters[3].valueAsText, fields,
-                               parameters[4].value if parameters[4].value is not None else 0.5,
-                               parameters[5].valueAsText or "levels", bool(parameters[6].value),
-                               bool(parameters[7].value),
-                               load_connection_points=bool(parameters[k].value) if parameters[k].value is not None
-                               else True,
-                               cp_load_search_m=parameters[k + 1].value)
+        fields = {role: (p.text("f_" + role) or "") for role, _k, _l, _q in si.FIELD_ROLES}
+        impl.import_sewer_data(arcpy, msgs, _source(p["ac_layer"]), _source(p["cp_layer"]),
+                               _source(p["sewer_layer"]), p.text("out_gpkg"), fields, p.num("snap", 0.5),
+                               p.text("grade_source", "levels"), p.flag("use_selected"), p.flag("add_to_map", True),
+                               load_connection_points=p.flag("load_cps", True), cp_load_search_m=p.num("cp_radius"))
 
 
-class ImportDiurnalProfile(object):
-    def __init__(self):
-        self.label = "Import Diurnal Profile"
-        self.description = ("Import a diurnal flow profile (time as hh:mm or minutes, factor; any interval, "
-                            "header optional) from a CSV / TXT file, or from text pasted out of InfoWorks ICM "
-                            "(tab-separated Time / Factor), into a WWNet GeoPackage. Upgrades the model to "
-                            "schema v2 if needed. The mean factor is checked, not silently changed.")
-        self.category = "Data"
+class ImportDiurnalProfile(_Tool):
+    label = "Import Diurnal Profile"
+    description = ("Import a diurnal flow profile (time as hh:mm or minutes, factor; any interval, header optional) "
+                   "from a CSV / TXT file, or from text pasted out of InfoWorks ICM (tab-separated Time / Factor). "
+                   "The mean factor is checked, not silently changed.")
+    category = "Data"
 
     def getParameterInfo(self):
         pasted = _p("pasted", "Or paste profile text (Time<TAB>Factor)", "GPString", required=False)
         pasted.controlCLSID = MULTILINE
-        return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
-                _p("profile_id", "Profile id", "GPString"),
+        return [_model_param(), _p("profile_id", "Profile id", "GPString"),
                 _p("csv", "Profile CSV / TXT file", "DEFile", required=False, filetype=["csv", "txt"]),
                 _p("description", "Description", "GPString", required=False),
                 _p("set_default", "Set as the model's default profile", "GPBoolean", required=False, default=True),
                 _p("normalise", "Normalise to mean 1", "GPBoolean", required=False, default=False),
-                pasted]
+                pasted, _model_out()]
 
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.import_profile(Messages(arcpy), parameters[0].valueAsText, parameters[1].valueAsText,
-                            _text(parameters[2]), _text(parameters[3]) or "", bool(parameters[4].value),
-                            bool(parameters[5].value), _text(parameters[6]))
-
-
-class AddModelToMap(object):
-    def __init__(self):
-        self.label = "Add Model To Map"
-        self.description = "Add the wwn_* layers of an existing WWNet GeoPackage to the active map."
-        self.category = "Model"
-
-    def getParameterInfo(self):
-        return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
-                _p("symbolize", "Apply symbology", "GPBoolean", required=False, default=True)]
-
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.add_model_to_map(arcpy, Messages(arcpy), parameters[0].valueAsText, bool(parameters[1].value))
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.import_profile(msgs, path, p.text("profile_id"), p.text("csv"), p.text("description", ""),
+                            p.flag("set_default", True), p.flag("normalise"), p.text("pasted"))
+        return path
 
 
-class CheckModel(object):
-    def __init__(self):
-        self.label = "Check Model"
-        self.description = "Run `wwnet check` and report topology / data issues."
-        self.category = "Analysis"
+class AssignProfile(_Tool):
+    label = "Assign Profile"
+    description = ("Set the diurnal profile of the node loads of the selected nodes, the selected node loads or "
+                   "sub-catchments, or all of them. '(model default)' clears it so the default profile applies.")
+    category = "Data"
 
     def getParameterInfo(self):
-        return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
-                _p("out_table", "Output issues table (optional)", "DETable", "Output", required=False)]
+        return [_model_param(),
+                _p("target", "Assign to", "GPString", default=list(impl.ASSIGN_TARGETS)[0],
+                   values=list(impl.ASSIGN_TARGETS)),
+                _p("profile", "Profile", "GPString", values=[impl.DEFAULT_PROFILE]), _model_out()]
 
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.check_model(arcpy, Messages(arcpy), parameters[0].valueAsText, _text(parameters[1]))
+    def update(self, p):
+        if p.val("gpkg") and (p.fresh("gpkg") or len(p["profile"].filter.list) <= 1):
+            from wwnet_arcgis import gpkg
+            p["profile"].filter.list = [impl.DEFAULT_PROFILE] + gpkg.profile_ids(p.text("gpkg"))
 
-
-class RunDesign(object):
-    def __init__(self):
-        self.label = "Run Design"
-        self.description = "Run `wwnet design` (DS 50 accumulation, hydraulics and rule checks)."
-        self.category = "Analysis"
-
-    def getParameterInfo(self):
-        return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
-                _p("show_layer", "Show results layer on map", "GPBoolean", required=False, default=True),
-                _p("add_table", "Add results table to map", "GPBoolean", required=False, default=False),
-                _p("select_failed", "Select failed conduits", "GPBoolean", required=False, default=True)]
-
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.run_design(arcpy, Messages(arcpy), parameters[0].valueAsText, bool(parameters[1].value),
-                        bool(parameters[2].value), bool(parameters[3].value))
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.assign_profile(arcpy, msgs, path, p.text("target"), p.text("profile"))
+        return path
 
 
-class RunSimulation(object):
-    def __init__(self):
-        self.label = "Run Simulation"
-        self.description = ("Run the EPA SWMM dynamic-wave engine (embedded, no install) on the model: dry weather "
-                            "flow from node loads and sub-catchments with their diurnal profiles. Results go to "
-                            "the wwn_sim_* tables and a temporary results layer coloured by peak d/D.")
-        self.category = "Analysis"
+# ---------------------------------------------------------------------- Analysis
+
+class CheckModel(_Tool):
+    label = "Check Model"
+    description = ("Check the model's topology and data (inverts, grades, connectivity, loads). Issues are listed "
+                   "and shown in the model's Issues layer (click a point to see it in the attribute table).")
+    category = "Analysis"
 
     def getParameterInfo(self):
-        return [_p("gpkg", "WWNet GeoPackage", "DEFile", filetype=["gpkg"]),
+        return [_model_param(),
+                _p("show_layer", "Show the Issues layer on the map", "GPBoolean", required=False, default=True),
+                _model_out()]
+
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.check_model(arcpy, msgs, path, p.flag("show_layer", True))
+        return path
+
+
+class RunDesign(_Tool):
+    label = "Run Design"
+    description = ("Steady DS 50 design: GSDF accumulation, Colebrook-White capacity and the DS 50 checks. "
+                   "Results go to the model's Design results layer (kept in the GeoPackage).")
+    category = "Analysis"
+
+    def getParameterInfo(self):
+        return [_model_param(),
+                _p("show_layer", "Show the Design results layer", "GPBoolean", required=False, default=True),
+                _p("select_failed", "Select failed conduits", "GPBoolean", required=False, default=True),
+                _model_out()]
+
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.run_design(arcpy, msgs, path, p.flag("show_layer", True), p.flag("select_failed", True))
+        return path
+
+
+class RunSimulation(_Tool):
+    label = "Run Simulation"
+    description = ("Run the embedded EPA SWMM dynamic-wave engine: dry weather flow from node loads and "
+                   "sub-catchments with their diurnal profiles. The run is stored with its label; the Simulation "
+                   "results layers show peak d/D (green < 0.5, yellow < 0.75, orange < 1.0, red surcharged).")
+    category = "Analysis"
+
+    def getParameterInfo(self):
+        return [_model_param(),
+                _p("label", "Run label (e.g. existing x1.0)", "GPString", required=False),
                 _p("duration_h", "Duration (h)", "GPDouble", required=False, default=48.0),
                 _p("warmup_h", "Warm-up (h)", "GPDouble", required=False, default=24.0),
-                _p("roughness", "Roughness", "GPString", required=False, default="manning",
-                   values=["manning", "ks"]),
-                _p("manning_n", "Manning n", "GPDouble", required=False, default=0.013),
                 _p("flow_scale", "Flow scale", "GPDouble", required=False, default=1.0),
-                _p("show_layer", "Show results layer on map", "GPBoolean", required=False, default=True),
+                _p("series_selected", "Store time series for the selected conduits", "GPBoolean", required=False,
+                   default=True),
+                _p("show_layer", "Show the Simulation results layers", "GPBoolean", required=False, default=True),
+                _p("roughness", "Roughness", "GPString", required=False, default="ks", values=["ks", "manning"],
+                   category="Options"),
+                _p("manning_n", "Manning n (roughness manning)", "GPDouble", required=False, default=0.013,
+                   category="Options"),
                 _p("export_inp", "Export SWMM .inp (optional)", "DEFile", "Output", required=False,
-                   filetype=["inp"])]
+                   filetype=["inp"], category="Options"),
+                _model_out()]
 
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        v = lambda i, d: parameters[i].value if parameters[i].value is not None else d  # noqa: E731
-        impl.run_simulation(arcpy, Messages(arcpy), parameters[0].valueAsText, float(v(1, 48.0)),
-                            float(v(2, 24.0)), parameters[3].valueAsText or "manning", float(v(4, 0.013)),
-                            float(v(5, 1.0)), bool(v(6, True)), _text(parameters[7]))
+    def update(self, p):
+        p["manning_n"].enabled = (p.text("roughness", "ks") == "manning")
+
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.run_simulation(arcpy, msgs, path, p.num("duration_h", 48.0), p.num("warmup_h", 24.0),
+                            p.text("roughness", "ks"), p.num("manning_n", 0.013), p.num("flow_scale", 1.0),
+                            p.flag("show_layer", True), p.text("export_inp"), p.text("label", ""),
+                            p.flag("series_selected", True))
+        return path
 
 
-class Trace(object):
-    def __init__(self):
-        self.label = "Trace"
-        self.description = "Trace upstream / downstream from a node and select the traced features."
-        self.category = "Analysis"
+class Trace(_Tool):
+    label = "Trace"
+    description = ("Trace upstream / downstream from a node or a conduit (leave the start blank to use the one "
+                   "selected on the map), select the traced features and report the connections, ADWF and design "
+                   "GSDF arriving at the start.")
+    category = "Analysis"
 
     def getParameterInfo(self):
-        nodes = _p("nodes", "WWNet Nodes layer", "GPFeatureLayer")
-        node = _p("node_id", "Start node", "GPString")
-        node.filter.type = "ValueList"
-        node.filter.list = []
-        return [nodes, node,
+        return [_model_param(),
+                _p("start", "Start node or conduit id (blank = selected on the map)", "GPString", required=False),
                 _p("direction", "Direction", "GPString", default="Upstream",
                    values=["Upstream", "Downstream", "Both"]),
                 _p("select", "Select traced features on the map", "GPBoolean", required=False, default=True)]
 
-    def updateParameters(self, parameters):
-        if parameters[0].value and not parameters[0].hasBeenValidated:
-            try:
-                parameters[1].filter.list = impl.node_ids(arcpy, _layer_obj(parameters[0]))
-            except Exception:
-                parameters[1].filter.list = []
-        return
-
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.trace(arcpy, Messages(arcpy), _layer_obj(parameters[0]), parameters[1].valueAsText,
-                   parameters[2].valueAsText, bool(parameters[3].value))
+    def run(self, p, msgs):
+        impl.trace(arcpy, msgs, p.text("gpkg"), p.text("start"), p.text("direction", "Upstream"),
+                   p.flag("select", True))
 
 
-class PipeCapacity(object):
-    def __init__(self):
-        self.label = "Pipe Capacity"
-        self.description = "Colebrook-White capacity of a circular gravity sewer (DS 50 basis)."
-        self.category = "Calculators"
+# ---------------------------------------------------------------------- Results
+
+class ShowSimulationRun(_Tool):
+    label = "Show Simulation Run"
+    description = "Show a stored simulation run (the latest 10 are kept) in the Simulation results layers."
+    category = "Results"
 
     def getParameterInfo(self):
-        return [_p("dn", "Diameter DN (mm)", "GPLong", default=225, values=[150, 225, 300, 375, 450, 525, 600]),
+        return [_model_param(), _p("run", "Run", "GPString", values=[]),
+                _p("show_layer", "Show the Simulation results layers", "GPBoolean", required=False, default=True)]
+
+    def update(self, p):
+        titles = _runs_list(p, "run")
+        if titles and p["run"].value is None:
+            p["run"].value = titles[0]
+
+    def run(self, p, msgs):
+        impl.show_simulation_run(arcpy, msgs, p.text("gpkg"), p.text("run", "latest"), p.flag("show_layer", True))
+
+
+class CompareSimulationRuns(_Tool):
+    label = "Compare Simulation Runs"
+    description = ("Compare two stored runs per conduit (B minus A): change in peak flow and peak d/D, newly "
+                   "surcharged and relieved conduits, in messages and the Simulation comparison layer.")
+    category = "Results"
+
+    def getParameterInfo(self):
+        return [_model_param(), _p("run_a", "Run A (baseline)", "GPString", values=[]),
+                _p("run_b", "Run B", "GPString", values=[]),
+                _p("show_layer", "Show the Simulation comparison layer", "GPBoolean", required=False, default=True)]
+
+    def update(self, p):
+        titles = _runs_list(p, "run_a", "run_b")
+        if len(titles) >= 2 and p["run_a"].value is None and p["run_b"].value is None:
+            p["run_a"].value, p["run_b"].value = titles[1], titles[0]
+
+    def run(self, p, msgs):
+        impl.compare_simulation_runs(arcpy, msgs, p.text("gpkg"), p.text("run_a", "previous"),
+                                     p.text("run_b", "latest"), p.flag("show_layer", True))
+
+
+class PlotHydrograph(_Tool):
+    label = "Plot Hydrograph"
+    description = ("Flow against time for conduits with a stored series in a run (the 5 nearest the outlet, plus "
+                   "the conduits selected when the run was made): peaks in the messages, optional CSV, and a "
+                   "line chart on the model's time series table.")
+    category = "Results"
+
+    def getParameterInfo(self):
+        return [_model_param(), _p("run", "Run", "GPString", values=[]),
+                _p("ids", "Conduits / nodes", "GPString", multi=True, required=False, values=[]),
+                _p("out_csv", "Output CSV (optional)", "DEFile", "Output", required=False, filetype=["csv"]),
+                _p("chart", "Create a chart", "GPBoolean", required=False, default=True)]
+
+    def update(self, p):
+        from wwnet_arcgis import engine, gpkg
+        titles = _runs_list(p, "run")
+        if titles and p["run"].value is None:
+            p["run"].value = titles[0]
+        if p.val("gpkg") and p.val("run") and (p.fresh("run") or p.fresh("gpkg") or not p["ids"].filter.list):
+            p["ids"].filter.list = gpkg.series_ids(p.text("gpkg"), engine.run_key(p.text("run")))
+
+    def run(self, p, msgs):
+        ids = p.val("ids")
+        ids = [str(v) for v in (ids if isinstance(ids, (list, tuple)) else str(ids).split(";"))] if ids else []
+        impl.plot_hydrograph(arcpy, msgs, p.text("gpkg"), p.text("run", "latest"), ids, p.text("out_csv"),
+                             p.flag("chart", True))
+
+
+# ---------------------------------------------------------------------- Calculators
+
+class PipeCapacity(_Tool):
+    label = "Pipe Capacity"
+    description = ("Colebrook-White capacity of a circular gravity sewer of any DN; with a flow, the depth at that "
+                   "flow and (DN150 to DN600) the DS 50 checks.")
+    category = "Calculators"
+
+    def getParameterInfo(self):
+        return [_p("dn", "Diameter DN (mm)", "GPLong", default=225),
                 _p("grade", "Grade (1 in x)", "GPDouble", default=300.0),
                 _p("ks", "Roughness ks (mm)", "GPDouble", required=False, default=1.0),
                 _p("flow", "Design flow (L/s, optional)", "GPDouble", required=False),
                 _p("full_flow", "Full-bore capacity (L/s)", "GPDouble", "Output", required=False)]
 
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        res = impl.pipe_capacity(Messages(arcpy), parameters[0].value, parameters[1].value,
-                                 parameters[2].value, parameters[3].value)
-        parameters[4].value = res["full_flow_lps"]
+    def run(self, p, msgs):
+        res = impl.pipe_capacity(msgs, p.val("dn"), p.val("grade"), p.val("ks"), p.val("flow"))
+        p["full_flow"].value = res["full_flow_lps"]
 
 
-class SetAssistantApiKey(object):
-    def __init__(self):
-        self.label = "Set Assistant API Key"
-        self.description = ("Store the Anthropic API key (Windows DPAPI, current user) and assistant "
-                            "settings. The key is never shown in messages.")
-        self.category = "Assistant"
+# ---------------------------------------------------------------------- Assistant / Setup
+
+class AskWWNetAssistant(_Tool):
+    label = "Ask WWNet Assistant"
+    description = ("Ask the Claude-powered assistant about the model: flows, simulation runs, design checks and "
+                   "data. Layer attribute data is sent to Anthropic when the assistant uses its tools.")
+    category = "Assistant"
+
+    def getParameterInfo(self):
+        cfg = _settings.load()
+        q = _p("question", "Question", "GPString", required=False)
+        q.controlCLSID = MULTILINE
+        return [q,
+                _p("layer", "Context layer (optional)", "GPFeatureLayer", required=False),
+                _p("use_selected", "Use selected features", "GPBoolean", required=False, default=False),
+                _p("apply", "Apply proposed edits during this run", "GPBoolean", required=False, default=False),
+                _p("apply_last", "Apply the proposals from the last run (no question is sent)", "GPBoolean",
+                   required=False, default=False),
+                _p("reset", "Reset conversation", "GPBoolean", required=False, default=False),
+                _p("model", "Model", "GPString", default=cfg["model"], values=MODELS, category="Options"),
+                _p("effort", "Effort", "GPString", default=cfg["effort"], values=EFFORTS, category="Options")]
+
+    def update(self, p):
+        p["question"].enabled = not p.flag("apply_last")
+
+    def run(self, p, msgs):
+        from wwnet_arcgis import maplayers
+        lyr = None
+        if p.val("layer") is not None:
+            v = p.val("layer")
+            found = v if maplayers.layer_source(v) else maplayers.find_layer(arcpy, p.text("layer"))
+            lyr = maplayers.layer_name(found) if found is not None else p.text("layer")
+        impl.ask_assistant(arcpy, msgs, p.text("question", ""), lyr, p.flag("use_selected"), p.text("model"),
+                           p.text("effort"), p.flag("apply"), p.flag("reset"), apply_last=p.flag("apply_last"))
+
+
+class SetAssistantApiKey(_Tool):
+    label = "Set Assistant API Key"
+    description = ("Store the Anthropic API key (Windows DPAPI, current user) and the assistant's default model "
+                   "and effort. The key is never shown in messages.")
+    category = "Setup"
 
     def getParameterInfo(self):
         cfg = _settings.load()
         return [_p("key", "Anthropic API key", "GPEncryptedString", required=False),
                 _p("clear", "Remove stored key", "GPBoolean", required=False, default=False),
-                _p("model", "Default model", "GPString", required=False,
-                   default=cfg["model"], values=MODELS),
-                _p("effort", "Default effort", "GPString", required=False,
-                   default=cfg["effort"], values=EFFORTS),
-                _p("exe", "WWNet CLI path (optional fallback, only used if wwnet_native is missing)", "DEFile", required=False,
-                   default=cfg["wwnet_exe"] or None)]
+                _p("model", "Default model", "GPString", required=False, default=cfg["model"], values=MODELS),
+                _p("effort", "Default effort", "GPString", required=False, default=cfg["effort"], values=EFFORTS)]
 
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.set_settings(Messages(arcpy), _text(parameters[0]), bool(parameters[1].value),
-                          _text(parameters[2]), _text(parameters[3]), _text(parameters[4]) or "")
+    def run(self, p, msgs):
+        impl.set_settings(msgs, p.text("key"), p.flag("clear"), p.text("model"), p.text("effort"))
 
 
-class AskWWNetAssistant(object):
-    def __init__(self):
-        self.label = "Ask WWNet Assistant"
-        self.description = ("Ask the Claude-powered DS 50 design assistant about the model. "
-                            "Layer attribute data is sent to Anthropic when the assistant uses its tools.")
-        self.category = "Assistant"
-
-    def getParameterInfo(self):
-        cfg = _settings.load()
-        q = _p("question", "Question", "GPString")
-        q.controlCLSID = MULTILINE
-        return [q,
-                _p("layer", "Context layer (optional)", "GPFeatureLayer", required=False),
-                _p("use_selected", "Use selected features", "GPBoolean", required=False, default=False),
-                _p("model", "Model", "GPString", default=cfg["model"], values=MODELS),
-                _p("effort", "Effort", "GPString", default=cfg["effort"], values=EFFORTS),
-                _p("apply", "Apply proposed edits", "GPBoolean", required=False, default=False),
-                _p("reset", "Reset conversation", "GPBoolean", required=False, default=False)]
-
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        lyr = _ml_name(_layer_obj(parameters[1])) if parameters[1].value else None
-        impl.ask_assistant(arcpy, Messages(arcpy), parameters[0].valueAsText, lyr,
-                           bool(parameters[2].value), parameters[3].valueAsText,
-                           parameters[4].valueAsText, bool(parameters[5].value),
-                           bool(parameters[6].value))
-
-
-class VerifySetup(object):
-    def __init__(self):
-        self.label = "Verify Setup"
-        self.description = ("Show which wwnet_native / anthropic / pydantic ... copies are loaded (and from "
-                            "where), whether they import, and optionally make one tiny live API call.")
-        self.category = "Assistant"
+class VerifySetup(_Tool):
+    label = "Verify Setup"
+    description = ("Show which wwnet_native / anthropic / pydantic ... copies are loaded (and from where), whether "
+                   "they import and provide every function the toolbox uses, and optionally make one tiny live "
+                   "API call.")
+    category = "Setup"
 
     def getParameterInfo(self):
         return [_p("live", "Live API test (one tiny request with the stored key)", "GPBoolean",
                    required=False, default=False)]
 
-    def execute(self, parameters, messages):
-        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.verify_setup(Messages(arcpy), bool(parameters[0].value))
+    def run(self, p, msgs):
+        impl.verify_setup(msgs, p.flag("live"))
+
+
+class Toolbox(object):
+    def __init__(self):
+        self.label = "WWNet"
+        self.alias = "wwnet"
+        self.tools = [NewModel, AddModelToMap, ModelSettings,
+                      ImportSewerData, ImportDiurnalProfile, AssignProfile,
+                      CheckModel, RunDesign, RunSimulation, Trace,
+                      ShowSimulationRun, CompareSimulationRuns, PlotHydrograph,
+                      PipeCapacity,
+                      AskWWNetAssistant, SetAssistantApiKey, VerifySetup]

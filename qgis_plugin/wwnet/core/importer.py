@@ -106,10 +106,12 @@ class ImportOptions:
 
 @dataclass
 class ImportWarning:
-    code: str
+    code: str              # UPPER_SNAKE, as the model check / design / simulation codes
     object_type: str       # node | conduit | connection_point | import
     object_id: str
     message: str
+    x: float | None = None  # location for issues that are not at a model object (optional)
+    y: float | None = None
 
     def __str__(self) -> str:
         who = f"{self.object_type} {self.object_id}: " if self.object_id else ""
@@ -126,8 +128,15 @@ class ImportReport:
     assumed_notes: dict = field(default_factory=dict)     # {"MAINTYPE": {"E": "meaning unconfirmed ..."}}
     diagnostics: list = field(default_factory=list)       # [str] summary lines (direction, dangling ends, grade ratios)
 
-    def warn(self, code: str, object_type: str, object_id: str, message: str):
-        self.warnings.append(ImportWarning(code, object_type, str(object_id), message))
+    def warn(self, code: str, object_type: str, object_id: str, message: str, xy=None):
+        x, y = (xy if xy else (None, None))
+        self.warnings.append(ImportWarning(code, object_type, str(object_id), message, x, y))
+
+    def issues(self) -> list:
+        """The warnings as issue dicts for ``wwnet_native.store_issues(gpkg, "import", json)``: they are
+        drawn at their node / conduit (or at x, y) in the model's Issues layer."""
+        return [{"severity": "warning", "code": w.code, "object_type": w.object_type, "object_id": w.object_id,
+                 "clause": None, "message": w.message, "x": w.x, "y": w.y} for w in self.warnings]
 
     def count(self, key: str, n: int = 1):
         self.counts[key] = self.counts.get(key, 0) + n
@@ -399,7 +408,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         label = c if c else "(blank)"
         bucket = rep.unknown_codes.setdefault(fname, {})
         bucket[label] = bucket.get(label, 0) + 1
-        rep.warn("unknown_code", obj_type, oid, f"{fname} code {label!r} (value {raw!r}) is not mapped; "
+        rep.warn("UNKNOWN_CODE", obj_type, oid, f"{fname} code {label!r} (value {raw!r}) is not mapped; "
                  f"{what} defaulted to {default!r}")
         return default, c
 
@@ -426,15 +435,15 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         p = _point(row)
         if not nid:
             rep.count("access_chambers_skipped")
-            rep.warn("ac_no_id", "node", "", f"access chamber without {fm.ac_id} skipped")
+            rep.warn("AC_NO_ID", "node", "", f"access chamber without {fm.ac_id} skipped")
             continue
         if nid in nodes:
             rep.count("access_chambers_skipped")
-            rep.warn("ac_duplicate_id", "node", nid, "duplicate access chamber id skipped")
+            rep.warn("AC_DUPLICATE_ID", "node", nid, "duplicate access chamber id skipped")
             continue
         if p is None:
             rep.count("access_chambers_skipped")
-            rep.warn("ac_no_geometry", "node", nid, "access chamber without geometry skipped")
+            rep.warn("AC_NO_GEOMETRY", "node", nid, "access chamber without geometry skipped")
             continue
         if row.get(CONTEXT):
             ctx_ids.add(nid)
@@ -453,7 +462,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         if not cid or p is None or cid in cp_pool:
             rep.count("connection_points_skipped")
             if cid and cid in cp_pool:
-                rep.warn("cp_duplicate_id", "connection_point", cid, "duplicate connection point id skipped")
+                rep.warn("CP_DUPLICATE_ID", "connection_point", cid, "duplicate connection point id skipped")
             continue
         cp_pool[cid] = (p[0], p[1])
     cp_used: set = set()
@@ -496,15 +505,15 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         line = _line(row)
         if not pid:
             rep.count("conduits_skipped")
-            rep.warn("pipe_no_id", "conduit", "", f"sewer without {fm.pipe_id} skipped")
+            rep.warn("PIPE_NO_ID", "conduit", "", f"sewer without {fm.pipe_id} skipped")
             continue
         if pid in pipe_ids:
             rep.count("conduits_skipped")
-            rep.warn("pipe_duplicate_id", "conduit", pid, "duplicate sewer id skipped")
+            rep.warn("PIPE_DUPLICATE_ID", "conduit", pid, "duplicate sewer id skipped")
             continue
         if line is None:
             rep.count("conduits_skipped")
-            rep.warn("pipe_no_geometry", "conduit", pid, "sewer without usable geometry skipped")
+            rep.warn("PIPE_NO_GEOMETRY", "conduit", pid, "sewer without usable geometry skipped")
             continue
         pipe_ids.add(pid)
         rep.count("conduits_read")
@@ -541,7 +550,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                     best = (e, d)
             if best is not None:
                 s["ends"][best[0]] = use_cp(cid)
-                rep.warn("end_far_from_node", "conduit", s["pid"], f"end is {_fmt(best[1], 2)} m from "
+                rep.warn("END_FAR_FROM_NODE", "conduit", s["pid"], f"end is {_fmt(best[1], 2)} m from "
                          f"connection point {cid} named by id; connected anyway")
     # 3. remaining ends: coincident ends share a junction, lone ends are dangling
     cgrid = _Grid(tol)
@@ -651,7 +660,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 for t in g:
                     assign.append((t[0], t[1], t[2], tid))
                     rep.count("tee_branch_ends")
-                    rep.warn("tee_joined", "conduit", segs[t[0]]["pid"], f"end joined mid-line to sewer "
+                    rep.warn("TEE_JOINED", "conduit", segs[t[0]]["pid"], f"end joined mid-line to sewer "
                              f"{segs[tj]['pid']} at chainage {_fmt(t[4], 2)} m ({_fmt(t[6], 2)} m from the line); "
                              f"flow assumed into the main")
             main = segs[tj]
@@ -822,7 +831,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 segs[si]["why"] = "unknown"
         s0 = segs[idxs[0]]
         if s0["why"] == "unknown":
-            rep.warn("direction_unknown", "conduit", s0["pid"], "flow direction could not be determined from "
+            rep.warn("DIRECTION_UNKNOWN", "conduit", s0["pid"], "flow direction could not be determined from "
                      "manhole ids, neighbouring sewers, tee, dead-end / IS rules; digitised direction kept")
         why_counts[s0["why"]] += 1
     for k, v in why_counts.items():
@@ -869,15 +878,15 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             if not rid or not known:
                 why = "blank" if not rid else "unmatched"
                 rep.count("ends_snapped")
-                rep.warn("end_snapped", "conduit", pid, f"{end} manhole id {why}; connected to node {nid} "
+                rep.warn("END_SNAPPED", "conduit", pid, f"{end} manhole id {why}; connected to node {nid} "
                          f"by geometry ({_fmt(_dist(line[0] if end == 'US' else line[-1], node_pos[nid]), 2)} m)")
             elif ref not in (s["us_id"], s["ds_id"]):
                 mismatch.append(f"{end} end at {nid}")
         if mismatch:
-            rep.warn("id_mismatch", "conduit", pid, f"{'; '.join(mismatch)}, but the sewer's manhole ids are "
+            rep.warn("ID_MISMATCH", "conduit", pid, f"{'; '.join(mismatch)}, but the sewer's manhole ids are "
                      f"{s['us_id'] or '(blank)'} -> {s['ds_id'] or '(blank)'}")
         if us == ds:
-            rep.warn("self_loop", "conduit", pid, f"US and DS node are both {us}")
+            rep.warn("SELF_LOOP", "conduit", pid, f"US and DS node are both {us}")
 
         # levels, length, grade
         ui, di = to_float(get(row, "us_invert")), to_float(get(row, "ds_invert"))
@@ -892,20 +901,16 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             if ui is not None and di is None:
                 di, data_source = ui - length / fgrade, "assumed"
                 notes.append(f"ds invert derived from us invert, length and grade 1 in {_fmt(fgrade, 1)}")
-                rep.warn("invert_derived", "conduit", pid, f"ds invert {di:.3f} derived from FLOW_GRADE")
+                rep.warn("INVERT_DERIVED", "conduit", pid, f"ds invert {di:.3f} derived from FLOW_GRADE")
             elif di is not None and ui is None:
                 ui, data_source = di + length / fgrade, "assumed"
                 notes.append(f"us invert derived from ds invert, length and grade 1 in {_fmt(fgrade, 1)}")
-                rep.warn("invert_derived", "conduit", pid, f"us invert {ui:.3f} derived from FLOW_GRADE")
-        if ui is None or di is None:
-            rep.warn("missing_invert", "conduit", pid, f"us invert {_fmt(ui)}, ds invert {_fmt(di)}: "
-                     "level(s) missing")
+                rep.warn("INVERT_DERIVED", "conduit", pid, f"us invert {ui:.3f} derived from FLOW_GRADE")
+        # Missing levels and non-falling grades are reported by the model check that runs after the
+        # import (MISSING_INVERT, ADVERSE_GRADE / FLAT_GRADE), not here as well.
         if ui is not None and di is not None:
             drop = ui - di
-            if drop <= 0:
-                rep.warn("non_falling_grade", "conduit", pid, f"levels give no fall (us {_fmt(ui)}, "
-                         f"ds {_fmt(di)})")
-            elif fgrade and length:
+            if drop > 0 and fgrade and length:
                 ratios["field"].append(length / drop / fgrade)
                 if glen > 0:
                     ratios["geom"].append(glen / drop / fgrade)
@@ -916,7 +921,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                     ratios["shape_vs_len"].append(shp / length)
                 lg = length / drop
                 if abs(lg - fgrade) / fgrade * 100.0 > opt.grade_tolerance_pct:
-                    rep.warn("grade_mismatch", "conduit", pid, f"grade from levels 1 in {lg:.1f} vs "
+                    rep.warn("GRADE_MISMATCH", "conduit", pid, f"grade from levels 1 in {lg:.1f} vs "
                              f"{fm.flow_grade} 1 in {_fmt(fgrade, 1)} (>{_fmt(opt.grade_tolerance_pct, 1)}%)")
 
         # diameter
@@ -926,7 +931,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             dn_unmapped += 1
             notes.append(f"DN {dn} assumed (no diameter field mapped)")
         elif draw is None or draw < 50:
-            rep.warn("dn_assumed", "conduit", pid, f"{fm.diameter} value {get(row, 'diameter')!r} is not a "
+            rep.warn("DN_ASSUMED", "conduit", pid, f"{fm.diameter} value {get(row, 'diameter')!r} is not a "
                      f"usable diameter in mm; DN {dn} assumed")
             notes.append(f"DN {dn} assumed (diameter {get(row, 'diameter')!r})")
         else:
@@ -938,7 +943,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 msg = f"diameter {_fmt(draw)} mm is not a standard DN; DN{near} used, raw kept as internal diameter"
                 rep.infos.append(f"conduit {pid}: {msg}")
                 if abs(draw - near) / draw > 0.1:
-                    rep.warn("dn_far_from_standard", "conduit", pid, msg)
+                    rep.warn("DN_FAR_FROM_STANDARD", "conduit", pid, msg)
 
         sewer_type, _stc = code_lookup("sewer_type", fm.sewer_type, row, codes.get("sewer_type", {}),
                                        "reticulation", "conduit", pid, "sewer type")
@@ -1004,12 +1009,12 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     for cid, nid, di in branch_ds:
         inv = tee_inv.get(nid)
         if inv is not None and di is not None and di < inv - 0.01:
-            rep.warn("tee_adverse", "conduit", cid, f"ds invert {di:.3f} is below the main's interpolated invert "
+            rep.warn("TEE_ADVERSE", "conduit", cid, f"ds invert {di:.3f} is below the main's interpolated invert "
                      f"{inv:.3f} at the tee ({nid}): data quality")
 
     if dn_unmapped:
         rep.count("dn_assumed", dn_unmapped)
-        rep.warn("dn_not_mapped", "import", "", f"NO DIAMETER FIELD MAPPED: DN {opt.default_dn} ASSUMED for all "
+        rep.warn("DN_NOT_MAPPED", "import", "", f"NO DIAMETER FIELD MAPPED: DN {opt.default_dn} ASSUMED for all "
                  f"{dn_unmapped} conduit(s). Capacity results are meaningless until real diameters are supplied.")
 
     def med(xs):
@@ -1067,7 +1072,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         rep.diagnostics.append(f"Dangling ends: {n_isio} IS/IO upstream ends (expected), {n_dead} dead-end "
                                f"upstream starts, {len(other)} other" + (" (listed)." if other else "."))
     for cid, g in other[:20]:
-        rep.warn("dangling_end", "conduit", cid, f"downstream end is dangling (no chamber, connection point or "
+        rep.warn("DANGLING_END", "conduit", cid, f"downstream end is dangling (no chamber, connection point or "
                  f"other sewer) at ({g[0]:.2f}, {g[1]:.2f})")
     if len(other) > 20:
         rep.diagnostics.append(f"... {len(other) - 20} more other dangling end(s) not listed.")
@@ -1081,10 +1086,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             continue
         n["invert_level"] = lv
         n["notes"] = "; ".join(x for x in (n.get("notes"), f"invert derived from {how}") if x)
-        sl = n.get("surface_level")
-        if sl is not None and lv > sl:
-            rep.warn("invert_above_surface", "node", nid, f"invert {lv:.3f} is above surface "
-                     f"level {sl:.3f}")
+        # an invert above the lid is reported by the model check (INVERT_ABOVE_SURFACE)
     rep.count("connection_points_used", len(cp_used))
     rep.count("connection_points_skipped", len(cp_pool) - len(cp_used))
     rep.count("nodes", len(nodes))
@@ -1132,7 +1134,7 @@ def _assign_cp_loads(cp_pool: dict, conduits: list, radius: float, rep: ImportRe
                            f"{len(unassigned)} unassigned; ADWF total {adwf:.3f} L/s at "
                            f"{ADWF_PER_CONNECTION_LPD:g} L/d/connection")
     for cid in unassigned[:10]:
-        rep.warn("cp_not_assigned", "connection_point", cid,
+        rep.warn("CP_NOT_ASSIGNED", "connection_point", cid,
                  f"no imported sewer within {radius:g} m; its load is not assigned")
     return rows
 

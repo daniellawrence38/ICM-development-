@@ -1,22 +1,43 @@
-"""Tool bodies for WWNet.pyt. Plain-value arguments in, messages out; arcpy injected."""
+"""Tool bodies for WWNet.pyt. Plain-value arguments in, messages out; arcpy injected.
+
+Messages are short prose lines (the Messages pane uses a proportional font); full results live in
+the model's result layers (Design results, Simulation results, Issues), which persist in the
+GeoPackage and are reused when already in the map.
+"""
 from __future__ import annotations
 
+import csv
+import json
 import os
 
-from . import (arcpy_tools, assistant_run, capacity, cli, dpapi, gpkg, issues_table, maplayers,
-               settings, shared, sewer_import, symbology, vendor)
+from . import (arcpy_tools, assistant_run, capacity, dpapi, engine, gpkg, maplayers, settings, shared,
+               sewer_import, symbology, vendor)
 from .messages import Messages
 
 MAX_LINES = 300
+MAX_ISSUE_LINES = 40
+SAVE_EDITS_NOTE = ("The engine reads the GeoPackage file: save any edits in Pro first "
+                   "(Edit > Save) or they are not included.")
+
+
+def _summary():
+    return shared.core("summary")
+
+
+def _checks():
+    return shared.core("checks")
+
+
+def _gpkg_path(path: str) -> str:
+    return path if path.lower().endswith(".gpkg") else path + ".gpkg"
 
 
 # --------------------------------------------------------------- model tools
 
 def new_model(arcpy, msgs: Messages, out_path: str, add_to_map: bool = True, overwrite: bool = False):
-    if not out_path.lower().endswith(".gpkg"):
-        out_path += ".gpkg"
+    out_path = _gpkg_path(out_path)
     gpkg.create_model(out_path, overwrite=overwrite)
-    msgs.info(f"Created WWNet model {out_path} (EPSG:7850, schema v2).")
+    msgs.info(f"Created WWNet model {out_path} (EPSG:7850, schema v{shared.core('schema').SCHEMA_VERSION}).")
     if add_to_map:
         maplayers.add_model(arcpy, out_path, msgs)
     return out_path
@@ -24,8 +45,35 @@ def new_model(arcpy, msgs: Messages, out_path: str, add_to_map: bool = True, ove
 
 def add_model_to_map(arcpy, msgs: Messages, gpkg_path: str, symbolize: bool = True):
     layers = maplayers.add_model(arcpy, gpkg_path, msgs, symbolize=symbolize)
-    msgs.info(f"Added {len(layers)} layer(s) to the active map.")
+    msgs.info(f"Added {len(layers)} layer(s) to the active map." if layers else
+              "Every layer of this model is already in the active map.")
     return layers
+
+
+def report_issues(msgs: Messages, issues: list, max_lines: int = MAX_LINES) -> dict:
+    """Issues as messages, errors first. Model findings are data issues, not tool failures: never AddError
+    (Pro would mark a finished tool as failed); error-severity ones are warnings prefixed ERROR:."""
+    s = _summary()
+    for n, i in enumerate(s.sorted_issues(issues)):
+        if n >= max_lines:
+            msgs.info(f"... {len(issues) - max_lines} more issue(s) in the model's Issues layer.")
+            break
+        line = s.issue_line(i)
+        sev = i.get("severity")
+        if sev == "error":
+            msgs.warn(f"ERROR: {line}")
+        elif sev == "warning":
+            msgs.warn(line)
+        else:
+            msgs.info(line)
+    return _checks().count_by_severity(issues)
+
+
+def _show_issues_layer(arcpy, msgs, gpkg_path):
+    try:
+        maplayers.ensure_layer(arcpy, gpkg_path, "wwn_issues", msgs)
+    except Exception as exc:  # noqa: BLE001
+        msgs.warn(f"Could not add the Issues layer to the map: {exc}")
 
 
 def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, out_path: str,
@@ -40,21 +88,21 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
     si = sewer_import
     imp = si.importer()
     native = native or si.native_with_write()
-    if not out_path.lower().endswith(".gpkg"):
-        out_path += ".gpkg"
+    out_path = _gpkg_path(out_path)
     exists = os.path.exists(out_path)
     overwrite = bool(getattr(getattr(arcpy, "env", None), "overwriteOutput", False))
     if exists and not overwrite:
         raise RuntimeError(f"{out_path} already exists. Choose a new name or enable 'Overwrite the outputs "
                            "of geoprocessing operations' in the Geoprocessing options / Environments.")
+    msgs.start("Reading the source layers")
     cfg = imp.load_template()
     fmap = imp.FieldMap.from_config(cfg).with_overrides(**{k: (v or "") for k, v in (fields or {}).items()
                                                            if k in si.ROLE_LAYER})
     opts = imp.ImportOptions.from_config(cfg, snap_tolerance_m=snap_tolerance, grade_source=grade_source,
-                                       tee_tolerance_m=tee_tolerance,
-                                       load_connection_points=bool(load_connection_points),
-                                       cp_load_search_m=(float(cp_load_search_m) if cp_load_search_m is not None
-                                                         else None))
+                                         tee_tolerance_m=tee_tolerance,
+                                         load_connection_points=bool(load_connection_points),
+                                         cp_load_search_m=(float(cp_load_search_m) if cp_load_search_m is not None
+                                                           else None))
     if cp_layer is not None and not fmap.cp_id:
         raise RuntimeError("Choose the connection point ID field.")
     if not fmap.ac_id or not fmap.pipe_id:
@@ -114,19 +162,20 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
                                         use_selected, msgs, buffer_m=buf)
     elif load_connection_points:
         msgs.info("No connection point layer given: no connection point loads were created.")
+    msgs.step("Building the network (connectivity, direction, tees)")
     model, rep = imp.build_model(acs, cps, sewers, fmap, opts, cfg)
     si.report_to_messages(msgs, rep)
+    msgs.step("Writing the GeoPackage")
     native.write_model(out_path, imp.model_json(model), exists and overwrite)
     msgs.info(f"Wrote WWNet model {out_path} (EPSG:7850).")
-    issues = native.check(out_path, True)
-    counts = {"error": 0, "warning": 0, "info": 0}
-    for i in issues:
-        counts[i["severity"] if i["severity"] in counts else "info"] += 1
-    report_issues(msgs, issues[:si.MAX_ISSUE_LINES])
-    if len(issues) > si.MAX_ISSUE_LINES:
-        msgs.info(f"... {len(issues) - si.MAX_ISSUE_LINES} more issue(s) stored in wwn_issues "
-                  "(run Check Model for the full table).")
-    msgs.info(f"Model check: {counts['error']} error(s), {counts['warning']} warning(s), {counts['info']} info.")
+    native.store_issues(out_path, "import", json.dumps(rep.issues(), default=str))
+    msgs.step("Checking the model")
+    norm = _checks().normalise_issue
+    issues = [norm(i) for i in native.check(out_path, True)]
+    report_issues(msgs, issues, si.MAX_ISSUE_LINES)
+    msgs.info(_summary().issue_count_line(issues) +
+              (f" Import warnings: {len(rep.warnings)}." if rep.warnings else "") +
+              " Both are in the model's Issues layer.")
     if add_to_map:
         try:
             add_model_to_map(arcpy, msgs, out_path, True)
@@ -141,375 +190,229 @@ def sewer_field_defaults(arcpy, layer) -> dict:
                                       sewer_import.template_defaults())
 
 
-def report_issues(msgs: Messages, issues: list):
-    counts = {"error": 0, "warning": 0, "info": 0}
-    for n, i in enumerate(issues):
-        sev = i["severity"] if i["severity"] in counts else "info"
-        counts[sev] += 1
-        if n >= MAX_LINES:
-            continue
-        line = f"{i['code']} {i['object_type']} {i['object_id']}" + \
-               (f" ({i['clause']})" if i["clause"] else "") + f": {i['message']}"
-        # model-check findings are data issues, not tool failures: never AddError (Pro would mark the
-        # tool as failed even though it finished)
-        if sev == "error":
-            msgs.warn(f"ERROR: {line}")
-        elif sev == "warning":
-            msgs.warn(line)
-        else:
-            msgs.info(line)
-    if len(issues) > MAX_LINES:
-        msgs.info(f"... {len(issues) - MAX_LINES} more issue(s) not shown; use the output table.")
-    return counts
+# --------------------------------------------------------------- analysis
 
-
-def check_model(arcpy, msgs: Messages, gpkg_path: str, out_table: str | None = None, exe=None):
-    issues, rc = cli.run_check(gpkg_path, exe)
-    counts = report_issues(msgs, issues)
-    msgs.info(f"Check finished: {counts['error']} error(s), {counts['warning']} warning(s), "
-              f"{counts['info']} info.")
-    if out_table:
-        n = issues_table.write_issues_table(arcpy, out_table, issues)
-        msgs.info(f"Wrote {n} issue(s) to {out_table}")
+def check_model(arcpy, msgs: Messages, gpkg_path: str, show_layer: bool = True) -> list:
+    msgs.info(SAVE_EDITS_NOTE)
+    msgs.start("Checking the model")
+    issues = engine.run_check(gpkg_path)
+    report_issues(msgs, issues)
+    msgs.info(_summary().issue_count_line(issues, "Check finished"))
+    if show_layer:
+        _show_issues_layer(arcpy, msgs, gpkg_path)
     return issues
 
 
-def _select(arcpy, layer, ids, field):
-    ds = layer.dataSource
-    where = gpkg.in_clause(arcpy.AddFieldDelimiters(ds, field), ids)
-    arcpy.management.SelectLayerByAttribute(layer, "NEW_SELECTION" if ids else "CLEAR_SELECTION",
-                                            where if ids else "")
-
-
-RESULT_FIELDS = [("conduit_id", "TEXT"), ("dn", "LONG"), ("grade_1in", "DOUBLE"), ("adwf_lps", "DOUBLE"),
-                 ("gsdf_lps", "DOUBLE"),
-                 ("pumped_lps", "DOUBLE"), ("total_lps", "DOUBLE"), ("capacity_lps", "DOUBLE"),
-                 ("table44_lps", "DOUBLE"), ("hydraulic_capacity_lps", "DOUBLE"),
-                 ("d_over_d", "DOUBLE"), ("velocity_mps", "DOUBLE"), ("result", "TEXT"), ("message", "TEXT")]
-
-
-def _worst_message(c: dict) -> str:
-    chks = cli.failed_checks(c)
-    chks.sort(key=lambda k: 0 if k.get("result") == "fail" else 1)
-    return str(chks[0].get("message") or "") if chks else ""
-
-
-def _num(c, key, default=0.0):
-    v = c.get(key)
-    return default if v is None else v
-
-
-def _opt(c, key, prec):
-    v = c.get(key)
-    return "-" if v is None else f"{v:.{prec}f}"
-
-
-def results_table_lines(conduit_results: list, max_lines: int = MAX_LINES) -> list:
-    hdr = (f"{'Conduit':<10}{'DN':>5}{'Grade 1:x':>10}{'ADWF L/s':>9}{'GSDF L/s':>9}{'Pumped':>8}{'Total L/s':>10}"
-           f"{'Cap L/s':>9}{'T4.4':>6}{'Hyd':>7}{'d/D':>6}{'v m/s':>7}  {'RESULT':<6}  Worst message")
-    lines = [hdr, "-" * len(hdr)]
-    for c in conduit_results[:max_lines]:
-        lines.append(f"{str(c['conduit_id'])[:10]:<10}{int(_num(c, 'dn')):>5}{_num(c, 'grade_1in'):>10.0f}"
-                     f"{_num(c, 'adwf_lps'):>9.2f}{_num(c, 'gsdf_lps'):>9.2f}{_num(c, 'pumped_lps'):>8.2f}{_num(c, 'total_lps'):>10.2f}"
-                     f"{_num(c, 'capacity_lps'):>9.1f}{_opt(c, 'table44_lps', 1):>6}"
-                     f"{_opt(c, 'hydraulic_capacity_lps', 1):>7}{_num(c, 'd_over_d'):>6.2f}{_num(c, 'velocity_mps'):>7.2f}"
-                     f"  {str(c['result']).upper():<6}  {_worst_message(c)[:60]}")
-    if len(conduit_results) > max_lines:
-        lines.append(f"... {len(conduit_results) - max_lines} more")
-    return lines
-
-
-def _safe_stem(gpkg_path: str) -> str:
-    import os
-    import re
-    stem = os.path.splitext(os.path.basename(gpkg_path))[0]
-    return re.sub(r"\W", "_", stem) or "model"
-
-
-def _spatial_ref(arcpy, gpkg_path: str):
-    try:
-        return arcpy.Describe(gpkg.table_path(gpkg_path, "wwn_conduits")).spatialReference
-    except Exception:  # noqa: BLE001
-        return arcpy.SpatialReference(7850)
-
-
-def build_results_fc(arcpy, gpkg_path: str, conduit_results: list) -> str:
-    """Create memory\\wwnet_results_<stem> (POLYLINE) filled from the design output; returns its path."""
-    fc_name = f"wwnet_results_{_safe_stem(gpkg_path)}"
-    fc = "memory\\" + fc_name
-    if arcpy.Exists(fc):
-        arcpy.management.Delete(fc)
-    arcpy.management.CreateFeatureclass("memory", fc_name, "POLYLINE", spatial_reference=_spatial_ref(arcpy, gpkg_path))
-    for name, typ in RESULT_FIELDS:
-        if typ == "TEXT":
-            arcpy.management.AddField(fc, name, "TEXT", field_length=255 if name == "message" else 64)
-        else:
-            arcpy.management.AddField(fc, name, typ)
-    by_id = {c["conduit_id"]: c for c in conduit_results}
-    cols = [f for f, _ in RESULT_FIELDS] + ["SHAPE@"]
-    n = 0
-    with arcpy.da.SearchCursor(gpkg.table_path(gpkg_path, "wwn_conduits"), ["conduit_id", "SHAPE@"]) as src, \
-            arcpy.da.InsertCursor(fc, cols) as ins:
-        for cid, shape in src:
-            c = by_id.get(cid)
-            if c is None:
-                continue
-            ins.insertRow([cid, int(_num(c, "dn")), _num(c, "grade_1in"), _num(c, "adwf_lps"), _num(c, "gsdf_lps"),
-                           _num(c, "pumped_lps"), _num(c, "total_lps"), _num(c, "capacity_lps"),
-                           _num(c, "table44_lps"), _num(c, "hydraulic_capacity_lps"), _num(c, "d_over_d"), _num(c, "velocity_mps"), c["result"],
-                           _worst_message(c)[:255], shape])
-            n += 1
-    return fc
-
-
-def _show_results_layer(arcpy, msgs, gpkg_path: str, d: dict, select_failed: bool):
-    stem = _safe_stem(gpkg_path)
-    name = f"Design results \u2014 {stem}"
-    maplayers.remove_layers_named(arcpy, name)
-    fc = build_results_fc(arcpy, gpkg_path, d["conduit_results"])
-    lyr = maplayers.add_results_layer(arcpy, fc, name, msgs)
-    symbology.apply("results", lyr, msgs)
-    if select_failed:
-        failed = cli.failed_conduits(d)
-        try:
-            _select(arcpy, lyr, failed, "conduit_id")
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not select failed conduits on the results layer: {exc}")
-    msgs.info(f"Results layer added: {name} (temporary \u2014 re-run Run Design after restarting Pro)")
-
-
-def design_detail_lines(conduit_results: list, per_rule: int = 5) -> list:
-    """Detail lines for FAIL and WARN checks only (never info), at most `per_rule` per rule."""
-    by_rule: dict = {}
-    for c in conduit_results:
-        for chk in cli.failed_checks(c):
-            by_rule.setdefault(chk.get("rule"), []).append((c, chk))
-    lines: list = []
-    for rule, items in by_rule.items():
-        items.sort(key=lambda it: 0 if it[1].get("result") == "fail" else 1)
-        for c, chk in items[:per_rule]:
-            lines.append(f"{c['conduit_id']} DN{c['dn']} {str(chk['result']).upper()} {rule} "
-                         f"({chk.get('clause')}): {chk.get('message')}")
-        if len(items) > per_rule:
-            lines.append(f"... {len(items) - per_rule} more {rule} item(s)")
-    return lines
-
-
-def design_info_lines(d: dict) -> list:
-    n = (d.get("summary") or {}).get("cover_not_checked_ends") or 0
-    if n:
-        return [f"Cover not checked at {n} conduit end(s): no surface level (IS ends / junctions)."]
-    return []
-
-
-def run_design(arcpy, msgs: Messages, gpkg_path: str, show_layer: bool = True, add_table: bool = False,
-               select_failed: bool = True, exe=None) -> dict:
-    d = cli.run_design(gpkg_path, exe)
-    s = d["summary"]
-    msgs.info(f"Design run: {s['conduits']} conduit(s): {s['pass']} pass, {s['warn']} warn, "
-              f"{s['fail']} fail. Terminal GSDF {s['terminal_gsdf_lps']:.3f} L/s "
-              f"(total local {s['total_local_gsdf_lps']:.3f} L/s).")
-    adwf = s.get("total_local_adwf_lps") or 0.0
-    if adwf:
-        msgs.info(f"Loads: ADWF {adwf:.3f} L/s total ({s.get('terminal_adwf_lps') or 0.0:.3f} L/s at terminals); "
-                  f"GSDF from loads = ADWF x {s.get('peaking_factor', 1.5):g} peaking factor.")
-    for line in results_table_lines(d["conduit_results"]):
+def run_design(arcpy, msgs: Messages, gpkg_path: str, show_layer: bool = True,
+               select_failed: bool = True) -> dict:
+    s = _summary()
+    msgs.info(SAVE_EDITS_NOTE)
+    msgs.start("Running the DS 50 design")
+    d = engine.run_design(gpkg_path)
+    for line in s.design_summary_lines(d):
         msgs.info(line)
-    for line in design_detail_lines(d["conduit_results"]):
+    worst = s.design_worst_lines(d["conduit_results"])
+    if worst:
+        msgs.info("Worst conduits:")
+        for line in worst:
+            msgs.warn(line)
+    for line in s.design_detail_lines(d["conduit_results"]):
         msgs.warn(line)
-    for line in design_info_lines(d):
+    for line in s.design_info_lines(d):
         msgs.info(line)
-    for i in report_issues_sorted([i for i in d.get("issues", []) if i.get("object_type") != "conduit"]):
-        msgs.warn(f"{i.get('code')} {i.get('object_type')} {i.get('object_id')} ({i.get('clause')}): "
-                  f"{i.get('message')}")
+    other = [i for i in d.get("issues", []) if i.get("object_type") != "conduit" and i.get("severity") != "info"]
+    for i in s.sorted_issues(other)[:MAX_ISSUE_LINES]:
+        msgs.warn(s.issue_line(i))
+    if len(other) > MAX_ISSUE_LINES:
+        msgs.info(f"... {len(other) - MAX_ISSUE_LINES} more in the Issues layer.")
     if show_layer:
+        msgs.step("Updating the Design results layer")
         try:
-            _show_results_layer(arcpy, msgs, gpkg_path, d, select_failed)
+            lyr = maplayers.ensure_layer(arcpy, gpkg_path, "wwn_results_conduits", msgs)
+            if select_failed:
+                failed = s.failed_conduits(d)
+                maplayers.select(arcpy, lyr, failed, "conduit_id")
+                msgs.info(f"Selected {len(failed)} failed conduit(s) on the Design results layer." if failed
+                          else "No failed conduits.")
         except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not add the results layer to the map: {exc}")
-    if add_table:
-        try:
-            maplayers.add_results_table(arcpy, gpkg_path, msgs)
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not add the results table to the map: {exc}")
-    if select_failed:
-        lyr = None
-        try:
-            lyr = maplayers.find_layer_for(arcpy, gpkg_path, "wwn_conduits")
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not inspect the map: {exc}")
-        if lyr is None:
-            msgs.warn("The model's conduit layer is not in the active map; skipping select.")
-        else:
-            failed = cli.failed_conduits(d)
-            try:
-                _select(arcpy, lyr, failed, "conduit_id")
-                msgs.info(f"Selected {len(failed)} failed conduit(s)." if failed else "No failed conduits.")
-            except Exception as exc:  # noqa: BLE001
-                msgs.warn(f"Could not select failed conduits: {exc}")
+            msgs.warn(f"Could not show the Design results layer: {exc}")
+    msgs.info("Full per-conduit results: the model's Design results layer (wwn_results_conduits).")
     return d
-
-
-SIM_FIELDS = [("conduit_id", "TEXT"), ("dn", "LONG"), ("max_flow_lps", "DOUBLE"), ("max_d_over_d", "DOUBLE"),
-              ("max_velocity_mps", "DOUBLE"), ("surcharged_min", "DOUBLE"), ("d_class", "TEXT")]
-SIM_NODE_FIELDS = [("node_id", "TEXT"), ("max_hgl_m", "DOUBLE"), ("max_depth_m", "DOUBLE"),
-                   ("flood_volume_m3", "DOUBLE"), ("surcharged_min", "DOUBLE")]
-
-
-def _memory_fc(arcpy, gpkg_path: str, prefix: str, geom: str, fields: list) -> str:
-    fc_name = f"{prefix}_{_safe_stem(gpkg_path)}"
-    fc = "memory\\" + fc_name
-    if arcpy.Exists(fc):
-        arcpy.management.Delete(fc)
-    arcpy.management.CreateFeatureclass("memory", fc_name, geom, spatial_reference=_spatial_ref(arcpy, gpkg_path))
-    for name, typ in fields:
-        if typ == "TEXT":
-            arcpy.management.AddField(fc, name, "TEXT", field_length=64)
-        else:
-            arcpy.management.AddField(fc, name, typ)
-    return fc
-
-
-def build_sim_fc(arcpy, gpkg_path: str, links: list) -> str:
-    """memory\\wwnet_sim_<stem> (POLYLINE): conduit geometry + simulation maxima; returns its path."""
-    fc = _memory_fc(arcpy, gpkg_path, "wwnet_sim", "POLYLINE", SIM_FIELDS)
-    by_id = {c["conduit_id"]: c for c in links}
-    cols = [f for f, _ in SIM_FIELDS] + ["SHAPE@"]
-    with arcpy.da.SearchCursor(gpkg.table_path(gpkg_path, "wwn_conduits"), ["conduit_id", "SHAPE@"]) as src, \
-            arcpy.da.InsertCursor(fc, cols) as ins:
-        for cid, shape in src:
-            c = by_id.get(cid)
-            if c is None:
-                continue
-            ins.insertRow([cid, int(_num(c, "dn")), _num(c, "max_flow_lps"), _num(c, "max_d_over_d"),
-                           _num(c, "max_velocity_mps"), _num(c, "surcharged_min"),
-                           symbology.sim_class(c.get("max_d_over_d"), c.get("surcharged_min")), shape])
-    return fc
-
-
-def build_sim_nodes_fc(arcpy, gpkg_path: str, nodes: list) -> str:
-    """memory\\wwnet_simnodes_<stem> (POINT): flooding nodes only; returns its path."""
-    fc = _memory_fc(arcpy, gpkg_path, "wwnet_simnodes", "POINT", SIM_NODE_FIELDS)
-    by_id = {n["node_id"]: n for n in nodes}
-    cols = [f for f, _ in SIM_NODE_FIELDS] + ["SHAPE@"]
-    with arcpy.da.SearchCursor(gpkg.table_path(gpkg_path, "wwn_nodes"), ["node_id", "SHAPE@"]) as src, \
-            arcpy.da.InsertCursor(fc, cols) as ins:
-        for nid, shape in src:
-            n = by_id.get(nid)
-            if n is None:
-                continue
-            ins.insertRow([nid, _num(n, "max_hgl_m"), _num(n, "max_depth_m"), _num(n, "flood_volume_m3"),
-                           _num(n, "surcharged_min"), shape])
-    return fc
-
-
-def sim_table_lines(links: list, top: int = 20) -> list:
-    """Top conduits by max d/D."""
-    hdr = f"{'Conduit':<10}{'DN':>5}{'Qmax L/s':>10}{'d/D':>6}{'v m/s':>7}{'Surch min':>10}  Peak at"
-    lines = [hdr, "-" * len(hdr)]
-    for c in sorted(links, key=lambda x: -_num(x, "max_d_over_d"))[:top]:
-        lines.append(f"{str(c['conduit_id'])[:10]:<10}{int(_num(c, 'dn')):>5}{_num(c, 'max_flow_lps'):>10.2f}"
-                     f"{_num(c, 'max_d_over_d'):>6.2f}{_num(c, 'max_velocity_mps'):>7.2f}"
-                     f"{_num(c, 'surcharged_min'):>10.0f}  {c.get('time_of_max_flow') or '-'}")
-    if len(links) > top:
-        lines.append(f"... {len(links) - top} more conduit(s) (full results in wwn_sim_links)")
-    return lines
-
-
-def _show_sim_layers(arcpy, msgs, gpkg_path: str, d: dict):
-    stem = _safe_stem(gpkg_path)
-    name = f"Simulation results \u2014 {stem}"
-    maplayers.remove_layers_named(arcpy, name)
-    fc = build_sim_fc(arcpy, gpkg_path, d["links"])
-    lyr = maplayers.add_results_layer(arcpy, fc, name, msgs)
-    symbology.apply("sim", lyr, msgs)
-    msgs.info(f"Results layer added: {name} (temporary \u2014 re-run Run Simulation after restarting Pro; "
-              "the results stay in the model's wwn_sim_* tables)")
-    nname = f"Simulation nodes \u2014 {stem}"
-    maplayers.remove_layers_named(arcpy, nname)
-    flooded = [n for n in d.get("nodes", []) if _num(n, "flood_volume_m3") > 0]
-    if flooded:
-        nfc = build_sim_nodes_fc(arcpy, gpkg_path, flooded)
-        nlyr = maplayers.add_results_layer(arcpy, nfc, nname, msgs)
-        symbology.apply("sim_nodes", nlyr, msgs)
-        msgs.info(f"Flooding layer added: {nname} ({len(flooded)} node(s))")
 
 
 def run_simulation(arcpy, msgs: Messages, gpkg_path: str, duration_h: float = 48.0, warmup_h: float = 24.0,
-                   roughness: str = "manning", manning_n: float = 0.013, flow_scale: float = 1.0,
-                   show_layer: bool = True, export_inp: str | None = None, exe=None) -> dict:
-    """Run the SWMM dynamic simulation (`wwnet simulate`), report and optionally map the results."""
-    d = cli.run_simulate(gpkg_path, duration_h, warmup_h, roughness, manning_n, flow_scale,
-                         export_inp or None, exe)
-    s = d["summary"]
-    msgs.info(f"Simulation {d.get('run_id') or ''}: {duration_h:g} h ({warmup_h:g} h warm-up), "
-              f"roughness {roughness}" + (f" n={manning_n:g}" if roughness == "manning" else "")
-              + f", flow scale {flow_scale:g}.")
-    msgs.info(f"Inflow ADWF {s['inflow_adwf_lps']:.3f} L/s (simulated {s['inflow_simulated_lps']:.3f} L/s); "
-              f"peak outlet flow {s['peak_outlet_flow_lps']:.3f} L/s; continuity error "
-              f"{s['continuity_error_pct']:.3f} %.")
-    msgs.info(f"{s['surcharged_conduits']} of {s['conduits']} conduit(s) surcharged; "
-              f"{s['flooded_nodes']} node(s) flooded ({s['total_flood_volume_m3']:.2f} m3).")
-    for line in sim_table_lines(d["links"]):
+                   roughness: str = "ks", manning_n: float = 0.013, flow_scale: float = 1.0,
+                   show_layer: bool = True, export_inp: str | None = None, label: str = "",
+                   series_from_selection: bool = True) -> dict:
+    """Run the SWMM dynamic simulation, report and show the Simulation results layers."""
+    s = _summary()
+    msgs.info(SAVE_EDITS_NOTE)
+    series = []
+    if series_from_selection:
+        try:
+            series = maplayers.selected_ids(arcpy, gpkg_path, "wwn_conduits", "conduit_id")
+        except Exception:  # noqa: BLE001 - no map / layer: just the default series
+            series = []
+        if series:
+            msgs.info(f"Storing time series for the {len(series)} selected conduit(s) as well (for Plot "
+                      "Hydrograph).")
+    msgs.start(f"Running the SWMM engine ({duration_h:g} h)")
+    d = engine.run_simulate(gpkg_path, duration_h, warmup_h, roughness, manning_n, flow_scale,
+                            export_inp or None, label, series)
+    for line in s.sim_summary_lines(d):
         msgs.info(line)
-    for w in d.get("warnings", [])[:MAX_LINES]:
-        msgs.warn(w)
+    msgs.info("Highest peak d/D:")
+    for line in s.sim_worst_lines(d["links"]):
+        msgs.info(line)
+    issues = [i for i in d.get("issues", []) if i.get("severity") != "info"]
+    for i in issues[:MAX_ISSUE_LINES]:
+        msgs.warn(s.issue_line(i))
+    if not d.get("issues") and d.get("warnings"):          # older engine
+        for w in d["warnings"][:MAX_ISSUE_LINES]:
+            msgs.warn(w)
     if export_inp:
         msgs.info(f"SWMM input file written: {export_inp}")
     if show_layer:
-        try:
-            _show_sim_layers(arcpy, msgs, gpkg_path, d)
-        except Exception as exc:  # noqa: BLE001
-            msgs.warn(f"Could not add the simulation layers to the map: {exc}")
+        msgs.step("Updating the Simulation results layers")
+        _show_sim_layers(arcpy, msgs, gpkg_path)
+    msgs.info("Stored as run " + s.run_title(d) + "; earlier runs: Show Simulation Run / Compare Simulation Runs.")
     return d
 
 
-def report_issues_sorted(issues):
-    order = {"error": 0, "warning": 1}
-    return sorted(issues, key=lambda i: order.get(i.get("severity"), 2))[:MAX_LINES]
+def _show_sim_layers(arcpy, msgs, gpkg_path):
+    try:
+        maplayers.ensure_layer(arcpy, gpkg_path, "wwn_sim_conduit_results", msgs)
+        maplayers.ensure_layer(arcpy, gpkg_path, "wwn_sim_node_results", msgs,
+                               definition_query=symbology.SIM_NODES_QUERY)
+    except Exception as exc:  # noqa: BLE001
+        msgs.warn(f"Could not show the Simulation results layers: {exc}")
 
 
-def node_ids(arcpy, layer) -> list:
-    with arcpy.da.SearchCursor(layer.dataSource if hasattr(layer, "dataSource") else layer,
-                               ["node_id"]) as cur:
-        return sorted({r[0] for r in cur if r[0]})
+def show_simulation_run(arcpy, msgs: Messages, gpkg_path: str, run: str = "latest",
+                        show_layer: bool = True) -> dict:
+    s = _summary()
+    r = engine.show_sim_run(gpkg_path, engine.run_key(run))
+    msgs.info(f"Showing run {s.run_title(r)} in the Simulation results layers.")
+    summ = r.get("summary") or {}
+    if summ:
+        msgs.info(f"Peak outlet flow {summ.get('peak_outlet_flow_lps', 0):.3f} L/s; "
+                  f"{summ.get('surcharged_conduits', 0)} conduit(s) surcharged; "
+                  f"{summ.get('flooded_nodes', 0)} node(s) flooded.")
+    for w in (r.get("warnings") or [])[:MAX_ISSUE_LINES]:
+        msgs.warn(w)
+    if show_layer:
+        _show_sim_layers(arcpy, msgs, gpkg_path)
+    return r
 
 
-def trace(arcpy, msgs: Messages, nodes_layer, node_id: str, direction: str = "Upstream",
-          select: bool = True, exe=None) -> dict:
-    ds = nodes_layer.dataSource
-    path, table = gpkg.split_datasource(ds)
-    if not path or table != "wwn_nodes":
-        raise RuntimeError("Choose the WWNet 'Nodes' layer (a wwn_nodes table in a .gpkg).")
+def compare_simulation_runs(arcpy, msgs: Messages, gpkg_path: str, run_a: str = "previous",
+                            run_b: str = "latest", show_layer: bool = True) -> dict:
+    c = engine.compare_sim_runs(gpkg_path, engine.run_key(run_a), engine.run_key(run_b), True)
+    lines = _summary().compare_lines(c)
+    for line in lines[:2]:
+        msgs.info(line)
+    if len(lines) > 2:
+        msgs.info("Largest d/D increases:")
+        for line in lines[2:]:
+            msgs.warn(line) if "NEW SURCHARGE" in line else msgs.info(line)
+    if show_layer:
+        try:
+            maplayers.ensure_layer(arcpy, gpkg_path, "wwn_sim_compare", msgs)
+        except Exception as exc:  # noqa: BLE001
+            msgs.warn(f"Could not show the Simulation comparison layer: {exc}")
+    return c
+
+
+def _hhmm(minute) -> str:
+    m = int(round(float(minute))) % 1440
+    return f"{m // 60:02d}:{m % 60:02d}"
+
+
+def plot_hydrograph(arcpy, msgs: Messages, gpkg_path: str, run: str = "latest", ids=None,
+                    out_csv: str | None = None, chart: bool = True) -> dict:
+    """Stored flow / depth series of conduits (or nodes) in a run: peaks in the messages, optional CSV,
+    and a line chart on the model's series table (best effort)."""
+    res = engine.sim_series(gpkg_path, engine.run_key(run), list(ids or []))
+    title = _summary().run_title(res["run"])
+    if res.get("missing"):
+        msgs.warn(f"No stored series for {', '.join(res['missing'])} in run {title}. Series are stored for the "
+                  "5 conduits nearest the outlet and for conduits selected when the run was made; available: "
+                  + (", ".join(res.get("available") or []) or "none"))
+    if not res["series"]:
+        raise RuntimeError(f"No time series to plot in run {title}.")
+    for sr in res["series"]:
+        q = [v for v in sr["flow_lps"] if v is not None]
+        if not q:
+            continue
+        k = sr["flow_lps"].index(max(q))
+        msgs.info(f"{sr['object_type']} {sr['object_id']} ({title}): peak {max(q):.3f} L/s at "
+                  f"{_hhmm(sr['minutes'][k])} (time of day after the warm-up), minimum {min(q):.3f} L/s, "
+                  f"mean {sum(q) / len(q):.3f} L/s, {len(q)} samples.")
+    if out_csv:
+        if not out_csv.lower().endswith(".csv"):
+            out_csv += ".csv"
+        with open(out_csv, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["run", "object_type", "object_id", "minute", "time", "flow_lps", "depth_m"])
+            for sr in res["series"]:
+                for m, q, dep in zip(sr["minutes"], sr["flow_lps"], sr["depth_m"]):
+                    w.writerow([title, sr["object_type"], sr["object_id"], m, _hhmm(m), q, dep])
+        msgs.info(f"Wrote {out_csv}")
+    if chart:
+        _series_chart(arcpy, msgs, gpkg_path, res)
+    return res
+
+
+def _series_chart(arcpy, msgs, gpkg_path, res):
+    """Line chart of flow against minute on the wwn_sim_series table, filtered to this run and these ids."""
+    ids = sorted({s["object_id"] for s in res["series"]})
+    where = f"run_id = {gpkg.sql_quote(res['run']['run_id'])} AND " + gpkg.in_clause("object_id", ids)
+    try:
+        tbl = maplayers.find_layer_for(arcpy, gpkg_path, "wwn_sim_series")
+        if tbl is None:
+            tbl = maplayers.active_map(arcpy).addDataFromPath(gpkg.table_path(gpkg_path, "wwn_sim_series"))
+        tbl.definitionQuery = where
+        ch = arcpy.charts.Line(x="minute", y=["flow_lps"], splitCategory="object_id",
+                               title=f"Flow, {_summary().run_title(res['run'])}",
+                               xTitle="Minutes after the warm-up", yTitle="Flow (L/s)")
+        ch.addToLayer(tbl)
+        msgs.info("Chart added to the Simulation time series table (open it from the table's Charts).")
+    except Exception as exc:  # noqa: BLE001 - charts are optional; the CSV / messages carry the data
+        msgs.warn(f"Could not create the chart ({type(exc).__name__}: {exc}); use the CSV output instead.")
+
+
+def trace(arcpy, msgs: Messages, gpkg_path: str, start: str | None = None, direction: str = "Upstream",
+          select: bool = True) -> dict:
+    """Trace from a node or conduit id (blank: the conduit or node selected in the map) and report the
+    upstream loading."""
+    start = (start or "").strip()
+    if not start:
+        picked = maplayers.selected_ids(arcpy, gpkg_path, "wwn_conduits", "conduit_id") or \
+            maplayers.selected_ids(arcpy, gpkg_path, "wwn_nodes", "node_id")
+        if not picked:
+            raise RuntimeError("Enter a start node / conduit id, or select one conduit or node of the model "
+                               "in the map.")
+        if len(picked) > 1:
+            msgs.warn(f"{len(picked)} features are selected; tracing from {picked[0]}.")
+        start = picked[0]
     d = direction.lower()
-    res = cli.run_trace(path, node_id, up=d in ("upstream", "both"), down=d in ("downstream", "both"),
-                        exe=exe)
-    traced = {node_id}
-    for key, ids in res.items():
-        msgs.info(f"{key} of {node_id}: {len(ids)} node(s): " + ", ".join(ids[:50])
-                  + (" ..." if len(ids) > 50 else ""))
-        traced.update(ids)
-    conduits = gpkg.conduits_between(path, traced)
-    msgs.info(f"{len(conduits)} conduit(s) on the traced path.")
+    res = engine.run_trace(gpkg_path, start, up=d in ("upstream", "both"), down=d in ("downstream", "both"))
+    for line in _summary().trace_lines(res, start):
+        msgs.info(line)
+    s = res.get("summary") or {}
+    nodes = sorted({*res.get("upstream", []), *res.get("downstream", []), s.get("start_node") or start})
+    conduits = list(res.get("conduits") or [])
     if select:
-        # the parameter may be a dataset path rather than a map layer: select on the map layer
-        nl = maplayers.find_layer_for(arcpy, path, "wwn_nodes")
-        if nl is not None:
-            _select(arcpy, nl, sorted(traced), "node_id")
-        else:
-            msgs.warn("The nodes layer is not in the active map; nothing selected (add the model with "
-                      "'Add Model To Map').")
-        cl = maplayers.find_layer_for(arcpy, path, "wwn_conduits")
-        if cl is not None:
-            _select(arcpy, cl, conduits, "conduit_id")
-        else:
-            msgs.warn("The conduit layer is not in the active map; only nodes were selected.")
-    return {"nodes": sorted(traced), "conduits": conduits}
+        maplayers.select_in_model(arcpy, gpkg_path, "wwn_nodes", nodes, "node_id", msgs, "Nodes")
+        maplayers.select_in_model(arcpy, gpkg_path, "wwn_conduits", conduits, "conduit_id", msgs, "conduit")
+    return {"nodes": nodes, "conduits": conduits, "summary": s, "start": start}
 
+
+# --------------------------------------------------------------- loading data
 
 def import_profile(msgs: Messages, gpkg_path: str, profile_id: str, csv_path: str | None = None,
                    description: str = "", set_default: bool = True, normalise: bool = False,
-                   pasted: str | None = None, exe=None) -> dict:
+                   pasted: str | None = None) -> dict:
     """Import a diurnal profile (CSV / TXT file, or text pasted from ICM: tab-separated Time / Factor)."""
     if not (profile_id or "").strip():
         raise RuntimeError("Enter a profile id.")
@@ -522,8 +425,7 @@ def import_profile(msgs: Messages, gpkg_path: str, profile_id: str, csv_path: st
         text = pasted
     else:
         raise RuntimeError("Choose a CSV / TXT profile file or paste the profile text.")
-    r = cli.run_import_profile(gpkg_path, profile_id.strip(), text, description or "", set_default,
-                               normalise, exe)
+    r = engine.run_import_profile(gpkg_path, profile_id.strip(), text, description or "", set_default, normalise)
     msgs.info(f"Imported profile {r['profile_id']}: {r['points']} row(s), interval {r.get('interval_min')} min, "
               f"mean factor {r['mean_factor']:.4f}, min {r['min_factor']:.3f}, max {r['max_factor']:.3f}"
               + (" (normalised to mean 1)" if r.get("normalised") else "")
@@ -531,6 +433,76 @@ def import_profile(msgs: Messages, gpkg_path: str, profile_id: str, csv_path: st
     for w in r.get("warnings", []):
         msgs.warn(w)
     return r
+
+
+NONE_PROFILE = "(none)"
+DEFAULT_PROFILE = "(model default)"
+
+
+def settings_lines(st: dict) -> list:
+    lines = [f"ADWF per connection {st['adwf_per_connection_lpd']:g} L/day "
+             f"({st['adwf_per_connection_lpd'] / 86400:.5f} L/s); peaking factor {st['peaking_factor']:g} "
+             "(GSDF = ADWF x peaking factor); default profile " + (st.get("default_profile") or NONE_PROFILE) + "."]
+    profs = st.get("profiles") or []
+    if profs:
+        lines.append(f"{len(profs)} profile(s):")
+        for p in profs:
+            lines.append(f"  {p['profile_id']}: {p['points']} point(s)"
+                         + (f", {p['interval_min']} min" if p.get("interval_min") else "")
+                         + (f", mean {p['mean_factor']:.3f}" if p.get("mean_factor") is not None else "")
+                         + (f" - {p['description']}" if p.get("description") else ""))
+    else:
+        lines.append("No diurnal profiles: import one with Import Diurnal Profile (the simulation uses a constant "
+                     "flow without one).")
+    return lines
+
+
+def model_settings(msgs: Messages, gpkg_path: str, adwf_per_connection_lpd=None, peaking_factor=None,
+                   default_profile: str | None = None) -> dict:
+    """Show / change the loading settings in wwn_meta (None keeps a value)."""
+    dp = None if default_profile is None else ("" if default_profile == NONE_PROFILE else default_profile)
+    st = engine.set_settings(gpkg_path, adwf_per_connection_lpd, peaking_factor, dp)
+    for line in settings_lines(st):
+        msgs.info(line)
+    return st
+
+
+ASSIGN_TARGETS = {
+    "Selected nodes (their node loads)": ("node_loads", "wwn_nodes", "node_id"),
+    "Selected node loads": ("node_loads", "wwn_node_loads", "load_id"),
+    "Selected sub-catchments": ("subcatchments", "wwn_subcatchments", "subcatchment_id"),
+    "All node loads": ("node_loads", None, None),
+    "All sub-catchments": ("subcatchments", None, None),
+}
+
+
+def assign_profile(arcpy, msgs: Messages, gpkg_path: str, target: str, profile_id: str) -> int:
+    """Set the diurnal profile of node loads / sub-catchments (selected in the map, or all)."""
+    if target not in ASSIGN_TARGETS:
+        raise RuntimeError(f"Choose what to assign: {', '.join(ASSIGN_TARGETS)}")
+    kind, table, idf = ASSIGN_TARGETS[target]
+    pid = "" if profile_id in (None, "", DEFAULT_PROFILE) else profile_id
+    if table is None:
+        import sqlite3
+        con = sqlite3.connect(f"file:{gpkg_path}?mode=ro", uri=True)
+        try:
+            sql = ("SELECT load_id FROM wwn_node_loads" if kind == "node_loads"
+                   else "SELECT subcatchment_id FROM wwn_subcatchments")
+            ids = [r[0] for r in con.execute(sql)]
+        finally:
+            con.close()
+    else:
+        ids = maplayers.selected_ids(arcpy, gpkg_path, table, idf)
+        if not ids:
+            raise RuntimeError(f"Nothing selected in the model's {table} layer / table in the active map.")
+    n = engine.assign_profile(gpkg_path, kind, ids, pid)
+    what = "node load(s)" if kind == "node_loads" else "sub-catchment(s)"
+    msgs.info(f"Profile {pid or DEFAULT_PROFILE} assigned to {n} {what}" +
+              (f" (from {len(ids)} selected id(s))" if table else "") + ".")
+    if n == 0 and kind == "node_loads" and table == "wwn_nodes":
+        msgs.warn("The selected nodes have no node loads (import connection point loads, or add rows to "
+                  "wwn_node_loads).")
+    return n
 
 
 def pipe_capacity(msgs: Messages, dn, grade, ks=None, flow=None) -> dict:
@@ -542,17 +514,15 @@ def pipe_capacity(msgs: Messages, dn, grade, ks=None, flow=None) -> dict:
 
 # ------------------------------------------------------------------ settings
 
-def set_settings(msgs: Messages, key: str | None, clear: bool, model: str | None, effort: str | None,
-                 exe: str | None):
+def set_settings(msgs: Messages, key: str | None, clear: bool, model: str | None, effort: str | None):
     if clear:
         msgs.info("Stored API key removed." if dpapi.clear_key() else "No stored API key to remove.")
     elif key and key.strip():
         dpapi.save_key(key)       # never echoed
         msgs.info(f"API key stored encrypted for this Windows user ({dpapi.key_path()}).")
-    cur = settings.save(model=model or None, effort=effort or None,
-                        wwnet_exe=exe if exe is not None else None)
+    cur = settings.save(model=model or None, effort=effort or None)
     k, src = dpapi.get_api_key()
-    msgs.info(f"Model: {cur['model']}, effort: {cur['effort']}, WWNet CLI: {cur['wwnet_exe'] or '(auto)'}")
+    msgs.info(f"Model: {cur['model']}, effort: {cur['effort']}")
     msgs.info("API key available: " + ({"env": "yes (ANTHROPIC_API_KEY environment variable)",
                                         "dpapi": "yes (stored, DPAPI)"}.get(src, "NO")))
     if clear and src == "env":
@@ -562,16 +532,25 @@ def set_settings(msgs: Messages, key: str | None, clear: bool, model: str | None
 # -------------------------------------------------------------- verify setup
 
 def verify_setup(msgs: Messages, live: bool = False, model: str | None = None, client_factory=None) -> bool:
-    """Print the vendor/package report; with `live` make one tiny API call. Never prints the key.
-    Returns True when imports (and the live call, if requested) succeeded."""
+    """Print the vendor/package report and the engine functions; with `live` make one tiny API call.
+    Never prints the key. Returns True when imports (and the live call, if requested) succeeded."""
     rep = vendor.report()
     for line in vendor.format_report(rep):
         msgs.info(line)
     ok = rep["_import_anthropic"][0] and rep["_import_wwnet_native"][0]
     if not rep["_import_anthropic"][0]:
-        msgs.warn("anthropic is not importable: the assistant will not work (check/design do not need it).")
+        msgs.warn("anthropic is not importable: the assistant will not work (check/design/simulate do not need it).")
     if not rep["_import_wwnet_native"][0]:
-        msgs.warn("wwnet_native is not importable: check/design/trace need it (or a wwnet CLI fallback).")
+        msgs.warn("wwnet_native is not importable: no WWNet tool except the assistant settings can run.")
+    else:
+        nat = shared.core("native")
+        lacking = nat.missing_functions()
+        if lacking:
+            ok = False
+            msgs.warn(f"wwnet_native is too old for this toolbox: missing {', '.join(lacking)}. Install the "
+                      "current bundle.")
+        else:
+            msgs.info("wwnet_native provides every engine function this toolbox uses.")
     if not live:
         msgs.info("Live API test skipped (tick 'Live API test' to run it).")
         return ok
@@ -624,9 +603,32 @@ def selection_context(tools: arcpy_tools.ArcpyTools, layer_name: str | None, use
             f"{idf} values: {ids}. Use get_selected_features for their attributes.")
 
 
+def apply_last_proposals(arcpy, msgs: Messages, layers_fn=None) -> int:
+    """Write exactly the edits the assistant proposed in the last run (for this project + map), after
+    checking that every current value still equals the value seen when it was proposed."""
+    key = map_key(arcpy)
+    saved = assistant_run.load_proposals(key)
+    if not saved:
+        raise RuntimeError("No saved proposals: the last assistant run proposed no edits (or they were applied).")
+    tools = arcpy_tools.ArcpyTools(arcpy, apply=True, layers_fn=layers_fn, emit=msgs.info)
+    ok, conflicts = tools.adopt_saved(saved)
+    if conflicts:
+        for c in conflicts:
+            msgs.warn(c)
+        raise RuntimeError(f"Nothing applied: {len(conflicts)} of {len(saved)} proposal(s) no longer match the "
+                           "data. Ask the assistant again.")
+    n = tools.apply_proposals(ok)
+    assistant_run.save_proposals(key, [])
+    msgs.info(f"Applied {n} saved proposal(s).")
+    return n
+
+
 def ask_assistant(arcpy, msgs: Messages, question: str, layer_name: str | None = None,
                   use_selected: bool = False, model: str | None = None, effort: str | None = None,
-                  apply: bool = False, reset: bool = False, client_factory=None, layers_fn=None):
+                  apply: bool = False, reset: bool = False, client_factory=None, layers_fn=None,
+                  apply_last: bool = False):
+    if apply_last:
+        return apply_last_proposals(arcpy, msgs, layers_fn=layers_fn)
     assistant_run.check_prereqs()
     key, src = dpapi.get_api_key()
     if not key:
@@ -638,23 +640,33 @@ def ask_assistant(arcpy, msgs: Messages, question: str, layer_name: str | None =
     if not (question or "").strip():
         raise RuntimeError("Enter a question.")
     tools = arcpy_tools.ArcpyTools(arcpy, apply=apply, layers_fn=layers_fn, emit=msgs.info)
+    if layer_name:
+        try:
+            path, table = gpkg.split_datasource(maplayers.layer_source(tools.find_layer(layer_name)))
+            if path and table and table.startswith("wwn_"):
+                tools.model = path
+        except Exception:  # noqa: BLE001 - selection_context reports a bad layer below
+            pass
     context = selection_context(tools, layer_name, use_selected)
     msgs.info(f"Asking {model} (effort {effort}); edits will be "
               + ("APPLIED if proposed." if apply else "proposed only (nothing is written).")
               + " Tool results (attribute values) are sent to Anthropic.")
+    hkey = map_key(arcpy)
     res = assistant_run.run(question, api_key=key, model=model, effort=effort, tools=tools, msgs=msgs,
-                            history_key=map_key(arcpy), reset=reset, context=context,
+                            history_key=hkey, reset=reset, context=context,
                             client_factory=client_factory)
     if res.error:
         msgs.error(res.error)
+    pending = [p for p in res.proposals if not p.applied]
     if res.proposals and not apply:
         msgs.info("")
         msgs.info(f"PROPOSED EDITS ({len(res.proposals)}) - NOT applied:")
-        for line in arcpy_tools.proposal_table(res.proposals):
+        for line in arcpy_tools.proposal_lines(res.proposals):
             msgs.info("  " + line)
-        msgs.info("Re-run this tool with 'Apply proposed edits' ticked to apply them. The assistant "
-                  "will propose again; only edits proposed in that run are written.")
+        msgs.info("To write exactly these edits, run this tool again with 'Apply the proposals from the last "
+                  "run' ticked (no new question is sent).")
     elif res.proposals:
         msgs.info(f"{sum(p.applied for p in res.proposals)} of {len(res.proposals)} proposed edit(s) applied.")
+    assistant_run.save_proposals(hkey, arcpy_tools.proposal_dicts(pending))
     msgs.info(f"Done ({res.stop_reason}); tokens in/out: {res.tokens_in}/{res.tokens_out}.")
     return res

@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from conftest import BENCH, REPO
-from wwnet.core import checks, hydraulics, native, rules, ruleset, schema, tomlmini
+from wwnet.core import calc, checks, native, ruleset, schema, style, summary, tomlmini
 
 
 def _bench_rows():
@@ -15,23 +15,26 @@ def _bench_rows():
 
 
 @pytest.mark.parametrize("row", _bench_rows(), ids=lambda r: f"DN{r['dn']}-1in{r['grade_1in']}")
-def test_colebrook_matches_benchmark(row):
-    q = hydraulics.part_full_flow_lps(int(row["dn"]), float(row["grade_1in"]),
-                                      float(row["d_over_D"]), ks_mm=1.0)
-    assert q == pytest.approx(float(row["colebrook_lps"]), abs=0.15)
+def test_capacity_matches_benchmark(row):
+    """The calculator (engine) reproduces the Table 4.4 Colebrook benchmark."""
+    pytest.importorskip("wwnet_native")
+    r = calc.pipe_capacity(int(row["dn"]), float(row["grade_1in"]), 1.0, float(row["d_over_D"]))
+    assert r["capacity_lps"] == pytest.approx(float(row["colebrook_lps"]), abs=0.15)
 
 
-def test_colebrook_within_5pct_of_table44():
-    for r in _bench_rows():
-        q = hydraulics.part_full_flow_lps(int(r["dn"]), float(r["grade_1in"]), float(r["d_over_D"]))
-        assert abs(q - float(r["table44_lps"])) / float(r["table44_lps"]) < 0.05
-
-
-def test_depth_ratio_roundtrip_and_surcharge():
-    q = hydraulics.part_full_flow_lps(300, 400, 0.5)
-    assert hydraulics.depth_ratio_for_flow(q, 300, 400) == pytest.approx(0.5, abs=1e-4)
-    assert hydraulics.depth_ratio_for_flow(1e6, 300, 400) is None
-    assert hydraulics.depth_ratio_for_flow(0, 300, 400) == 0.0
+def test_capacity_any_dn_flow_and_surcharge():
+    pytest.importorskip("wwnet_native")
+    r = calc.pipe_capacity(100, 60, flow_lps=2.0)          # outside DS 50 Table 4.4: still calculated
+    assert r["full_flow_lps"] > 2.0 and 0 < r["depth_ratio_at_flow"] < 1
+    big = calc.pipe_capacity(300, 400, flow_lps=1e4)
+    assert big["depth_ratio_at_flow"] is None and "surcharge" in big["note"]
+    assert calc.pipe_capacity(225, 300)["capacity_lps"] == calc.pipe_capacity(225, 300)["full_flow_lps"]
+    with pytest.raises(ValueError):
+        calc.pipe_capacity(225, 0)
+    chk = calc.check_conduit(100, 60, gsdf_lps=1)
+    assert chk["in_ds50_range"] is False and chk["results"][0]["result"] == "fail"
+    lines = calc.capacity_lines({**r, "ds50_checks": chk})
+    assert any("outside DS 50 Table 4.4" in ln for ln in lines)
 
 
 def test_toml_fallback_parser_matches_tomllib():
@@ -57,53 +60,48 @@ def test_native_check_conduit_kwargs():
     from wwnet.assistant import tools
     r = tools.check_conduit({"dn_mm": 150, "grade_1in": 200, "gsdf_lps": 7, "length_m": 80,
                              "land_use": "industrial"})
-    assert r["source"] == "wwnet", r.get("note")
+    assert r["source"] == "wwnet" and r["in_ds50_range"]
     by_rule = {c["rule"]: c["result"] for c in r["results"]}
     assert by_rule["max_flow"] == "fail" and by_rule["min_dn"] == "fail"
 
 
 def test_lookup_and_gsdf():
+    pytest.importorskip("wwnet_native")
     assert ruleset.lookup("grades", "225")["min_grade_1in"] == 300
     assert ruleset.lookup("residential", "south:R20")[0]["dry_gsdf_lps_ha"] == 0.219
     with pytest.raises(KeyError):
         ruleset.lookup("nope")
     r = ruleset.residential_gsdf(10, "R20", "dry", "south")
-    assert r["gsdf_lps"] == pytest.approx(2.19)
-    low = ruleset.residential_gsdf(1, "R10", "dry", "south") if "R10" in {
-        x["rcode"] for x in ruleset._rows_as_dicts(ruleset.load_ruleset()["loading"]["residential"]["south"])
-    } else None
-    assert low is None  # R10 is not in the tables
+    assert r["gsdf_lps"] == pytest.approx(2.19, rel=0.01) and r["source"] == "wwnet"
+    with pytest.raises(ValueError):
+        ruleset.residential_gsdf(1, "R1000", "dry", "south")
 
 
-def test_check_conduit_fallback():
-    res = {r["rule"]: r for r in rules.check_conduit(150, 100, gsdf_lps=9)}
-    assert res["max_d_over_D"]["result"] == "fail" and res["max_d_over_D"]["limit"] == 0.5
-    assert res["table_4_4_max_flow"]["result"] == "fail"
-    flat = {r["rule"]: r for r in rules.check_conduit(150, 250)}
-    assert flat["min_grade"]["result"] == "warn" and flat["min_grade"]["clause"] == "4.2.1(q)"
-    assert {r["rule"]: r for r in rules.check_conduit(225, 400)}["min_grade"]["result"] == "fail"
-    assert rules.check_conduit(100, 100)[0]["result"] == "fail"
+def test_shared_palette_and_summary_text():
+    assert style.rgb("#2e9e44") == [46, 158, 68]
+    assert set(style.SIM_CLASS) == {"low", "medium", "high", "surcharged"}
+    assert style.dn_colour(525) != style.DEFAULT and style.dn_colour("x") == style.DEFAULT
+    d = {"conduit_results": [
+        {"conduit_id": "C1", "dn": 150, "grade_1in": 100, "total_lps": 9, "capacity_lps": 8, "d_over_d": 0.6,
+         "result": "fail", "checks": [{"rule": "max_flow", "clause": "T4.4", "result": "fail", "message": "too much"}]},
+        {"conduit_id": "C2", "dn": 150, "grade_1in": 100, "result": "pass", "checks": []}],
+        "summary": {"conduits": 2, "pass": 1, "warn": 0, "fail": 1, "terminal_gsdf_lps": 9,
+                    "total_local_gsdf_lps": 9}}
+    assert summary.failed_conduits(d) == ["C1"]
+    w = summary.design_worst_lines(d["conduit_results"])
+    assert len(w) == 1 and "C1 DN150 1:100: FAIL" in w[0] and "too much" in w[0]
+    assert summary.design_detail_lines(d["conduit_results"])[0].startswith("max_flow (T4.4): 1 conduit(s)")
+    assert "1 fail" in summary.design_summary_lines(d)[0]
+    t = summary.trace_lines({"upstream": ["A", "B"], "conduits": ["P1", "P2"],
+                             "summary": {"start_node": "N", "start_conduit": "P0", "upstream_nodes": 2,
+                                         "adwf_lps": 1.5, "gsdf_lps": 2.25}}, "P0")
+    assert t[0].startswith("Upstream of P0: 2 node(s)") and "ADWF 1.500 L/s" in t[-1]
+    assert summary.runs_lines([])[0].startswith("No stored")
+    assert summary.issue_line({"code": "X", "object_type": "node", "object_id": "N1", "clause": None,
+                               "message": "m"}) == "X node N1: m"
 
 
 # ---------------------------------------------------------------- schema
-def test_create_model(tmp_path):
-    p = schema.create_model(str(tmp_path / "m.gpkg"))
-    con = sqlite3.connect(p)
-    names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    assert set(schema.ALL_TABLES) <= names
-    assert con.execute("PRAGMA application_id").fetchone()[0] == 1196444487
-    assert con.execute("SELECT srs_id FROM gpkg_geometry_columns WHERE table_name='wwn_conduits'"
-                       ).fetchone()[0] == 7850
-    con.execute("INSERT INTO wwn_nodes(node_id) VALUES ('N1')")
-    assert con.execute("SELECT status, data_source, node_type FROM wwn_nodes").fetchone() == (
-        "proposed", "design", "ac")
-    con.close()
-    assert set(schema.table_identifiers(p)) >= set(schema.ALL_TABLES)
-    with pytest.raises(FileExistsError):
-        schema.create_model(p)
-    schema.create_model(p, overwrite=True)
-
-
 def test_enums_and_summary():
     e = schema.parse_enums()
     assert e["node_type"][0] == "ac" and "wet_well" in e["node_type"]
@@ -118,17 +116,19 @@ def test_enums_and_summary():
 
 
 # ---------------------------------------------------------------- checks / install
-def test_parse_issues_variants():
-    a = checks.parse_issues(json.dumps([{"severity": "Error", "code": "E1", "object_type": "conduit",
-                                         "object_id": "C1", "clause": "4.2.1(m)", "message": "m"}]))
-    assert a[0]["table"] == "wwn_conduits" and a[0]["severity"] == "error"
-    b = checks.parse_issues(json.dumps({"issues": [{"level": "warning", "rule": "W", "kind": "node",
-                                                    "id": "N1", "msg": "x"}]}))
-    assert b[0]["table"] == "wwn_nodes" and b[0]["code"] == "W" and b[0]["object_id"] == "N1"
-    assert checks.parse_issues("{}") == []
+def test_normalise_issue_variants():
+    a = checks.normalise_issue({"severity": "Error", "code": "E1", "object_type": "conduit",
+                                "object_id": "C1", "clause": "4.2.1(m)", "message": "m"})
+    assert a["table"] == "wwn_conduits" and a["severity"] == "error"
+    b = checks.normalise_issue({"level": "warn", "rule": "W", "kind": "node", "id": "N1", "msg": "x",
+                                "source": "design"})
+    assert b["table"] == "wwn_nodes" and b["code"] == "W" and b["severity"] == "warning"
+    assert b["source"] == "design"
+    assert checks.count_by_severity([a, b, {"severity": "odd"}]) == {"error": 1, "warning": 1, "info": 1}
 
 
 def test_read_issue_table(tmp_path):
+    pytest.importorskip("wwnet_native")
     p = schema.create_model(str(tmp_path / "m.gpkg"))
     con = sqlite3.connect(p)
     con.execute("INSERT INTO wwn_issues(severity,code,object_type,object_id,clause,message) "

@@ -26,6 +26,20 @@ class Messages:
     def error(self, text: str):
         self.arcpy.AddError(str(text))
 
+    def step(self, label: str):
+        """Progress label in the geoprocessing dialog (best effort)."""
+        try:
+            self.arcpy.SetProgressorLabel(str(label))
+        except Exception:  # noqa: BLE001 - fakes / old arcpy
+            pass
+
+    def start(self, label: str):
+        """Start a default (animated) progressor with `label`."""
+        try:
+            self.arcpy.SetProgressor("default", str(label))
+        except Exception:  # noqa: BLE001
+            pass
+
 
 class ChunkedWriter:
     """Buffers streamed text and emits it as messages at line ends or every `chunk` chars."""

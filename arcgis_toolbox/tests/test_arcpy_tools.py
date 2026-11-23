@@ -97,8 +97,9 @@ def test_propose_without_apply_never_writes(tools, demo_gpkg):
     with pytest.raises(PermissionError):
         t.apply_proposals(t.proposals)                     # apply flag off: hard refusal
     assert a.writes == []
-    lines = arcpy_tools.proposal_table(t.proposals)
-    assert "P01" in lines[2] and "150" in lines[2] and "225" in lines[2]
+    lines = arcpy_tools.proposal_lines(t.proposals)
+    assert lines[0] == "wwn_conduits P01.dn: 150 -> 225  (bigger)"
+    assert lines[1] == "wwn_conduits P01.notes: NULL -> 'upsized'  (bigger)"
 
 
 def test_apply_true_writes_only_proposed(fake_arcpy, demo_gpkg):

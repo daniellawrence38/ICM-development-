@@ -339,22 +339,17 @@ def report_to_messages(msgs, rep, max_warnings: int = MAX_WARNING_LINES):
     for w in ex:
         msgs.warn(str(w))
     if len(rep.warnings) > len(ex):
-        msgs.warn(f"... {len(rep.warnings) - len(ex)} more import warning(s) not shown (see the counts by code "
-                  "above).")
+        msgs.warn(f"... {len(rep.warnings) - len(ex)} more import warning(s) not shown: all of them are in the "
+                  "model's Issues layer (source 'import').")
     if rep.infos:
         msgs.info(f"{len(rep.infos)} diameter(s) mapped to the nearest standard DN (raw value kept as the "
                   f"internal diameter), e.g. {rep.infos[0]}")
 
 
 def native_with_write():
-    from . import cli
-    native = cli.native_service()
-    if native is None:
-        raise RuntimeError(cli.no_backend_message())
-    if not callable(getattr(native, "write_model", None)):
-        raise RuntimeError("The installed wwnet_native is too old: it has no write_model(). Install the "
-                           "wheel built from this version of WWNet (or the current no-install bundle).")
-    return native
+    """The engine with write_model / check / store_issues (EngineError with install help if missing)."""
+    from . import engine
+    return engine.native("write_model", "check", "store_issues")
 
 
 def _tnorm(name: str) -> str:

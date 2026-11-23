@@ -71,11 +71,12 @@ def default_layers(arcpy):
 
 
 class ArcpyTools:
-    def __init__(self, arcpy=None, apply: bool = False, layers_fn=None, emit=None):
+    def __init__(self, arcpy=None, apply: bool = False, layers_fn=None, emit=None, model: str | None = None):
         self._arcpy = arcpy
         self.apply = bool(apply)
         self._layers_fn = layers_fn
         self.emit = emit or (lambda s: None)
+        self.model = model                      # preferred model .gpkg (the context layer's)
         self.proposals: list[Proposal] = []     # everything proposed in this run
         self.apply_log: list[str] = []
 
@@ -92,6 +93,16 @@ class ArcpyTools:
     @staticmethod
     def table_of(layer):
         return gpkg.table_of(maplayers.layer_source(layer))
+
+    def model_path(self) -> str:
+        """The WWNet model the assistant works on: the context layer's, else the first in the map."""
+        if self.model:
+            return self.model
+        for lyr in self.layers():
+            path, table = gpkg.split_datasource(maplayers.layer_source(lyr))
+            if path and table and table.startswith("wwn_"):
+                return path
+        raise _engine().ToolError("No WWNet model is in the active map (add it with 'Add Model To Map').")
 
     def find_layer(self, name: str):
         n = (name or "").strip().lower()
@@ -196,13 +207,7 @@ class ArcpyTools:
             raise _engine().ToolError(f"No feature with {idf} = {args['id_value']!r} in {lyr.name}")
         d = rows[0]
         if tbl == "wwn_conduits":
-            geom_len = d.pop("SHAPE@LENGTH", None)
-            length = d.get("length_m") or geom_len
-            us, ds_inv = d.get("us_invert"), d.get("ds_invert")
-            derived = {"length_m_used": length}
-            if length and us is not None and ds_inv is not None and us > ds_inv:
-                derived["grade_1in"] = round(length / (us - ds_inv), 1)
-            d["derived"] = derived
+            d["derived"] = _tools().conduit_derived(d, d.pop("SHAPE@LENGTH", None))
         return d
 
     # ------------------------------------------------------------- edit tool
@@ -238,10 +243,29 @@ class ArcpyTools:
         self.proposals.extend(batch)
         if not self.apply:
             return {"applied": False, "outcome": "proposed_not_applied", "count": len(batch),
-                    "message": "Edits recorded as PROPOSALS only; nothing was changed. The engineer "
-                               "must re-run the tool with 'Apply proposed edits' ticked to apply them."}
+                    "message": "Edits recorded as PROPOSALS only; nothing was changed. The engineer can "
+                               "write exactly these with 'Apply the proposals from the last run' (or re-run "
+                               "the tool with 'Apply proposed edits' ticked)."}
         n = self.apply_proposals(batch)
         return {"applied": True, "outcome": "applied_and_saved", "count": n}
+
+    def adopt_saved(self, saved: list) -> tuple:
+        """Saved proposals (dicts from the last run) -> (Proposal objects whose current value still equals
+        the recorded old value, conflict messages). Adopted proposals may then be applied."""
+        ok, conflicts = [], []
+        for d in saved:
+            p = Proposal(**{k: d.get(k) for k in ("layer_name", "table", "source", "workspace", "id_field", "id",
+                                                  "field", "old", "value", "reason")})
+            rows = self._rows(p.source, [p.field], self._where_eq(p.source, p.id_field, p.id), 1)
+            if not rows:
+                conflicts.append(f"{p.table} {p.id}: feature no longer exists")
+            elif py_value(rows[0][p.field]) != p.old:
+                conflicts.append(f"{p.table} {p.id}.{p.field}: now {rows[0][p.field]!r}, was {p.old!r} when "
+                                 f"proposed")
+            else:
+                ok.append(p)
+        self.proposals.extend(ok)
+        return ok, conflicts
 
     def apply_proposals(self, batch) -> int:
         """Write proposals. Refuses anything not proposed through this instance."""
@@ -308,17 +332,17 @@ class ArcpyTools:
     def handlers(self) -> dict:
         return {"list_layers": self.list_layers, "get_selected_features": self.get_selected_features,
                 "query_features": self.query_features, "get_feature": self.get_feature,
-                "propose_edits": self.propose_edits}
+                "propose_edits": self.propose_edits, **_tools().flow_handlers(self.model_path)}
 
 
-def proposal_table(proposals) -> list:
-    """Plain-text table lines for the geoprocessing messages."""
-    rows = [("Layer", "Feature", "Field", "Current", "Proposed")]
-    for p in proposals:
-        rows.append((p.table, str(p.id), p.field, "NULL" if p.old is None else str(p.old),
-                     "NULL" if p.value is None else str(p.value)))
-    widths = [max(len(r[i]) for r in rows) for i in range(5)]
-    fmt = lambda r: "  ".join(c.ljust(w) for c, w in zip(r, widths)).rstrip()  # noqa: E731
-    lines = [fmt(rows[0]), "  ".join("-" * w for w in widths)]
-    lines += [fmt(r) for r in rows[1:]]
-    return lines
+def proposal_lines(proposals) -> list:
+    """One line per proposal (proportional-font friendly): 'wwn_conduits C1.dn: 150 -> 225'."""
+    def v(x):
+        return "NULL" if x is None else repr(x) if isinstance(x, str) else str(x)
+    return [f"{p.table} {p.id}.{p.field}: {v(p.old)} -> {v(p.value)}" + (f"  ({p.reason})" if p.reason else "")
+            for p in proposals]
+
+
+def proposal_dicts(proposals) -> list:
+    return [{k: getattr(p, k) for k in ("layer_name", "table", "source", "workspace", "id_field", "id", "field",
+                                        "old", "value", "reason")} for p in proposals]

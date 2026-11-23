@@ -1,10 +1,7 @@
-"""Run the native check (CLI as fallback) and normalise its issues (no qgis imports)."""
+"""Run the model check through wwnet_native and normalise issues (no qgis imports)."""
 from __future__ import annotations
 
-import json
-import shutil
 import sqlite3
-import subprocess
 
 from . import native
 
@@ -22,10 +19,7 @@ TYPE_TO_TABLE = (
     ("pumpstation", "wwn_pump_stations"), ("ps", "wwn_pump_stations"),
     ("rising", "wwn_rising_mains"), ("subcatch", "wwn_subcatchments"), ("pump", "wwn_pumps"),
 )
-
-
-def find_cli():
-    return shutil.which("wwnet")
+SEVERITIES = ("error", "warning", "info")
 
 
 def normalise_issue(raw: dict) -> dict:
@@ -34,6 +28,10 @@ def normalise_issue(raw: dict) -> dict:
         v = next((raw[n] for n in names if n in raw and raw[n] is not None), "")
         out[field] = v if isinstance(v, (int, float)) else str(v)
     out["severity"] = str(out["severity"]).lower() or "info"
+    if out["severity"] == "warn":
+        out["severity"] = "warning"
+    if raw.get("source"):
+        out["source"] = str(raw["source"])
     out["table"] = issue_table(out["object_type"])
     return out
 
@@ -48,59 +46,40 @@ def issue_table(object_type) -> str | None:
     return None
 
 
-def parse_issues(stdout: str) -> list:
-    data = json.loads(stdout)
-    if isinstance(data, dict):
-        for k in ("issues", "results", "findings", "diagnostics"):
-            if isinstance(data.get(k), list):
-                data = data[k]
-                break
-        else:
-            data = []
-    return [normalise_issue(x) for x in data if isinstance(x, dict)]
+def count_by_severity(issues) -> dict:
+    """{'error': n, 'warning': n, 'info': n} (unknown severities count as info)."""
+    counts = dict.fromkeys(SEVERITIES, 0)
+    for i in issues:
+        sev = i.get("severity") if isinstance(i, dict) else None
+        counts[sev if sev in counts else "info"] += 1
+    return counts
 
 
 def read_issue_table(gpkg: str) -> list:
+    """Stored wwn_issues rows (all sources), errors first."""
     con = sqlite3.connect(gpkg)
     con.row_factory = sqlite3.Row
     try:
         rows = con.execute("SELECT * FROM wwn_issues ORDER BY fid").fetchall()
-        return [normalise_issue(dict(r)) for r in rows]
+        out = [normalise_issue(dict(r)) for r in rows]
     except sqlite3.Error:
         return []
     finally:
         con.close()
+    order = {s: n for n, s in enumerate(SEVERITIES)}
+    return sorted(out, key=lambda i: order.get(i["severity"], 3))
 
 
-def _run_cli(exe: str, gpkg: str, timeout: int):
-    try:
-        proc = subprocess.run([exe, "check", gpkg, "--json"], capture_output=True, text=True,
-                              timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return [], f"wwnet check failed to run: {exc}"
-    try:
-        issues = parse_issues(proc.stdout)
-    except (ValueError, TypeError):
-        detail = (proc.stderr or proc.stdout).strip()[:500]
-        return [], f"wwnet check returned unparseable output (exit {proc.returncode}): {detail}"
-    return issues, f"wwnet check finished (exit {proc.returncode}); {len(issues)} issue(s)."
-
-
-def run_check(gpkg: str, timeout: int = 300):
-    """Returns (issues, message).
-
-    Order: native wwnet_native module, then the `wwnet` CLI (fallback only), then the stored
-    wwn_issues table with a message explaining how to install the wheel.
-    """
+def run_check(gpkg: str):
+    """Returns (issues, message). Without wwnet_native: the stored wwn_issues and the install hint."""
     nat = native.service()
-    if nat is not None:
-        try:
-            raw = nat.check(gpkg, True)
-        except Exception as exc:  # noqa: BLE001 - surface any native error to the dock
-            return [], f"wwnet check failed: {exc}"
-        issues = [normalise_issue(x) for x in raw if isinstance(x, dict)]
-        return issues, f"wwnet check finished (native); {len(issues)} issue(s)."
-    exe = find_cli()
-    if exe:
-        return _run_cli(exe, gpkg, timeout)
-    return read_issue_table(gpkg), "wwnet_native is not installed; showing stored wwn_issues only. " + native.INSTALL_HINT
+    if nat is None:
+        return read_issue_table(gpkg), "wwnet_native is not installed; showing stored issues only. " + \
+            native.INSTALL_HINT
+    try:
+        raw = nat.check(gpkg, True)
+    except Exception as exc:  # noqa: BLE001 - surface any native error to the dock
+        return [], f"Model check failed: {exc}"
+    issues = [normalise_issue(x) for x in raw if isinstance(x, dict)]
+    c = count_by_severity(issues)
+    return issues, (f"Model check: {c['error']} error(s), {c['warning']} warning(s), {c['info']} info.")

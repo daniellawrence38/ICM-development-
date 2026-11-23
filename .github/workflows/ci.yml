@@ -34,7 +34,7 @@ jobs:
       - run: pytest -q qgis_plugin/tests
 
   arcgis-toolbox:
-    # ArcGIS Pro toolbox: tests run against a fake arcpy; CLI-dependent tests need the built binary
+    # ArcGIS Pro toolbox: tests run against a fake arcpy; the binding/CLI parity test needs the built binary
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -115,13 +115,18 @@ class QgisTools:
         f = feats[0]
         d = feature_dict(f)
         if table_of(l) == "wwn_conduits":
-            length = d.get("length_m") or (f.geometry().length() if f.hasGeometry() else None)
-            us, ds = d.get("us_invert"), d.get("ds_invert")
-            derived = {"length_m_used": length}
-            if length and us is not None and ds is not None and us > ds:
-                derived["grade_1in"] = round(length / (us - ds), 1)
-            d["derived"] = derived
+            d["derived"] = pure_tools.conduit_derived(d, f.geometry().length() if f.hasGeometry() else None)
         return d
+
+    def model_path(self) -> str:
+        """The .gpkg of the WWNet model loaded in the project (active layer's model first)."""
+        lyr = self.iface.activeLayer() if self.iface is not None else None
+        if lyr is not None and table_of(lyr):
+            return lyr.source().split("|")[0]
+        for l in vector_layers():
+            if table_of(l) in ("wwn_conduits", "wwn_nodes"):
+                return l.source().split("|")[0]
+        raise ToolError("No WWNet model is loaded in the project (use Open model first).")
 
     # ------------------------------------------------------------ edit tool
     def propose_edits(self, args):
@@ -191,6 +196,8 @@ class QgisTools:
             "get_feature": wrap(self.get_feature),
             # waits as long as the engineer takes to decide
             "propose_edits": wrap(self.propose_edits, interruptible=False),
+            # the engine calls run off the GUI thread; only the model lookup needs it
+            **pure_tools.flow_handlers(lambda: invoker.call(lambda _a: self.model_path(), {}, stop=stop)),
         }
 
 

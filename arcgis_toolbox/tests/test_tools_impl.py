@@ -1,3 +1,4 @@
+import csv
 import importlib.machinery
 import importlib.util
 import os
@@ -7,36 +8,53 @@ from pathlib import Path
 import pytest
 
 import fake_arcpy as fa
+from conftest import rows
 from wwnet_arcgis import capacity, gpkg, maplayers, symbology, tools_impl
 from wwnet_arcgis.messages import Messages
 
 TOOLBOX = Path(__file__).resolve().parents[1]
+pytest.importorskip("wwnet_native")
 
 
-RES_NAME = "Design results \u2014 demo"
-
-
-def mk(fake_arcpy, gpkg_path):
-    layers = [fa.make_layer("Nodes", gpkg.table_path(gpkg_path, "wwn_nodes")),
-              fa.make_layer("Gravity sewers", gpkg.table_path(gpkg_path, "wwn_conduits"))]
+def mk(fake_arcpy, gpkg_path, sel_nodes=None, sel_conduits=None):
+    layers = [fa.make_layer("Nodes", gpkg.table_path(gpkg_path, "wwn_nodes"), selection=sel_nodes),
+              fa.make_layer("Gravity sewers", gpkg.table_path(gpkg_path, "wwn_conduits"), selection=sel_conduits)]
     return fake_arcpy(layers), layers
 
 
-def test_new_model_creates_valid_gpkg_and_adds_layers(fake_arcpy, tmp_path):
+def text(a, level=None):
+    return "\n".join(t for lv, t in a.log if level is None or lv == level)
+
+
+def names(layers):
+    return [maplayers.layer_name(lyr) for lyr in layers]
+
+
+def load_pyt(name="wwnet_pyt"):
+    loader = importlib.machinery.SourceFileLoader(name, str(TOOLBOX / "WWNet.pyt"))
+    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader))
+    loader.exec_module(mod)
+    return mod
+
+
+def fid_of(path, table, idf, value):
+    return rows(path, f"select fid from {table} where {idf}=?", value)[0][0]
+
+
+# ---------------------------------------------------------------- model tools
+
+def test_new_model_creates_v3_gpkg_and_adds_layers(fake_arcpy, tmp_path):
     a = fake_arcpy([])
     out = tmp_path / "m" / "new"
     out.parent.mkdir()
     path = tools_impl.new_model(a, Messages(a), str(out), True)
     assert path.endswith(".gpkg") and os.path.isfile(path)
-    con = sqlite3.connect(path)
-    assert con.execute("select value from wwn_meta where key='crs'").fetchone() == ("EPSG:7850",)
-    con.close()
-    added = [p for k, p in a.added if k == "data"]
-    assert [os.path.basename(p) for p in added] == [
-        f"main.{t}" for t in ("wwn_subcatchments", "wwn_rising_mains", "wwn_conduits",
-                              "wwn_pump_stations", "wwn_nodes", "wwn_node_loads")]
-    warns = [t for lv, t in a.log if lv == "warn"]
-    assert any("Symbology" in w for w in warns)        # fake layers have no symbology -> warn, no raise
+    assert rows(path, "select value from wwn_meta where key='schema_version'") == [("3",)]
+    added = [os.path.basename(p) for k, p in a.added if k == "data"]
+    # empty result layers are not added
+    assert added == [f"main.{t}" for t in ("wwn_subcatchments", "wwn_rising_mains", "wwn_conduits",
+                                           "wwn_pump_stations", "wwn_nodes", "wwn_node_loads")]
+    assert "Symbology" in text(a, "warn")        # fake layers have no symbology -> warn, no raise
     with pytest.raises(FileExistsError):
         tools_impl.new_model(a, Messages(a), path, False)
     tools_impl.new_model(a, Messages(a), path, False, overwrite=True)
@@ -48,6 +66,8 @@ def test_symbology_failure_only_warns():
     assert symbology.apply("wwn_nodes", object(), m) is False and "wwn_nodes" in log[0]
     assert symbology.apply("wwn_pumps", object(), m) is False
     assert "DN" in symbology.CONDUIT_LABEL_ARCADE and '" 1:"' in symbology.CONDUIT_LABEL_ARCADE
+    assert set(symbology._STYLERS) >= {"wwn_results_conduits", "wwn_sim_conduit_results", "wwn_issues",
+                                       "wwn_sim_compare", "wwn_subcatchments"}
 
 
 def test_add_model_rejects_non_wwnet_file(fake_arcpy, tmp_path):
@@ -61,187 +81,193 @@ def test_add_model_rejects_non_wwnet_file(fake_arcpy, tmp_path):
         tools_impl.add_model_to_map(a, Messages(a), str(p))
 
 
-def test_check_model_messages_and_table(fake_arcpy, wwnet_exe, demo_gpkg, tmp_path):
-    a, _ = mk(fake_arcpy, demo_gpkg)
-    issues = tools_impl.check_model(a, Messages(a), demo_gpkg, str(tmp_path / "o.gdb" / "issues"), wwnet_exe)
+def test_add_model_upgrades_old_file_and_skips_layers_already_in_map(fake_arcpy, demo_gpkg):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    con = sqlite3.connect(demo_gpkg)
+    con.execute("update wwn_meta set value='2' where key='schema_version'")
+    con.commit()
+    con.close()
+    tools_impl.add_model_to_map(a, Messages(a), demo_gpkg)
+    assert "Upgraded the model" in text(a)
+    assert rows(demo_gpkg, "select value from wwn_meta where key='schema_version'") == [("3",)]
+    assert names(layers).count("Nodes") == 1                 # already in the map: not added twice
+
+
+def test_model_resolution_from_map(fake_arcpy, demo_gpkg, tmp_path):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    assert maplayers.same_file(maplayers.default_model(a), demo_gpkg)
+    assert maplayers.resolve_model(a, None) == maplayers.default_model(a)
+    assert maplayers.resolve_model(a, gpkg.table_path(demo_gpkg, "wwn_nodes")) == demo_gpkg
+    assert maplayers.resolve_model(a, layers[0]) == demo_gpkg
+    with pytest.raises(RuntimeError, match="not a WWNet"):
+        maplayers.resolve_model(a, "C:/x/y.shp")
+    a2 = fake_arcpy([])
+    assert maplayers.default_model(a2) is None
+    with pytest.raises(RuntimeError, match="no WWNet model is in the active map"):
+        maplayers.resolve_model(a2, "")
+
+
+def test_layer_source_from_connection_properties():
+    lyr = fa.make_layer("Nodes", "")
+    lyr.connectionProperties = {"workspace_factory": "Sql", "dataset": "main.wwn_nodes",
+                                "connection_info": {"database": r"C:\m\a.gpkg"}}
+    assert maplayers.layer_model_table(lyr) == (r"C:\m\a.gpkg", "wwn_nodes")
+    assert gpkg.split_datasource("/t/a.gpkg|layername=wwn_conduits") == ("/t/a.gpkg", "wwn_conduits")
+
+
+# ---------------------------------------------------------------- check / design
+
+def test_check_model_messages_and_issues_layer(fake_arcpy, demo_gpkg):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    issues = tools_impl.check_model(a, Messages(a), demo_gpkg)
     assert issues == []                      # P05 falls into N06 (normal): no INVERT_MISMATCH any more
-    assert any("0 error(s), 0 warning(s), 0 info" in t for _, t in a.log)
-    assert a.inserted == []
-    assert ("table", str(tmp_path / "o.gdb"), "issues") in a.added
+    assert "Check finished: 0 error(s), 0 warning(s), 0 info." in text(a)
+    assert "save any edits" in text(a)
+    assert "Issues" in names(layers)
+    tools_impl.check_model(a, Messages(a), demo_gpkg)
+    assert names(layers).count("Issues") == 1                # reused, not added again
 
 
 def test_report_issues_routes_severity(fake_arcpy):
     a = fake_arcpy([])
-    iss = [dict(severity="error", code="E", object_type="node", object_id="1", clause="", message="m"),
-           dict(severity="warning", code="W", object_type="node", object_id="2", clause="c", message="m")]
+    iss = [dict(severity="warning", code="W", object_type="node", object_id="2", clause="c", message="m"),
+           dict(severity="error", code="E", object_type="node", object_id="1", clause="", message="m")]
     c = tools_impl.report_issues(Messages(a), iss)
     assert c == {"error": 1, "warning": 1, "info": 0}
-    # error-severity data issues are warnings with an ERROR: prefix: AddError would fail the tool in Pro
+    # errors first; error-severity data issues are warnings with an ERROR: prefix (AddError fails the tool)
     assert a.log == [("warn", "ERROR: E node 1: m"), ("warn", "W node 2 (c): m")]
-    assert not [lv for lv, _ in a.log if lv == "error"]
 
 
-def test_run_design_selects_failed(fake_arcpy, wwnet_exe, demo_gpkg):
-    a, layers = mk(fake_arcpy, demo_gpkg)
-    # make P02 fail by flattening it below DN150's 1:200 limit
-    con = sqlite3.connect(demo_gpkg)
+def _fail_p02(path):
+    con = sqlite3.connect(path)
     con.execute("update wwn_conduits set ds_invert = us_invert - 0.1 where conduit_id='P02'")
     con.commit()
     con.close()
-    d = tools_impl.run_design(a, Messages(a), demo_gpkg, add_table=True, select_failed=True, exe=wwnet_exe)
+
+
+def test_run_design_persistent_layer_and_selects_failed_once(fake_arcpy, demo_gpkg):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    _fail_p02(demo_gpkg)
+    d = tools_impl.run_design(a, Messages(a), demo_gpkg)
     assert d["summary"]["fail"] >= 1
-    sel = {n: (m, w) for n, m, w in a.selections}
-    assert "'P02'" in sel["Gravity sewers"][1] and sel["Gravity sewers"][0] == "NEW_SELECTION"
-    assert "'P02'" in sel[RES_NAME][1]
-    assert not a.joins
-    assert any(k == "data" and p.endswith("main.wwn_results_conduits") for k, p in a.added)
-    text = "\n".join(t for _, t in a.log)
-    assert "P02" in text and "FAIL" in text and "Design run: 11 conduit(s)" in text
+    assert names(layers).count("Design results") == 1
+    sel = [(n, m, w) for n, m, w in a.selections]
+    assert len(sel) == 1 and sel[0][0] == "Design results" and "'P02'" in sel[0][2]   # B4: once
+    assert "Design: 11 conduit(s)" in text(a) and "P02 DN150" in text(a, "warn") and "FAIL" in text(a, "warn")
+    assert not any(t.startswith("Conduit ") for _, t in a.log)          # no fixed-width table
+    stored = rows(demo_gpkg, "select count(*), sum(geom is not null) from wwn_results_conduits")
+    assert stored == [(11, 11)]
+    tools_impl.run_design(a, Messages(a), demo_gpkg)
+    assert names(layers).count("Design results") == 1                 # reused after the first run
+    assert rows(demo_gpkg, "select count(*) from wwn_issues where source='design'") == \
+        [(len([i for i in d["issues"]]),)]
 
 
-def test_run_design_all_pass_clears_selection(fake_arcpy, wwnet_exe, demo_gpkg):
+def test_run_design_all_pass_clears_selection(fake_arcpy, demo_gpkg):
     a, _ = mk(fake_arcpy, demo_gpkg)
-    tools_impl.run_design(a, Messages(a), demo_gpkg, add_table=False, select_failed=True, exe=wwnet_exe)
-    assert all(m == "CLEAR_SELECTION" for _, m, _ in a.selections) and len(a.selections) == 2
-    assert any("No failed conduits" in t for _, t in a.log)
+    tools_impl.run_design(a, Messages(a), demo_gpkg, select_failed=True)
+    assert [m for _, m, _ in a.selections] == ["CLEAR_SELECTION"]
+    assert "No failed conduits" in text(a)
 
 
-def test_trace_selects_nodes_and_conduits(fake_arcpy, wwnet_exe, demo_gpkg):
+def test_run_design_without_layer(fake_arcpy, demo_gpkg):
     a, layers = mk(fake_arcpy, demo_gpkg)
-    ids = tools_impl.node_ids(a, layers[0])
-    assert "N06" in ids and ids == sorted(ids)
-    r = tools_impl.trace(a, Messages(a), layers[0], "N03", "Downstream", True, wwnet_exe)
-    assert set(r["nodes"]) == {"N03", "N04", "N05", "N06", "N07", "N08", "OUT1"}
-    assert r["conduits"] == ["P03", "P04", "P05", "P06", "P07", "P08"] or len(r["conduits"]) == 6
-    names = [s[0] for s in a.selections]
-    assert names == ["Nodes", "Gravity sewers"]
-    assert "'OUT1'" in a.selections[0][2] and "\"conduit_id\" IN" in a.selections[1][2]
-    with pytest.raises(RuntimeError, match="Nodes"):
-        tools_impl.trace(a, Messages(a), layers[1], "N03", "Both", True, wwnet_exe)
+    tools_impl.run_design(a, Messages(a), demo_gpkg, show_layer=False)
+    assert len(layers) == 2 and not a.selections
 
 
-def test_in_clause_chunks():
-    c = gpkg.in_clause('"x"', [str(i) for i in range(1000)], chunk=400)
-    assert c.startswith("(") and c.count(" OR ") == 2 and gpkg.in_clause('"x"', []) == "1=0"
-    assert gpkg.in_clause('"x"', ["a'b"]) == "\"x\" IN ('a''b')"
-    assert gpkg.split_datasource(r"C:\a b\m.GPKG\main.wwn_nodes") == (r"C:\a b\m.GPKG", "wwn_nodes")
-    assert gpkg.split_datasource("/t/m.gpkg/wwn_nodes")[1] == "wwn_nodes"
-    assert gpkg.split_datasource("C:/x/y.shp") == (None, None)
-
-
-def test_pipe_capacity(fake_arcpy):
+def test_run_design_reports_adwf(fake_arcpy, demo_gpkg):
     a = fake_arcpy([])
-    r = tools_impl.pipe_capacity(Messages(a), 225, 300, 1.0, 5.0)
-    assert 15 < r["full_flow_lps"] < 60 and r["depth_ratio_at_flow"] < 0.5
-    assert r["ds50_checks"]["results"]
-    text = "\n".join(t for _, t in a.log)
-    assert "Full-bore capacity" in text and "DS 50 checks" in text and "d/D" in text
-    r2 = capacity.calculate(150, 100, None, 1000.0)           # far beyond capacity -> surcharge
-    assert r2["depth_ratio_at_flow"] is None
-    assert any("surcharge" in l for l in capacity.describe(r2))
+    node = rows(demo_gpkg, "select us_node_id from wwn_conduits order by fid limit 1")[0][0]
+    con = sqlite3.connect(demo_gpkg)
+    con.execute("insert into wwn_node_loads (load_id,node_id,connections,source) values ('L1',?,86400,'manual')",
+                (node,))
+    con.commit()
+    con.close()
+    d = tools_impl.run_design(a, Messages(a), demo_gpkg, show_layer=False)
+    assert d["summary"]["total_local_adwf_lps"] == pytest.approx(630.0)
+    assert "Loads: ADWF 630.000 L/s" in text(a)
+    assert rows(demo_gpkg, "select max(adwf_lps) from wwn_results_conduits")[0][0] == pytest.approx(630.0)
 
 
-def test_pyt_compiles_and_defines_tools(fake_arcpy):
-    fake_arcpy([])
-    loader = importlib.machinery.SourceFileLoader("wwnet_pyt", str(TOOLBOX / "WWNet.pyt"))
-    spec = importlib.util.spec_from_loader("wwnet_pyt", loader)
-    mod = importlib.util.module_from_spec(spec)
-    loader.exec_module(mod)
-    tb = mod.Toolbox()
-    labels = [t().label for t in tb.tools]
-    assert labels == ["New Model", "Import Sewer Data", "Import Diurnal Profile", "Add Model To Map", "Check Model", "Run Design", "Run Simulation", "Trace",
-                      "Pipe Capacity", "Set Assistant API Key", "Ask WWNet Assistant", "Verify Setup"]
-    for t in tb.tools:
-        params = t().getParameterInfo()
-        assert params and all(p.name and p.datatype for p in params)
-    key = mod.SetAssistantApiKey().getParameterInfo()[0]
-    assert key.datatype == "GPEncryptedString"
-    ask = {p.name: p for p in mod.AskWWNetAssistant().getParameterInfo()}
-    assert ask["model"].value == "claude-opus-5-5" and ask["model"].filter.list == mod.MODELS
-    assert ask["apply"].value is False and ask["reset"].value is False
-    assert ask["question"].controlCLSID and ask["layer"].datatype == "GPFeatureLayer"
-    tr = mod.Trace().getParameterInfo()
-    assert tr[1].filter.type == "ValueList"
+# ---------------------------------------------------------------- trace
 
-
-def test_run_design_prints_table(fake_arcpy, wwnet_exe, demo_gpkg):
-    a, _ = mk(fake_arcpy, demo_gpkg)
-    d = tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
-    text = [t for _, t in a.log]
-    hdr = next(t for t in text if t.startswith("Conduit"))
-    for col in ("DN", "Grade 1:x", "GSDF L/s", "Pumped", "Total L/s", "Cap L/s", "T4.4", "Hyd", "d/D", "v m/s", "RESULT",
-                "Worst message"):
-        assert col in hdr
-    c = d["conduit_results"][0]
-    row = next(t for t in text if t.startswith(c["conduit_id"] + " "))
-    assert f"{c['capacity_lps']:.1f}" in row and "PASS" in row
-    assert sum(1 for t in text if t.startswith(("P0", "P1")) and "PASS" in t) >= 1
-    assert text.index(hdr) > next(i for i, t in enumerate(text) if t.startswith("Design run"))
-
-
-def test_results_table_cap():
-    rows = [dict(conduit_id=f"C{i}", dn=150, result="pass") for i in range(5)]
-    lines = tools_impl.results_table_lines(rows, max_lines=3)
-    assert len(lines) == 2 + 3 + 1 and lines[-1] == "... 2 more"
-
-
-def test_run_design_results_layer(fake_arcpy, wwnet_exe, demo_gpkg):
+def test_trace_from_id_selects_nodes_and_conduits(fake_arcpy, demo_gpkg):
     a, layers = mk(fake_arcpy, demo_gpkg)
-    d = tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
-    fc = a.memory["memory\\wwnet_results_demo"]
-    assert fc["geom"] == "POLYLINE" and fc["sr"].factoryCode == 7850
-    assert [n for n, _ in fc["fields"]] == [f for f, _ in tools_impl.RESULT_FIELDS]
-    assert dict(fc["fields"])["dn"] == "LONG" and dict(fc["fields"])["message"] == "TEXT"
-    assert len(fc["rows"]) == 11
-    by = {r["conduit_id"]: r for r in fc["rows"]}
-    for c in d["conduit_results"]:
-        r = by[c["conduit_id"]]
-        assert r["dn"] == c["dn"] and r["result"] == c["result"]
-        assert r["total_lps"] == c["total_lps"] and r["capacity_lps"] == c["capacity_lps"]
-        assert r["grade_1in"] == c["grade_1in"] and r["velocity_mps"] == c["velocity_mps"]
-        assert r["SHAPE@"]
-    assert [l.name for l in layers].count(RES_NAME) == 1
-    assert any("Results layer added: " + RES_NAME + " (temporary" in t for _, t in a.log)
+    r = tools_impl.trace(a, Messages(a), demo_gpkg, "N03", "Downstream", True)
+    assert set(r["nodes"]) == {"N03", "N04", "N05", "N06", "N07", "N08", "OUT1"}
+    assert sorted(r["conduits"]) == ["P03", "P04", "P05", "P06", "P07", "P08"]
+    assert [s[0] for s in a.selections] == ["Nodes", "Gravity sewers"]
+    assert "'OUT1'" in a.selections[0][2] and "\"conduit_id\" IN" in a.selections[1][2]
+    assert "Upstream of node N03" in text(a) and "Flow at node N03" in text(a)
 
 
-def test_run_design_replaces_existing_layer(fake_arcpy, wwnet_exe, demo_gpkg):
+def test_trace_from_selected_conduit_reports_upstream_flow(fake_arcpy, flows_gpkg):
+    fid = fid_of(flows_gpkg, "wwn_conduits", "conduit_id", "P08")
+    a, layers = mk(fake_arcpy, flows_gpkg, sel_conduits=[fid])
+    r = tools_impl.trace(a, Messages(a), flows_gpkg, "", "Upstream", True)
+    assert r["start"] == "P08" and "P08" in r["conduits"]
+    s = r["summary"]
+    assert s["start_conduit"] == "P08" and s["upstream_connections"] == 132 and s["adwf_lps"] > 1.0
+    assert "Upstream of conduit P08" in text(a) and "connection(s)" in text(a)
+
+
+def test_trace_needs_a_start_and_warns_off_map(fake_arcpy, demo_gpkg):
     a, layers = mk(fake_arcpy, demo_gpkg)
-    tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
-    tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
-    assert [l.name for l in layers].count(RES_NAME) == 1
-    assert a.removed == [RES_NAME] and a.deleted == ["memory\\wwnet_results_demo"]
-    assert len(a.memory["memory\\wwnet_results_demo"]["rows"]) == 11
+    with pytest.raises(RuntimeError, match="select one conduit or node"):
+        tools_impl.trace(a, Messages(a), demo_gpkg, "", "Upstream", True)
+    layers[:] = [_ProBasemapLayer()]
+    tools_impl.trace(a, Messages(a), demo_gpkg, "N03", "Upstream", True)
+    assert a.selections == [] and "not in the active map" in text(a, "warn")
 
 
-def test_run_design_symbology_failure_only_warns(fake_arcpy, wwnet_exe, demo_gpkg):
-    a, layers = mk(fake_arcpy, demo_gpkg)    # fake layers have no .symbology -> styling raises
-    tools_impl.run_design(a, Messages(a), demo_gpkg, exe=wwnet_exe)
-    assert any(lv == "warn" and "Symbology for results" in t for lv, t in a.log)
-    assert any("Results layer added" in t for _, t in a.log)
+# ---------------------------------------------------------------- simulation
+
+def test_run_simulation_stores_labelled_run_and_layers(fake_arcpy, flows_gpkg, tmp_path):
+    fid = fid_of(flows_gpkg, "wwn_conduits", "conduit_id", "P02")
+    a, layers = mk(fake_arcpy, flows_gpkg, sel_conduits=[fid])
+    inp = str(tmp_path / "m.inp")
+    d = tools_impl.run_simulation(a, Messages(a), flows_gpkg, 12.0, 6.0, "ks", 0.013, 1.0, True, inp, "base")
+    assert d["label"] == "base" and "P02" in d["series_ids"]                # selected conduit series kept
+    assert d["options"]["roughness"] == "ks"
+    assert "[CONDUITS]" in open(inp).read()
+    assert {"Simulation results (conduits)", "Simulation results (nodes)"} <= set(names(layers))
+    nodes_lyr = next(lyr for lyr in layers if maplayers.layer_name(lyr) == "Simulation results (nodes)")
+    assert nodes_lyr.definitionQuery == symbology.SIM_NODES_QUERY
+    t = text(a)
+    assert "Simulation base (" in t and "continuity error" in t and "Highest peak d/D" in t
+    assert "Colebrook ks" in t and "Stored as run base (" in t
+    assert rows(flows_gpkg, "select label from wwn_sim_conduit_results limit 1") == [("base",)]
+    tools_impl.run_simulation(a, Messages(a), flows_gpkg, 12.0, 6.0, flow_scale=2.0, label="x2")
+    assert names(layers).count("Simulation results (conduits)") == 1
 
 
-def test_run_design_show_layer_false(fake_arcpy, wwnet_exe, demo_gpkg):
-    a, layers = mk(fake_arcpy, demo_gpkg)
-    tools_impl.run_design(a, Messages(a), demo_gpkg, show_layer=False, exe=wwnet_exe)
-    assert not a.memory and len(layers) == 2
-    assert not any("Results layer" in t for _, t in a.log)
+def test_show_compare_and_hydrograph(fake_arcpy, flows_gpkg, tmp_path):
+    a, layers = mk(fake_arcpy, flows_gpkg)
+    tools_impl.run_simulation(a, Messages(a), flows_gpkg, 12.0, 6.0, label="base", show_layer=False)
+    tools_impl.run_simulation(a, Messages(a), flows_gpkg, 12.0, 6.0, flow_scale=2.0, label="x2", show_layer=False)
+    titles = gpkg.run_titles(flows_gpkg)
+    assert titles[0].startswith("x2 (") and titles[1].startswith("base (")
+    r = tools_impl.show_simulation_run(a, Messages(a), flows_gpkg, titles[1])
+    assert r["label"] == "base" and "Showing run base (" in text(a)
+    assert rows(flows_gpkg, "select distinct label from wwn_sim_conduit_results") == [("base",)]
+    c = tools_impl.compare_simulation_runs(a, Messages(a), flows_gpkg, titles[1], titles[0])
+    assert c["counts"].get("worse", 0) > 0 and "Comparison A = base" in text(a)
+    assert "Simulation comparison" in names(layers)
+    with pytest.raises(Exception, match="different runs"):
+        tools_impl.compare_simulation_runs(a, Messages(a), flows_gpkg, titles[0], titles[0])
+    ids = gpkg.series_ids(flows_gpkg)
+    assert len(ids) == 5
+    out = str(tmp_path / "h")
+    res = tools_impl.plot_hydrograph(a, Messages(a), flows_gpkg, titles[0], ids[:2] + ["ZZ"], out, chart=True)
+    assert len(res["series"]) == 2 and res["missing"] == ["ZZ"]
+    with open(out + ".csv", newline="") as fh:
+        data = list(csv.DictReader(fh))
+    assert data and data[0]["run"].startswith("x2 (") and data[0]["time"].count(":") == 1
+    assert "peak" in text(a) and "Could not create the chart" in text(a, "warn")   # fake arcpy: no charts
 
 
-def test_design_detail_lines_cap_and_exclude_info():
-    def chk(rule, res):
-        return dict(rule=rule, clause="DS50 x", result=res, message="msg")
-    rows = [dict(conduit_id=f"C{i}", dn=150, result="fail", checks=[chk("max_flow", "fail"),
-                                                                    chk("cover_not_checked", "info")])
-            for i in range(8)]
-    lines = tools_impl.design_detail_lines(rows)
-    assert len(lines) == 6 and lines[-1] == "... 3 more max_flow item(s)"
-    assert not any("cover_not_checked" in t for t in lines)
-    assert tools_impl.design_info_lines({"summary": {"cover_not_checked_ends": 34}}) == [
-        "Cover not checked at 34 conduit end(s): no surface level (IS ends / junctions)."]
-    assert tools_impl.design_info_lines({"summary": {}}) == []
-
-
-# ---------------------------------------------------------------- profiles / loads (schema v2)
+# ---------------------------------------------------------------- loading tools
 
 PROFILE = "Time\tFactor\n" + "".join(f"{i * 5 // 60:02d}:{i * 5 % 60:02d}\t{0.5 if i < 144 else 1.5}\n"
                                       for i in range(288))
@@ -249,30 +275,22 @@ PROFILE = "Time\tFactor\n" + "".join(f"{i * 5 // 60:02d}:{i * 5 % 60:02d}\t{0.5 
 
 def test_import_profile_tool_file_and_paste(fake_arcpy, tmp_path, demo_gpkg):
     a = fake_arcpy([])
-    csv = tmp_path / "p.txt"
-    csv.write_text(PROFILE)
+    csv_path = tmp_path / "p.txt"
+    csv_path.write_text(PROFILE)
     m = Messages(a)
-    r = tools_impl.import_profile(m, demo_gpkg, "RES", str(csv), "desc", True, False)
+    r = tools_impl.import_profile(m, demo_gpkg, "RES", str(csv_path), "desc", True, False)
     assert r["points"] == 288 and r["interval_min"] == 5 and abs(r["mean_factor"] - 1) < 1e-9
-    con = sqlite3.connect(demo_gpkg)
-    assert con.execute("select count(*) from wwn_profiles where profile_id='RES'").fetchone() == (288,)
-    assert con.execute("select value from wwn_meta where key='default_profile'").fetchone() == ("RES",)
-    assert con.execute("select description, interval_min from wwn_profile_info").fetchone() == ("desc", 5)
-    con.close()
-    assert any("Imported profile RES" in t for _, t in a.log)
-    # pasted text, mean far from 1 -> warning; normalise fixes it
-    r = tools_impl.import_profile(m, demo_gpkg, "P2", None, "", False, False, pasted="0\t2\n720\t4\n")
-    assert any(lv == "warn" and "mean factor" in t for lv, t in a.log)
+    assert rows(demo_gpkg, "select count(*) from wwn_profiles where profile_id='RES'") == [(288,)]
+    assert rows(demo_gpkg, "select value from wwn_meta where key='default_profile'") == [("RES",)]
+    assert "Imported profile RES" in text(a)
+    tools_impl.import_profile(m, demo_gpkg, "P2", None, "", False, False, pasted="0\t2\n720\t4\n")
+    assert "mean factor" in text(a, "warn")
     r = tools_impl.import_profile(m, demo_gpkg, "P2", None, "", False, True, pasted="0\t2\n720\t4\n")
     assert r["normalised"] and abs(r["mean_factor"] - 1) < 1e-9
-    con = sqlite3.connect(demo_gpkg)
-    assert con.execute("select value from wwn_meta where key='default_profile'").fetchone() == ("RES",)
-    con.close()
 
 
 def test_import_profile_tool_errors(fake_arcpy, tmp_path, demo_gpkg):
-    a = fake_arcpy([])
-    m = Messages(a)
+    m = Messages(fake_arcpy([]))
     with pytest.raises(RuntimeError, match="profile id"):
         tools_impl.import_profile(m, demo_gpkg, " ", None, pasted="0\t1\n")
     with pytest.raises(RuntimeError, match="Choose a CSV"):
@@ -283,171 +301,113 @@ def test_import_profile_tool_errors(fake_arcpy, tmp_path, demo_gpkg):
         tools_impl.import_profile(m, demo_gpkg, "X", None, pasted="0\t1\n24:00\t1\n")
 
 
-def test_import_profile_cli_fallback(fake_arcpy, no_native, wwnet_exe, tmp_path, demo_gpkg):
+def test_model_settings_and_assign_profile(fake_arcpy, flows_gpkg):
+    fid = fid_of(flows_gpkg, "wwn_nodes", "node_id", "N01")
+    a, layers = mk(fake_arcpy, flows_gpkg, sel_nodes=[fid])
+    m = Messages(a)
+    st = tools_impl.model_settings(m, flows_gpkg)
+    assert st["default_profile"] == "example_residential" and "1 profile(s):" in text(a)
+    tools_impl.import_profile(m, flows_gpkg, "COMM", None, "", False, False, pasted="0\t0.8\n720\t1.2\n")
+    st = tools_impl.model_settings(m, flows_gpkg, 600.0, 2.0, tools_impl.NONE_PROFILE)
+    assert (st["adwf_per_connection_lpd"], st["peaking_factor"], st["default_profile"]) == (600.0, 2.0, None)
+    n = tools_impl.assign_profile(a, m, flows_gpkg, "Selected nodes (their node loads)", "COMM")
+    assert n == 1 and rows(flows_gpkg, "select profile_id from wwn_node_loads where node_id='N01'") == [("COMM",)]
+    n = tools_impl.assign_profile(a, m, flows_gpkg, "All node loads", tools_impl.DEFAULT_PROFILE)
+    assert n == 11 and rows(flows_gpkg, "select count(*) from wwn_node_loads where profile_id is not null") == [(0,)]
+    with pytest.raises(RuntimeError, match="Nothing selected"):
+        tools_impl.assign_profile(a, m, flows_gpkg, "Selected sub-catchments", "COMM")
+    with pytest.raises(Exception, match="does not exist"):
+        tools_impl.assign_profile(a, m, flows_gpkg, "All sub-catchments", "NOPE")
+
+
+def test_pipe_capacity_any_dn(fake_arcpy):
     a = fake_arcpy([])
-    r = tools_impl.import_profile(Messages(a), demo_gpkg, "RES", None, "d", True, False, pasted=PROFILE,
-                                  exe=wwnet_exe)
-    assert r["points"] == 288 and r["is_default"] is True
+    r = tools_impl.pipe_capacity(Messages(a), 225, 300, 1.0, 5.0)
+    assert 15 < r["full_flow_lps"] < 60 and r["depth_ratio_at_flow"] < 0.5
+    assert r["ds50_checks"]["results"]
+    assert "Full-bore capacity" in text(a) and "DS 50 checks" in text(a) and "d/D" in text(a)
+    r2 = capacity.calculate(150, 100, None, 1000.0)           # far beyond capacity -> surcharge
+    assert r2["depth_ratio_at_flow"] is None and any("surcharge" in ln for ln in capacity.describe(r2))
+    a = fake_arcpy([])
+    r3 = tools_impl.pipe_capacity(Messages(a), 100, 60, None, 1.0)
+    assert r3["full_flow_lps"] > 1 and "outside DS 50 Table 4.4" in text(a)
 
 
-def test_pyt_import_profile_tool(fake_arcpy, tmp_path, demo_gpkg):
-    import importlib.machinery
-    import importlib.util
+# ---------------------------------------------------------------- the .pyt
+
+def test_pyt_tools_parameters_and_categories(fake_arcpy):
     fake_arcpy([])
-    loader = importlib.machinery.SourceFileLoader("wwnet_pyt_prof", str(TOOLBOX / "WWNet.pyt"))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("wwnet_pyt_prof", loader))
-    loader.exec_module(mod)
+    mod = load_pyt()
+    tb = mod.Toolbox()
+    tools = {t().label: t() for t in tb.tools}
+    assert list(tools) == ["New Model", "Add Model To Map", "Model Settings", "Import Sewer Data",
+                           "Import Diurnal Profile", "Assign Profile", "Check Model", "Run Design", "Run Simulation",
+                           "Trace", "Show Simulation Run", "Compare Simulation Runs", "Plot Hydrograph",
+                           "Pipe Capacity", "Ask WWNet Assistant", "Set Assistant API Key", "Verify Setup"]
+    assert {t.category for t in tools.values()} == {"Model", "Data", "Analysis", "Results", "Calculators",
+                                                    "Assistant", "Setup"}
+    for t in tools.values():
+        params = t.getParameterInfo()
+        assert all(p.name and p.datatype for p in params) and len({p.name for p in params}) == len(params)
+        assert not any(" wwnet " in (t.description or "") or "`wwnet" in (t.description or "") for _ in [0])
+    key = {p.name: p for p in tools["Set Assistant API Key"].getParameterInfo()}
+    assert key["key"].datatype == "GPEncryptedString" and "exe" not in key
+    ask = {p.name: p for p in tools["Ask WWNet Assistant"].getParameterInfo()}
+    assert ask["model"].value == "claude-opus-5-5" and ask["model"].filter.list == mod.MODELS
+    assert ask["apply"].value is False and ask["apply_last"].value is False
+    assert ask["question"].controlCLSID and ask["layer"].datatype == "GPFeatureLayer"
+    sim = {p.name: p for p in tools["Run Simulation"].getParameterInfo()}
+    assert sim["roughness"].value == "ks" and sim["roughness"].filter.list == ["ks", "manning"]
+    assert sim["export_inp"].direction == "Output" and sim["out_gpkg"].direction == "Output"
+    cap = {p.name: p for p in tools["Pipe Capacity"].getParameterInfo()}
+    assert cap["dn"].filter.type is None                          # any DN
+    tr = {p.name: p for p in tools["Trace"].getParameterInfo()}
+    assert tr["start"].parameterType == "Optional" and "nodes" not in tr
+
+
+def test_pyt_model_defaults_from_map_and_run_lists(fake_arcpy, flows_gpkg):
+    a, layers = mk(fake_arcpy, flows_gpkg)
+    import wwnet_native
+    wwnet_native.simulate(flows_gpkg, 12.0, 6.0, label="base")
+    wwnet_native.simulate(flows_gpkg, 12.0, 6.0, flow_scale=2.0, label="x2")
+    mod = load_pyt("wwnet_pyt_defaults")
+    t = mod.CompareSimulationRuns()
+    params = t.getParameterInfo()
+    t.updateParameters(params)
+    p = {x.name: x for x in params}
+    assert maplayers.same_file(p["gpkg"].value, flows_gpkg)
+    assert p["run_a"].value.startswith("base (") and p["run_b"].value.startswith("x2 (")
+    assert len(p["run_a"].filter.list) == 2
+    t.execute(params, None)
+    assert "Comparison A = base" in text(a)
+    ms = mod.ModelSettings()
+    params = ms.getParameterInfo()
+    ms.updateParameters(params)
+    p = {x.name: x for x in params}
+    assert p["peaking_factor"].value == 1.5 and p["default_profile"].value == "example_residential"
+    assert p["default_profile"].filter.list == [tools_impl.NONE_PROFILE, "example_residential"]
+    ph = mod.PlotHydrograph()
+    params = ph.getParameterInfo()
+    ph.updateParameters(params)
+    p = {x.name: x for x in params}
+    assert len(p["ids"].filter.list) == 5
+
+
+def test_pyt_import_profile_tool_by_name(fake_arcpy, tmp_path, demo_gpkg):
+    fake_arcpy([])
+    mod = load_pyt("wwnet_pyt_prof")
     t = mod.ImportDiurnalProfile()
     assert t.category == "Data" and t.label == "Import Diurnal Profile"
     params = t.getParameterInfo()
     assert [p.name for p in params] == ["gpkg", "profile_id", "csv", "description", "set_default", "normalise",
-                                        "pasted"]
-    csv = tmp_path / "p.csv"
-    csv.write_text(PROFILE)
-    params[0].value, params[1].value, params[2].value = demo_gpkg, "RES", str(csv)
+                                        "pasted", "out_gpkg"]
+    csv_path = tmp_path / "p.csv"
+    csv_path.write_text(PROFILE)
+    by = {p.name: p for p in params}
+    by["gpkg"].value, by["profile_id"].value, by["csv"].value = demo_gpkg, "RES", str(csv_path)
     t.execute(params, None)
-    con = sqlite3.connect(demo_gpkg)
-    assert con.execute("select count(*) from wwn_profiles").fetchone() == (288,)
-    con.close()
-
-
-def test_run_design_reports_adwf_and_results_field(fake_arcpy, demo_gpkg):
-    a = fake_arcpy([])
-    con = sqlite3.connect(demo_gpkg)
-    node = con.execute("select us_node_id from wwn_conduits order by fid limit 1").fetchone()[0]
-    con.close()
-    from wwnet_arcgis import gpkg as g
-    g.upgrade_model(demo_gpkg)
-    con = sqlite3.connect(demo_gpkg)
-    con.execute("insert into wwn_node_loads (load_id,node_id,connections,source) values ('L1',?,86400,'manual')",
-                (node,))
-    con.commit()
-    con.close()
-    d = tools_impl.run_design(a, Messages(a), demo_gpkg, show_layer=False, select_failed=False)
-    assert d["summary"]["total_local_adwf_lps"] == pytest.approx(630.0)
-    assert any(t.startswith("Loads: ADWF 630.000 L/s") for _, t in a.log)
-    assert "ADWF L/s" in tools_impl.results_table_lines(d["conduit_results"])[0]
-    assert ("adwf_lps", "DOUBLE") in tools_impl.RESULT_FIELDS
-
-
-def test_add_model_upgrades_v1_file(fake_arcpy, demo_gpkg):
-    a = fake_arcpy([])
-    con = sqlite3.connect(demo_gpkg)
-    cols = [r[1] for r in con.execute("pragma table_info(wwn_subcatchments)")]
-    con.close()
-    tools_impl.add_model_to_map(a, Messages(a), demo_gpkg)
-    con = sqlite3.connect(demo_gpkg)
-    after = [r[1] for r in con.execute("pragma table_info(wwn_subcatchments)")]
-    assert "adwf_lps" in after and "profile_id" in after
-    assert con.execute("select value from wwn_meta where key='schema_version'").fetchone() == ("2",)
-    con.close()
-    assert any("node loads" in t.lower() for _, t in a.log)
-    assert cols is not None
-
-
-# ------------------------------------------------------------------ Run Simulation
-
-SIM_NAME = "Simulation results — demo"
-NODES_NAME = "Simulation nodes — demo"
-
-
-def _fake_sim(flood=False):
-    links = [dict(conduit_id="P01", dn=150, max_flow_lps=1.0, max_d_over_d=0.3, max_velocity_mps=0.5,
-                  surcharged_min=0.0, time_of_max_flow="07:30"),
-             dict(conduit_id="P02", dn=150, max_flow_lps=9.0, max_d_over_d=0.6, max_velocity_mps=0.9,
-                  surcharged_min=0.0, time_of_max_flow="08:00"),
-             dict(conduit_id="P03", dn=225, max_flow_lps=30.0, max_d_over_d=0.9, max_velocity_mps=1.2,
-                  surcharged_min=0.0, time_of_max_flow="08:05"),
-             dict(conduit_id="P04", dn=225, max_flow_lps=40.0, max_d_over_d=0.8, max_velocity_mps=1.2,
-                  surcharged_min=15.0, time_of_max_flow="08:05")]
-    nodes = [dict(node_id="N01", max_hgl_m=1.0, max_depth_m=1.0, flood_volume_m3=2.5 if flood else 0.0,
-                  surcharged_min=30.0)]
-    return dict(run_id="2026-01-01T00:00:00Z", summary=dict(
-        inflow_adwf_lps=1.0, inflow_simulated_lps=1.5, peak_outlet_flow_lps=3.0, continuity_error_pct=-0.1,
-        conduits=4, nodes=1, surcharged_conduits=1, flooded_nodes=1 if flood else 0,
-        total_flood_volume_m3=2.5 if flood else 0.0), links=links, nodes=nodes, warnings=["a warning"])
-
-
-def test_sim_class_bands():
-    assert [symbology.sim_class(d, s) for d, s in ((0.2, 0), (0.5, 0), (0.74, 0), (0.75, 0), (0.99, 0),
-                                                   (1.0, 0), (0.3, 5))] == \
-        ["low", "medium", "medium", "high", "high", "surcharged", "surcharged"]
-    assert "L/s d/D" in symbology.SIM_LABEL_ARCADE
-
-
-def test_run_simulation_layers_and_messages(fake_arcpy, demo_gpkg, monkeypatch):
-    a, layers = mk(fake_arcpy, demo_gpkg)
-    calls = []
-    monkeypatch.setattr(tools_impl.cli, "run_simulate", lambda *args: calls.append(args) or _fake_sim())
-    styled = []
-    monkeypatch.setattr(tools_impl.symbology, "apply", lambda t, lyr, m: styled.append(t) or True)
-    tools_impl.run_simulation(a, Messages(a), demo_gpkg, 12.0, 6.0, "ks", 0.014, 1.5, True, "out.inp")
-    assert calls[0][1:7] == (12.0, 6.0, "ks", 0.014, 1.5, "out.inp")
-    fc = a.memory["memory\\wwnet_sim_demo"]
-    assert fc["geom"] == "POLYLINE" and [n for n, _ in fc["fields"]] == [f for f, _ in tools_impl.SIM_FIELDS]
-    by = {r["conduit_id"]: r for r in fc["rows"]}
-    assert by["P03"]["d_class"] == "high" and by["P04"]["d_class"] == "surcharged"
-    assert by["P01"]["d_class"] == "low" and by["P02"]["d_class"] == "medium"
-    assert [l.name for l in layers].count(SIM_NAME) == 1
-    assert styled == ["sim"]
-    assert not any(NODES_NAME == l.name for l in layers)       # nothing flooded -> no nodes layer
-    text = [t for _, t in a.log]
-    assert any(t.startswith("Conduit") and "Surch min" in t for t in text)
-    assert any("continuity error" in t for t in text) and any("surcharged" in t for t in text)
-    assert ("warn", "a warning") in a.log and any("out.inp" in t for t in text)
-    rows = [t for t in text if t.startswith("P0")]
-    assert rows[0].startswith("P03") and rows[1].startswith("P04")        # sorted by d/D desc
-
-
-def test_run_simulation_flooding_nodes_layer(fake_arcpy, demo_gpkg, monkeypatch):
-    a, layers = mk(fake_arcpy, demo_gpkg)
-    monkeypatch.setattr(tools_impl.cli, "run_simulate", lambda *args: _fake_sim(flood=True))
-    styled = []
-    monkeypatch.setattr(tools_impl.symbology, "apply", lambda t, lyr, m: styled.append(t) or True)
-    tools_impl.run_simulation(a, Messages(a), demo_gpkg)
-    assert styled == ["sim", "sim_nodes"]
-    nfc = a.memory["memory\\wwnet_simnodes_demo"]
-    assert nfc["geom"] == "POINT" and [r["node_id"] for r in nfc["rows"]] == ["N01"]
-    assert NODES_NAME in [l.name for l in layers]
-    tools_impl.run_simulation(a, Messages(a), demo_gpkg)       # re-run replaces both layers
-    assert [l.name for l in layers].count(SIM_NAME) == 1 and [l.name for l in layers].count(NODES_NAME) == 1
-
-
-def test_run_simulation_real_engine_and_inp_export(fake_arcpy, wwnet_exe, demo_gpkg, no_native, tmp_path):
-    a, layers = mk(fake_arcpy, demo_gpkg)
-    inp = str(tmp_path / "model.inp")
-    d = tools_impl.run_simulation(a, Messages(a), demo_gpkg, 12.0, 6.0, "manning", 0.013, 1.0, True, inp,
-                                  exe=wwnet_exe)
-    assert d["summary"]["conduits"] == 11 and abs(d["summary"]["continuity_error_pct"]) < 1.0
-    assert "[CONDUITS]" in open(inp).read()
-    assert len(a.memory["memory\\wwnet_sim_demo"]["rows"]) == 11
-    assert [l.name for l in layers].count(SIM_NAME) == 1
-    assert any(lv == "warn" and "Symbology for sim" in t for lv, t in a.log)      # fake layer: warn only
-    con = sqlite3.connect(demo_gpkg)
-    assert con.execute("select count(*) from wwn_sim_links").fetchone() == (11,)
-    con.close()
-
-
-def test_run_simulation_show_layer_false(fake_arcpy, demo_gpkg, monkeypatch):
-    a, layers = mk(fake_arcpy, demo_gpkg)
-    monkeypatch.setattr(tools_impl.cli, "run_simulate", lambda *args: _fake_sim())
-    tools_impl.run_simulation(a, Messages(a), demo_gpkg, show_layer=False)
-    assert not a.memory and len(layers) == 2
-
-
-def test_run_simulation_tool_parameters(fake_arcpy):
-    fake_arcpy([])
-    loader = importlib.machinery.SourceFileLoader("wwnet_pyt_sim", str(TOOLBOX / "WWNet.pyt"))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("wwnet_pyt_sim", loader))
-    loader.exec_module(mod)
-    t = mod.RunSimulation()
-    assert t.category == "Analysis"
-    p = {x.name: x for x in t.getParameterInfo()}
-    assert list(p) == ["gpkg", "duration_h", "warmup_h", "roughness", "manning_n", "flow_scale", "show_layer",
-                       "export_inp"]
-    assert p["duration_h"].value == 48.0 and p["warmup_h"].value == 24.0 and p["manning_n"].value == 0.013
-    assert p["roughness"].filter.list == ["manning", "ks"] and p["show_layer"].value is True
-    assert p["export_inp"].direction == "Output" and p["export_inp"].parameterType == "Optional"
+    assert rows(demo_gpkg, "select count(*) from wwn_profiles") == [(288,)]
+    assert by["out_gpkg"].value == demo_gpkg                       # derived output for ModelBuilder
 
 
 class _ProBasemapLayer:
@@ -460,52 +420,15 @@ class _ProBasemapLayer:
         return False
 
     def __getattr__(self, item):
-        if item in ("name", "dataSource"):
+        if item in ("name", "dataSource", "connectionProperties"):
             raise NameError(f"The attribute '{item}' is not supported on this instance of Layer.")
         raise AttributeError(item)
 
 
-def test_run_simulation_tolerates_layers_without_name(fake_arcpy, demo_gpkg, monkeypatch):
-    a, layers = mk(fake_arcpy, demo_gpkg)
+def test_tools_tolerate_layers_without_name(fake_arcpy, flows_gpkg):
+    a, layers = mk(fake_arcpy, flows_gpkg)
     layers.insert(0, _ProBasemapLayer())
-    monkeypatch.setattr(tools_impl.cli, "run_simulate", lambda *args: _fake_sim())
-    monkeypatch.setattr(tools_impl.symbology, "apply", lambda t, lyr, m: True)
-    tools_impl.run_simulation(a, Messages(a), demo_gpkg, 12.0, 6.0, "manning", 0.013, 1.0, True, None)
-    assert [maplayers.layer_name(l) for l in layers].count(SIM_NAME) == 1
-    assert not any("Could not add the simulation layers" in t for _, t in a.log)
-    # second run replaces the layer, still tolerating the odd layer
-    tools_impl.run_simulation(a, Messages(a), demo_gpkg, 12.0, 6.0, "manning", 0.013, 1.0, True, None)
-    assert [maplayers.layer_name(l) for l in layers].count(SIM_NAME) == 1
-
-
-def test_trace_from_dataset_path_uses_map_layer_or_warns(fake_arcpy, wwnet_exe, demo_gpkg):
-    """Real Pro: the Nodes parameter can arrive as 'C:\\...\\m.gpkg\\main.wwn_nodes' (a path, not a layer)."""
-    import types
-    a, layers = mk(fake_arcpy, demo_gpkg)
-    layers.insert(0, _ProBasemapLayer())
-    stand_in = types.SimpleNamespace(name="main.wwn_nodes", dataSource=gpkg.table_path(demo_gpkg, "wwn_nodes"))
-    r = tools_impl.trace(a, Messages(a), stand_in, "N03", "Downstream", True, wwnet_exe)
-    assert "OUT1" in r["nodes"]
-    assert [s[0] for s in a.selections] == ["Nodes", "Gravity sewers"]     # selected on the MAP layers
-    # model not on the map: trace still runs, warns instead of selecting
-    layers[:] = [_ProBasemapLayer()]
-    a.selections.clear()
-    r = tools_impl.trace(a, Messages(a), stand_in, "N03", "Upstream", True, wwnet_exe)
-    assert a.selections == [] and any("not in the active map" in t for lv, t in a.log if lv == "warn")
-
-
-def test_pyt_layer_obj_accepts_path_and_skips_unsupported_layers(fake_arcpy, demo_gpkg):
-    a, layers = mk(fake_arcpy, demo_gpkg)
-    layers.insert(0, _ProBasemapLayer())
-    loader = importlib.machinery.SourceFileLoader("wwnet_pyt_lo", str(TOOLBOX / "WWNet.pyt"))
-    mod = importlib.util.module_from_spec(importlib.util.spec_from_loader("wwnet_pyt_lo", loader))
-    loader.exec_module(mod)
-    p = fa.FakeParameter(name="nodes", datatype="GPFeatureLayer")
-    p.value = gpkg.table_path(demo_gpkg, "wwn_nodes")          # a path string, like Pro passes
-    got = mod._layer_obj(p)
-    assert maplayers.layer_name(got) == "Nodes"               # matched to the map layer by data source
-    p.value = "Nodes"
-    assert maplayers.layer_name(mod._layer_obj(p)) == "Nodes"
-    layers[:] = [_ProBasemapLayer()]
-    p.value = gpkg.table_path(demo_gpkg, "wwn_nodes")
-    assert mod._layer_obj(p).dataSource.endswith("wwn_nodes")  # stand-in when not on the map
+    tools_impl.run_simulation(a, Messages(a), flows_gpkg, 12.0, 6.0)
+    assert names(layers).count("Simulation results (conduits)") == 1
+    assert "Could not show the Simulation results layers" not in text(a)
+    assert maplayers.same_file(maplayers.default_model(a), flows_gpkg)

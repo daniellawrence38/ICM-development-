@@ -55,6 +55,75 @@ fn depth_ratio_for_flow(q_lps: f64, dn_mm: f64, grade_1in: f64, ks_mm: f64) -> O
     )
 }
 
+/// Colebrook-White pipe capacity calculator (internal diameter = DN unless `id_mm`): dict with
+/// dn_mm, grade_1in, ks_mm, full_flow_lps, full_velocity_mps and, with `depth_ratio`,
+/// capacity_lps / velocity_mps at that d/D; with `flow_lps`, depth_ratio_at_flow /
+/// velocity_at_flow_mps (None and a note when the flow exceeds the open-channel capacity).
+/// ValueError for non-positive DN / grade / ks or a d/D outside 0..1.
+#[pyfunction]
+#[pyo3(signature = (dn_mm, grade_1in, ks_mm=1.0, depth_ratio=None, flow_lps=None, id_mm=None))]
+fn pipe_capacity<'py>(
+    py: Python<'py>,
+    dn_mm: f64,
+    grade_1in: f64,
+    ks_mm: f64,
+    depth_ratio: Option<f64>,
+    flow_lps: Option<f64>,
+    id_mm: Option<f64>,
+) -> PyResult<Bound<'py, PyDict>> {
+    if !(dn_mm > 0.0 && grade_1in > 0.0 && ks_mm > 0.0) {
+        return Err(PyValueError::new_err(
+            "DN, grade (1 in x) and ks must be positive",
+        ));
+    }
+    let d = id_mm.filter(|v| *v > 0.0).unwrap_or(dn_mm) / 1000.0;
+    let (slope, ks) = (hyd::slope_from_1in(grade_1in), ks_mm / 1000.0);
+    let vel = |y: f64, q_m3s: f64| {
+        let a = hyd::geometry(d, y).area;
+        if a > 0.0 {
+            q_m3s / a
+        } else {
+            0.0
+        }
+    };
+    let r = |x: f64, n: i32| (x * 10f64.powi(n)).round() / 10f64.powi(n);
+    let out = PyDict::new(py);
+    out.set_item("dn_mm", dn_mm)?;
+    out.set_item("grade_1in", grade_1in)?;
+    out.set_item("ks_mm", ks_mm)?;
+    out.set_item("internal_diameter_mm", d * 1000.0)?;
+    let qf = hyd::part_full_flow(d, slope, 1.0, ks);
+    out.set_item("full_flow_lps", r(qf * 1000.0, 3))?;
+    out.set_item("full_velocity_mps", r(vel(1.0, qf), 3))?;
+    if let Some(y) = depth_ratio {
+        if !(0.0..=1.0).contains(&y) {
+            return Err(PyValueError::new_err("depth_ratio must be between 0 and 1"));
+        }
+        let q = hyd::part_full_flow(d, slope, y, ks);
+        out.set_item("depth_ratio", y)?;
+        out.set_item("capacity_lps", r(q * 1000.0, 3))?;
+        out.set_item("velocity_mps", r(vel(y, q), 3))?;
+    }
+    if let Some(q) = flow_lps {
+        out.set_item("flow_lps", q)?;
+        match hyd::depth_ratio_for_flow(q / 1000.0, d, slope, ks) {
+            Some(y) => {
+                out.set_item("depth_ratio_at_flow", r(y, 4))?;
+                out.set_item("velocity_at_flow_mps", r(vel(y, q / 1000.0), 3))?;
+            }
+            None => {
+                out.set_item("depth_ratio_at_flow", py.None())?;
+                out.set_item(
+                    "note",
+                    "flow exceeds open-channel capacity (pipe would surcharge)",
+                )?;
+            }
+        }
+    }
+    out.set_item("source", "wwnet")?;
+    Ok(out)
+}
+
 /// Residential loading rate (DS50 Tables 4.1/4.2) as a dict, including GSDF for `net_area_ha`.
 #[pyfunction]
 #[pyo3(signature = (net_area_ha, rcode, ground="dry", region="south"))]
@@ -492,6 +561,7 @@ fn version() -> &'static str {
 fn wwnet_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(part_full_flow_lps, m)?)?;
     m.add_function(wrap_pyfunction!(depth_ratio_for_flow, m)?)?;
+    m.add_function(wrap_pyfunction!(pipe_capacity, m)?)?;
     m.add_function(wrap_pyfunction!(residential_gsdf, m)?)?;
     m.add_function(wrap_pyfunction!(check_conduit, m)?)?;
     m.add_function(wrap_pyfunction!(ruleset_toml, m)?)?;

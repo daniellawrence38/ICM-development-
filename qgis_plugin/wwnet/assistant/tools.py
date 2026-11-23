@@ -1,10 +1,19 @@
-"""Tool definitions and the pure-Python tool implementations (no qgis imports)."""
+"""Tool definitions and the host-independent tool implementations (no qgis / arcpy imports).
+
+Calculations go through ``wwnet_native`` (``core.calc``); the flow-modelling tools read the model
+GeoPackage through the engine and the stored result tables. Host tools (QgisTools / ArcpyTools)
+add the layer-reading and edit tools and tell :func:`flow_handlers` which model file is open.
+"""
 from __future__ import annotations
 
-from ..core import hydraulics, native, rules, ruleset, schema
+import sqlite3
+
+from ..core import calc, native, ruleset, schema, summary
+from .engine import ToolError
 
 _NUM = {"type": "number"}
 _STR = {"type": "string"}
+MAX_RESULT_ROWS = 50
 
 
 def _tool(name, description, properties, required):
@@ -39,16 +48,15 @@ def tool_definitions() -> list:
               {"layer": _STR, "id_value": _STR}, ["layer", "id_value"]),
         _tool("check_conduit",
               "Check one gravity sewer against DS 50 (min DN, min/max grade, max d/D at the design "
-              "flow, Table 4.4 flow limit, IO/IS lengths). Returns a list of "
-              "{rule, clause, value, limit, result}. grade_1in is the x of '1 in x'.",
+              "flow, Table 4.4 flow limit, cover, AC spacing). Returns {results: [{rule, clause, value, limit, "
+              "result, message}]}. grade_1in is the x of '1 in x'.",
               {"dn_mm": {"type": "integer"}, "grade_1in": _NUM, "gsdf_lps": _NUM,
-               "sewer_type": {"type": "string", "enum": ["reticulation", "io", "is", "main"]},
-               "land_use": {"type": "string", "enum": ["residential", "commercial", "hotel_motel",
-                                                       "perth_cba", "industrial"]},
-               "ks_mm": _NUM, "pumped_lps": _NUM, "length_m": _NUM},
+               "land_use": {"type": "string", "enum": ["residential", "small_commercial", "commercial",
+                                                       "hotel_motel", "perth_cba", "industrial"]},
+               "pumped_lps": _NUM, "length_m": _NUM, "us_cover_m": _NUM, "ds_cover_m": _NUM},
               ["dn_mm", "grade_1in"]),
         _tool("pipe_capacity",
-              "Colebrook-White capacity of a partially full circular pipe (ks default 1.0 mm, "
+              "Colebrook-White capacity of a partially full circular pipe of any DN (ks default 1.0 mm, "
               "internal diameter = DN). Give depth_ratio (d/D, default 1.0 = full) to get capacity "
               "in L/s and velocity; give flow_lps to get the depth ratio and velocity at that flow.",
               {"dn_mm": {"type": "integer"}, "grade_1in": _NUM, "depth_ratio": _NUM,
@@ -66,6 +74,35 @@ def tool_definitions() -> list:
               "(key = DN, e.g. '225'; omit for all), io_is_sewers.",
               {"table": {"type": "string", "enum": list(ruleset.LOOKUP_TABLES)}, "key": _STR},
               ["table"]),
+        _tool("design_summary",
+              "Run the steady DS 50 design of the open model in memory (nothing is written) and return the "
+              "summary (pass / warn / fail counts, terminal GSDF, ADWF) and the worst conduits.",
+              {}, []),
+        _tool("get_design_result",
+              "Design result of one conduit (in memory, nothing written): accumulated ADWF / GSDF / pumped "
+              "flow, governing / Table 4.4 / hydraulic capacity, d/D, velocity and every DS 50 check.",
+              {"conduit_id": _STR}, ["conduit_id"]),
+        _tool("list_sim_runs",
+              "List the stored dynamic (SWMM) simulation runs, newest first: run_id, label, options "
+              "(duration, warm-up, roughness, flow scale) and summary (inflow ADWF, peak outlet flow, "
+              "surcharged / flooded counts).",
+              {}, []),
+        _tool("get_sim_result",
+              "Stored simulation peaks of one conduit or node in a run (run: run id, label, 'latest' or "
+              "'previous'; default latest): conduit max flow, depth, d/D, velocity, time of peak, minutes "
+              "surcharged; node max HGL, depth, freeboard, flood volume. Also returns whether a time series "
+              "is stored for it.",
+              {"object_id": _STR, "run": _STR}, ["object_id"]),
+        _tool("compare_sim_runs",
+              "Compare two stored simulation runs per conduit (B minus A; nothing is written): counts of "
+              "worse / better / same / newly surcharged / relieved conduits and the largest d/D increases.",
+              {"run_a": _STR, "run_b": _STR}, ["run_a", "run_b"]),
+        _tool("trace_network",
+              "Trace upstream and/or downstream from a node or a conduit id: the nodes and conduits on the "
+              "path and, upstream of the start, the node / conduit / connection / sub-catchment counts, "
+              "the ADWF (as simulated) and the design GSDF arriving there.",
+              {"start_id": _STR, "direction": {"type": "string", "enum": ["upstream", "downstream", "both"]}},
+              ["start_id"]),
         _tool("propose_edits",
               "Propose attribute edits. NEVER writes directly: the engineer sees a confirmation "
               "dialog and may reject. Each edit: id = business id value (e.g. conduit_id 'C12'), "
@@ -82,93 +119,29 @@ def tool_definitions() -> list:
     ]
 
 
+FLOW_TOOLS = ("design_summary", "get_design_result", "list_sim_runs", "get_sim_result", "compare_sim_runs",
+              "trace_network")
+
+
 # ---------------------------------------------------------------- pure tools
 
+def _native_call(fn, *a, **kw):
+    try:
+        return fn(*a, **kw)
+    except native.NativeMissing as exc:
+        raise ToolError(str(exc)) from exc
+    except (ValueError, KeyError) as exc:
+        raise ToolError(str(exc.args[0] if exc.args else exc)) from exc
+
+
 def pipe_capacity(args: dict) -> dict:
-    dn = float(args["dn_mm"])
-    grade = float(args["grade_1in"])
-    ks = float(args.get("ks_mm") or ruleset.load_ruleset()["hydraulics"]["ks_mm"])
-    nat = native.get()
-    out: dict = {"dn_mm": dn, "grade_1in": grade, "ks_mm": ks}
-
-    def part_full(y):
-        if nat is not None:
-            try:
-                return float(nat.part_full_flow_lps(dn, grade, y, ks)), "wwnet"
-            except Exception:
-                pass
-        return hydraulics.part_full_flow_lps(dn, grade, y, ks), "python-colebrook-white"
-
-    def vel(y, q):
-        area, _ = hydraulics.geometry(dn / 1000.0, y)
-        return (q / 1000.0) / area if area > 0 else 0.0
-
-    y_in = args.get("depth_ratio")
-    if y_in is not None or args.get("flow_lps") is None:
-        y = 1.0 if y_in is None else float(y_in)
-        q, src = part_full(y)
-        out.update(depth_ratio=y, capacity_lps=round(q, 3), velocity_mps=round(vel(y, q), 3),
-                   source=src)
-    qf, src = part_full(1.0)
-    out["full_flow_lps"] = round(qf, 3)
-    if args.get("flow_lps") is not None:
-        q = float(args["flow_lps"])
-        y = None
-        if nat is not None:
-            try:
-                y = nat.depth_ratio_for_flow(q, dn, grade, ks)
-                src = "wwnet"
-            except Exception:
-                y = None
-        if y is None:
-            y = hydraulics.depth_ratio_for_flow(q, dn, grade, ks)
-        if y is None:
-            out.update(flow_lps=q, depth_ratio_at_flow=None,
-                       note="flow exceeds open-channel capacity (pipe would surcharge)")
-        else:
-            qy, _ = part_full(y)
-            out.update(flow_lps=q, depth_ratio_at_flow=round(y, 4),
-                       velocity_at_flow_mps=round(vel(y, qy), 3))
-    out["source"] = src
-    return out
-
-
-_NATIVE_LAND_USE = {
-    "residential": "residential",
-    "small_commercial": "small_commercial",
-    "commercial": "industrial_large_commercial",
-    "hotel_motel": "industrial_large_commercial",
-    "perth_cba": "industrial_large_commercial",
-    "industrial": "industrial_large_commercial",
-}
-
-
-def _native_kwargs(kw: dict) -> dict:
-    """Map the tool schema's argument names onto wwnet_native.check_conduit's signature."""
-    out = {"dn": int(round(kw["dn_mm"])), "grade_1in": float(kw["grade_1in"]),
-           "gsdf_lps": float(kw.get("gsdf_lps") or 0.0)}
-    if kw.get("length_m") is not None:
-        out["length_m"] = float(kw["length_m"])
-    if kw.get("pumped_lps") is not None:
-        out["pumped_inflow_lps"] = float(kw["pumped_lps"])
-    if kw.get("land_use"):
-        out["land_use_class"] = _NATIVE_LAND_USE.get(kw["land_use"], "residential")
-    for k in ("us_cover_m", "ds_cover_m", "location", "levels_uncertain"):
-        if kw.get(k) is not None:
-            out[k] = kw[k]
-    return out
+    return _native_call(calc.pipe_capacity, args["dn_mm"], args["grade_1in"], args.get("ks_mm"),
+                        args.get("depth_ratio"), args.get("flow_lps"))
 
 
 def check_conduit(args: dict) -> dict:
     kwargs = {k: v for k, v in args.items() if v is not None}
-    nat = native.get()
-    if nat is not None and callable(getattr(nat, "check_conduit", None)):
-        try:
-            return {"source": "wwnet", "results": nat.check_conduit(**_native_kwargs(kwargs))}
-        except Exception as exc:  # wrong kwargs for this build etc.
-            note = f"wwnet.check_conduit failed ({type(exc).__name__}: {exc}); used Python fallback"
-            return {"source": "python-fallback", "note": note, "results": rules.check_conduit(**kwargs)}
-    return {"source": "python-fallback", "results": rules.check_conduit(**kwargs)}
+    return _native_call(calc.check_conduit, **kwargs)
 
 
 def lookup_ds50(args: dict):
@@ -176,13 +149,121 @@ def lookup_ds50(args: dict):
 
 
 def residential_gsdf(args: dict) -> dict:
-    return ruleset.residential_gsdf(float(args["net_area_ha"]), args["rcode"],
-                                    args["ground"], args["region"])
+    return _native_call(ruleset.residential_gsdf, float(args["net_area_ha"]), args["rcode"],
+                        args["ground"], args["region"])
 
 
 def pure_handlers() -> dict:
     return {"pipe_capacity": pipe_capacity, "check_conduit": check_conduit,
             "lookup_ds50": lookup_ds50, "residential_gsdf": residential_gsdf}
+
+
+# ---------------------------------------------------------------- flow-modelling tools
+
+def _compact_conduit(c: dict) -> dict:
+    keys = ("conduit_id", "dn", "grade_1in", "adwf_lps", "gsdf_lps", "pumped_lps", "total_lps", "capacity_lps",
+            "table44_lps", "hydraulic_capacity_lps", "d_over_d", "velocity_mps", "result")
+    out = {k: c.get(k) for k in keys}
+    out["worst_message"] = summary.worst_message(c)
+    return out
+
+
+def flow_handlers(model_path) -> dict:
+    """Handlers of FLOW_TOOLS. `model_path()` returns the open model's .gpkg (raise ToolError if none)."""
+
+    def nat(*fns):
+        try:
+            return native.require(*fns)
+        except native.NativeMissing as exc:
+            raise ToolError(str(exc)) from exc
+
+    def design_summary(args):
+        d = _native_call(nat("design").design, model_path(), None, False)
+        rank = {"fail": 0, "warn": 1}
+        worst = sorted((c for c in d["conduit_results"] if c.get("result") in rank),
+                       key=lambda c: (rank[c["result"]], -(c.get("d_over_d") or 0)))
+        return {"summary": d["summary"], "worst_conduits": [_compact_conduit(c) for c in worst[:15]],
+                "non_conduit_issues": [summary.issue_line(i) for i in d.get("issues", [])
+                                       if i.get("object_type") != "conduit"][:20]}
+
+    def get_design_result(args):
+        d = _native_call(nat("design").design, model_path(), None, False)
+        cid = str(args["conduit_id"])
+        c = next((c for c in d["conduit_results"] if str(c["conduit_id"]) == cid), None)
+        if c is None:
+            raise ToolError(f"No conduit {cid!r} in the design results")
+        out = _compact_conduit(c)
+        out["checks"] = c.get("checks", [])
+        return out
+
+    def list_sim_runs(args):
+        runs = _native_call(nat("sim_runs").sim_runs, model_path())
+        return {"runs": runs, "count": len(runs)}
+
+    def get_sim_result(args):
+        gpkg = model_path()
+        runs = _native_call(nat("sim_runs").sim_runs, gpkg)
+        key = (args.get("run") or "latest").strip()
+        pick = {"latest": runs[:1], "": runs[:1], "previous": runs[1:2]}.get(key) or \
+            [r for r in runs if key in (r["run_id"], r.get("label"))]
+        if not pick:
+            raise ToolError("No stored simulation run " + repr(key) + "; stored: " +
+                            ", ".join(summary.run_title(r) for r in runs) if runs else
+                            "No stored simulation runs: run a simulation first")
+        run = pick[0]
+        oid = str(args["object_id"])
+        con = sqlite3.connect(f"file:{gpkg}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+        try:
+            link = con.execute("SELECT * FROM wwn_sim_links WHERE run_id=? AND conduit_id=?",
+                               (run["run_id"], oid)).fetchone()
+            node = con.execute("SELECT s.*, n.surface_level, n.surface_level - s.max_hgl_m AS freeboard_m "
+                               "FROM wwn_sim_nodes s LEFT JOIN wwn_nodes n USING (node_id) "
+                               "WHERE s.run_id=? AND s.node_id=?", (run["run_id"], oid)).fetchone()
+            series = con.execute("SELECT count(*) FROM wwn_sim_series WHERE run_id=? AND object_id=?",
+                                 (run["run_id"], oid)).fetchone()[0]
+        finally:
+            con.close()
+        if link is None and node is None:
+            raise ToolError(f"{oid!r} is neither a conduit nor a node of run {summary.run_title(run)}")
+        out = {"run": summary.run_title(run), "time_series_points": series}
+        if link is not None:
+            out["conduit"] = {k: link[k] for k in link.keys() if k != "run_id"}
+        if node is not None:
+            out["node"] = {k: node[k] for k in node.keys() if k != "run_id"}
+        return out
+
+    def compare_sim_runs(args):
+        c = _native_call(nat("compare_sim_runs").compare_sim_runs, model_path(), args["run_a"], args["run_b"],
+                         False)
+        rows = sorted((r for r in c["rows"] if r.get("d_d_over_d") is not None),
+                      key=lambda r: -(r["d_d_over_d"] or 0))
+        return {"run_a": summary.run_title(c["run_a"]), "run_b": summary.run_title(c["run_b"]),
+                "counts": c["counts"], "largest_d_over_d_increase": rows[:MAX_RESULT_ROWS // 5]}
+
+    def trace_network(args):
+        d = (args.get("direction") or "upstream").lower()
+        res = _native_call(nat("trace").trace, model_path(), str(args["start_id"]), d in ("upstream", "both"),
+                           d in ("downstream", "both"))
+        for k in ("upstream", "downstream", "conduits"):
+            if k in res and len(res[k]) > 200:
+                res[k + "_truncated"] = len(res[k])
+                res[k] = res[k][:200]
+        return res
+
+    return {"design_summary": design_summary, "get_design_result": get_design_result,
+            "list_sim_runs": list_sim_runs, "get_sim_result": get_sim_result,
+            "compare_sim_runs": compare_sim_runs, "trace_network": trace_network}
+
+
+def conduit_derived(row: dict, geometry_length=None) -> dict:
+    """Length used and grade from levels for a conduit attribute dict (shared by both hosts)."""
+    length = row.get("length_m") or geometry_length
+    us, ds = row.get("us_invert"), row.get("ds_invert")
+    derived = {"length_m_used": length}
+    if length and us is not None and ds is not None and us > ds:
+        derived["grade_1in"] = round(length / (us - ds), 1)
+    return derived
 
 
 # ------------------------------------------------------- edit validation (pure)

@@ -61,12 +61,16 @@ def test_zip_contents_and_no_qgis(tmp_path):
             assert forbidden_in(zf.read(n).decode("utf-8")) == [], f"{n} imports qgis/Qt"
 
 
-def test_cli_bundled_only_on_request(tmp_path):
-    fake = tmp_path / "wwnet.exe"
-    fake.write_bytes(b"MZ")
-    z = package.build(tmp_path / "o", cli=fake)
+def test_no_cli_or_python_engine_copies_shipped(tmp_path):
+    """The engine is wwnet_native only: no wwnet.exe, no pure-Python hydraulics / rules copies."""
+    z = package.build(tmp_path / "o")
     with zipfile.ZipFile(z) as zf:
-        assert "WWNet-ArcGIS/bin/wwnet.exe" in zf.namelist()
+        names = zf.namelist()
+    assert not any("/bin/" in n for n in names)
+    for gone in ("core/hydraulics.py", "core/rules.py", "wwnet_arcgis/cli.py", "wwnet_arcgis/issues_table.py"):
+        assert not any(n.endswith(gone) for n in names), gone
+    for new in ("core/calc.py", "core/summary.py", "core/style.py", "wwnet_arcgis/engine.py"):
+        assert any(n.endswith(new) for n in names), new
 
 
 def test_extracted_zip_imports_standalone(tmp_path):
@@ -82,7 +86,8 @@ def test_extracted_zip_imports_standalone(tmp_path):
         "pkg = shared.ensure(); assert pkg.__file__.startswith(sys.argv[1]), pkg.__file__\n"
         "print(len(shared.core('schema').column_summary()))\n"
         "print(shared.assistant('prompt').build_system_text()[:20])\n"
-        "print(capacity.calculate(225, 300)['full_flow_lps'])\n"
+        "print(len(capacity.describe({'dn_mm': 225, 'grade_1in': 300, 'ks_mm': 1.0, 'full_flow_lps': 1.0,"
+        " 'full_velocity_mps': 1.0})))\n"
         "assert not any(m.startswith('qgis') for m in sys.modules)\n"
     )
     r = subprocess.run([sys.executable, "-I", "-c", code, str(root)], capture_output=True, text=True,

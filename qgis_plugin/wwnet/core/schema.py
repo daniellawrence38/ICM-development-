@@ -5,16 +5,20 @@ import os
 import re
 import sqlite3
 
-from . import paths
+from . import native, paths
 
+SCHEMA_VERSION = 3
+#: editable model layers
 FEATURE_TABLES = ("wwn_nodes", "wwn_conduits", "wwn_pump_stations", "wwn_rising_mains",
                   "wwn_subcatchments")
-ATTRIBUTE_TABLES = ("wwn_pumps", "wwn_results_conduits", "wwn_issues", "wwn_meta", "wwn_node_loads",
-                    "wwn_profile_info", "wwn_profiles", "wwn_sim_runs", "wwn_sim_links", "wwn_sim_nodes",
-                    "wwn_sim_series")
-ALL_TABLES = FEATURE_TABLES + ATTRIBUTE_TABLES
-READ_ONLY_TABLES = ("wwn_results_conduits", "wwn_issues", "wwn_meta", "wwn_sim_runs", "wwn_sim_links",
-                    "wwn_sim_nodes", "wwn_sim_series")
+#: result / issue map layers written by the engine (schema v3), in map order bottom -> top
+RESULT_LAYERS = ("wwn_sim_compare", "wwn_sim_conduit_results", "wwn_results_conduits",
+                 "wwn_sim_node_results", "wwn_issues")
+ATTRIBUTE_TABLES = ("wwn_pumps", "wwn_meta", "wwn_node_loads", "wwn_profile_info", "wwn_profiles",
+                    "wwn_sim_runs", "wwn_sim_links", "wwn_sim_nodes", "wwn_sim_series")
+ALL_TABLES = FEATURE_TABLES + RESULT_LAYERS + ATTRIBUTE_TABLES
+READ_ONLY_TABLES = RESULT_LAYERS + ("wwn_meta", "wwn_sim_runs", "wwn_sim_links", "wwn_sim_nodes",
+                                    "wwn_sim_series")
 
 # Business id column per table (used by the assistant tools and issue navigation).
 ID_FIELDS = {
@@ -22,6 +26,7 @@ ID_FIELDS = {
     "wwn_pumps": "pump_id", "wwn_rising_mains": "rm_id",
     "wwn_subcatchments": "subcatchment_id", "wwn_results_conduits": "conduit_id",
     "wwn_node_loads": "load_id", "wwn_profile_info": "profile_id",
+    "wwn_sim_conduit_results": "conduit_id", "wwn_sim_node_results": "node_id", "wwn_sim_compare": "conduit_id",
 }
 
 # Which enumeration (from the schema.sql header) applies to which field.
@@ -79,44 +84,47 @@ def field_enums(sql: str | None = None) -> dict:
     return out
 
 
-def create_model(path: str, sql: str | None = None, overwrite: bool = False) -> str:
-    """Create a new WWNet GeoPackage by executing schema.sql."""
+def create_model(path: str, overwrite: bool = False) -> str:
+    """Create a new, empty WWNet GeoPackage (current schema) with the engine (wwnet_native)."""
     path = os.fspath(path)
+    nat = native.require("new_model")
     if os.path.exists(path):
         if not overwrite:
             raise FileExistsError(path)
         os.remove(path)
-    sql = sql if sql is not None else schema_sql_text()
-    con = sqlite3.connect(path)
-    try:
-        con.executescript(sql)
-        con.commit()
-    finally:
-        con.close()
+    nat.new_model(path)
     return path
 
 
-def upgrade_model(path: str, sql: str | None = None) -> bool:
-    """Bring an existing model file up to schema v2 (missing tables, subcatchment columns, meta defaults).
-    Idempotent; returns True if anything was added."""
-    sql = sql if sql is not None else schema_sql_text()
+def upgrade_model(path: str) -> bool:
+    """Bring a model file up to the current schema with the engine. Idempotent; returns True if the
+    file was older than the current schema."""
+    nat = native.require("upgrade_model")
     con = sqlite3.connect(os.fspath(path))
     try:
-        before = {r[0] for r in con.execute("SELECT name FROM sqlite_master")}
-        cols = {r[1] for r in con.execute("PRAGMA table_info(wwn_subcatchments)")}
-        if not cols:
-            raise ValueError(f"{path} is not a WWNet model (no wwn_subcatchments table)")
-        con.executescript(sql)
-        changed = bool({r[0] for r in con.execute("SELECT name FROM sqlite_master")} - before)
-        for col, typ in (("adwf_lps", "REAL"), ("profile_id", "TEXT")):
-            if col not in cols:
-                con.execute(f"ALTER TABLE wwn_subcatchments ADD COLUMN {col} {typ}")
-                changed = True
-        con.execute("UPDATE wwn_meta SET value='2' WHERE key='schema_version' AND CAST(value AS INTEGER) < 2")
-        con.commit()
-        return changed
+        names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     finally:
         con.close()
+    if "wwn_subcatchments" not in names:
+        raise ValueError(f"{path} is not a WWNet model (no wwn_subcatchments table)")
+    before = schema_version(path)
+    nat.upgrade_model(os.fspath(path))
+    return before < SCHEMA_VERSION
+
+
+def schema_version(path: str) -> int:
+    """The file's wwn_meta schema_version (1 when missing)."""
+    con = sqlite3.connect(f"file:{os.fspath(path)}?mode=ro", uri=True)
+    try:
+        row = con.execute("SELECT value FROM wwn_meta WHERE key='schema_version'").fetchone()
+    except sqlite3.Error:
+        row = None
+    finally:
+        con.close()
+    try:
+        return int(row[0]) if row else 1
+    except (TypeError, ValueError):
+        return 1
 
 
 def table_identifiers(gpkg: str) -> dict:
@@ -148,8 +156,8 @@ def column_summary(sql: str | None = None) -> str:
                 if (tbl, name) in enums:
                     s += " {" + "|".join(enums[(tbl, name)]) + "}"
                 cols.append(s)
-            kind = "features" if tbl in FEATURE_TABLES else "attributes"
-            ro = " [read-only: written by wwnet design / simulate]" if tbl in READ_ONLY_TABLES else ""
+            kind = "features" if tbl in FEATURE_TABLES + RESULT_LAYERS else "attributes"
+            ro = " [read-only: written by check / design / simulate]" if tbl in READ_ONLY_TABLES else ""
             lines.append(f"{tbl} ({kind}{ro}): " + ", ".join(cols))
         return "\n".join(lines)
     finally:

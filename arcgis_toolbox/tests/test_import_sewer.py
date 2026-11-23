@@ -1,3 +1,4 @@
+import os
 import importlib.machinery
 import importlib.util
 import sqlite3
@@ -79,7 +80,7 @@ def test_end_to_end_valid_gpkg_and_messages(world, tmp_path):
     cp_reads = [r for r in a.cursor_log if r["source"] == "C:/d/cp"]
     assert cp_reads and not any(r["full_scan"] for r in cp_reads)      # far-away C9 is never read
     log = a.log
-    assert any(lv == "warn" and "grade_mismatch" in t and "22030223" in t for lv, t in log)
+    assert any(lv == "warn" and "GRADE_MISMATCH" in t and "22030223" in t for lv, t in log)
     assert any(t.startswith("Reversed digitising direction of 1") for lv, t in log if lv == "info")
     assert not any("direction_reversed" in t for lv, t in log)
     assert not [t for lv, t in log if lv == "error"]
@@ -88,7 +89,13 @@ def test_end_to_end_valid_gpkg_and_messages(world, tmp_path):
     assert all(sr.factoryCode == 7850 for _, sr in a.cursor_calls)
     assert {f[-1] for f, _ in a.cursor_calls} == {"SHAPE@XY", "SHAPE@"}
     # added to the map
-    assert len([k for k, _ in a.added if k == "data"]) == 6   # 5 layers + the node loads table
+    # 5 model layers + the Issues layer (import warnings + check) + the node loads table
+    added = [os.path.basename(p) for k, p in a.added if k == "data"]
+    assert len(added) == 7 and "main.wwn_issues" in added
+    c = con(res)
+    assert c.execute("select count(*) from wwn_issues where source='import'").fetchone()[0] == \
+        len(res["report"].warnings)
+    c.close()
     assert a.env.geographicTransformations is None
 
 
@@ -177,11 +184,13 @@ def test_grade_source_and_snap_options(world, tmp_path):
 
 def test_old_native_gives_clear_error(world, tmp_path, monkeypatch):
     a, lyr, _ = world
-    from wwnet_arcgis import cli
-    monkeypatch.setattr(cli, "native_service", lambda: NS(check=lambda *a: [], design=None, trace=None))
-    with pytest.raises(RuntimeError, match="no write_model"):
+    from wwnet_arcgis import shared
+    nat = shared.core("native")
+    monkeypatch.setattr(nat, "get", lambda refresh=False: NS(check=lambda *a: [], part_full_flow_lps=abs,
+                                                             depth_ratio_for_flow=abs, version=lambda: "0.0"))
+    with pytest.raises(RuntimeError, match="too old.*write_model"):
         run(a, lyr, tmp_path)
-    monkeypatch.setattr(cli, "native_service", lambda: None)
+    monkeypatch.setattr(nat, "get", lambda refresh=False: None)
     with pytest.raises(RuntimeError, match="wwnet_native"):
         run(a, lyr, tmp_path)
 
@@ -211,16 +220,16 @@ def test_pyt_tool_parameters_and_execute(world, tmp_path):
     assert t.label == "Import Sewer Data" and t.category == "Data"
     params = t.getParameterInfo()
     names = [p.name for p in params]
-    assert names[:8] == ["ac_layer", "cp_layer", "sewer_layer", "out_gpkg", "snap", "grade_source",
-                         "use_selected", "add_to_map"]
-    assert names[8:] == ["f_" + r for r, *_ in sewer_import.FIELD_ROLES] + ["load_cps", "cp_radius"]
+    assert names[:10] == ["ac_layer", "cp_layer", "sewer_layer", "out_gpkg", "use_selected", "add_to_map",
+                          "load_cps", "cp_radius", "snap", "grade_source"]
+    assert names[10:] == ["f_" + r for r, *_ in sewer_import.FIELD_ROLES]
     byn = {p.name: p for p in params}
     assert byn["snap"].value == 0.5 and byn["grade_source"].value == "levels"
     assert byn["use_selected"].value is False and byn["add_to_map"].value is True
     assert byn["cp_layer"].parameterType == "Optional" and byn["f_pipe_id"].parameterType == "Required"
     assert byn["f_diameter"].parameterDependencies == ["sewer_layer"]
     assert byn["f_ac_id"].parameterDependencies == ["ac_layer"]
-    assert byn["f_chamber_type"].parameterDependencies == ["ac_layer"] and names.index("f_chamber_type") == 10
+    assert byn["f_chamber_type"].parameterDependencies == ["ac_layer"] and names.index("f_chamber_type") == 12
     assert byn["f_chamber_type"].parameterType == "Optional"
     # picking layers fills the field parameters with defaults present in the layer
     byn["ac_layer"].value, byn["sewer_layer"].value = lyr["ac"], lyr["sew"]
@@ -479,7 +488,7 @@ def test_chamber_type_field_skips_inspection_shafts(world, tmp_path):
     nodes = {n["node_id"]: n["node_type"] for n in res["model"]["nodes"]}
     assert nodes["A2"] == "ms" and nodes["A1"] == "ac"
     assert res["report"].counts["inspection_shafts_skipped"] == 1
-    assert not [w for w in res["report"].warnings if w.code == "ac_no_id"]
+    assert not [w for w in res["report"].warnings if w.code == "AC_NO_ID"]
     assert any("inspection shaft" in t for lv, t in a.log if lv == "info")
 
 
@@ -499,9 +508,9 @@ def test_warning_summary_by_code_then_examples(world, tmp_path):
     info = [t for lv, t in a.log if lv == "info"]
     first_warn = next(n for n, (lv, t) in enumerate(a.log) if lv == "warn" and t.startswith("["))
     summ = next(n for n, (lv, t) in enumerate(a.log) if lv == "info" and "warning(s):" in t)
-    assert summ < first_warn and any("direction_unknown x30" in t for t in info)
+    assert summ < first_warn and any("DIRECTION_UNKNOWN x30" in t for t in info)
     warns = [t for lv, t in a.log if lv == "warn" and t.startswith("[")]
-    assert len(warns) <= 40 and sum("[direction_unknown]" in t for t in warns) == 5
+    assert len(warns) <= 40 and sum("[DIRECTION_UNKNOWN]" in t for t in warns) == 5
     assert any("more import warning(s)" in t for lv, t in a.log if lv == "warn")
 
 
@@ -537,7 +546,7 @@ def test_cp_loads_assigned_and_written(world, tmp_path):
     assert rows == [("CP-A1", "A1", 1, None, "connection_points"), ("CP-A3", "A3", 1, None, "connection_points")]
     c.close()
     assert any(t.startswith("Loads: 2 connection point(s) assigned to 2 node(s); 1 unassigned") for _, t in a.log)
-    assert any("cp_not_assigned" in t for lv, t in a.log if lv == "warn")
+    assert any("CP_NOT_ASSIGNED" in t for lv, t in a.log if lv == "warn")
     assert not any(r["full_scan"] for r in cp_reads(a))
     assert any(t.startswith("Connection points: read 2") or "within the sewer extent +10 m" in t
                for _, t in a.log)
