@@ -1,111 +1,126 @@
-# WWNet — session handover (2026-11-20)
+# WWNet — session handover (2026-11-23)
 
-Branch: `ccr-974cdaeb-c682le` (all work pushed; last commit `d900db8`). Plan: `docs/PLAN.md`. OSS survey: `docs/reference-survey.md`.
+Branch: `ccr-472a9a6a-he69zu` (all work pushed). Previous session's branch: `ccr-974cdaeb-c682le`.
+Plan: `docs/PLAN.md`. OSS survey: `docs/reference-survey.md`. Function overview deck: `docs/WWNet_functions.pptx`.
 
 ## 1. User and working style
 
-- Water utility engineer (Water Corporation, WA). Australian spelling. Direct, no fluff. For procedures: one step at a time, wait for confirmation.
-- Asked for Sonnet/Haiku sub-agents wherever possible (Opus orchestrates, verifies, commits).
-- **Priority changed:** flow modelling first. DS 50 compliance is secondary ("don't really care about DS50 compliance, as long as it can run the flow modelling").
-- A stop hook requires every change to be committed **and pushed** before ending a turn. Use clear `WIP ... do not use this build` commits while agents are mid-flight.
+- Water utility engineer (Water Corporation, WA). Australian spelling. Direct, no fluff. Procedures: **one step at a time**, wait for confirmation. Give Pro Python-window commands as **one-liners**.
+- **Wants Sonnet/Haiku sub-agents wherever possible**; Opus orchestrates, writes precise briefs (files each agent may touch, verify commands), reviews diffs, runs the checks itself and commits. Run parallel agents only on disjoint files.
+- Priority: **flow modelling** (and getting models into InfoWorks ICM). DS 50 compliance is secondary.
+- A stop hook requires every change committed **and pushed** before a turn ends. While agents are mid-flight push `WIP ... - do not use this build` commits and tell the user not to install from them; after review add a normal commit saying the work is complete.
 
 ## 2. The user's work PC (hard constraints)
 
-- ArcGIS Pro 3.x, Python **3.11.8**. Pro's env has `anyio 4.2.0`, `typing_extensions 4.9.0`, `sniffio 1.3.0`, `idna 3.4`, `certifi 2024.2.2`, `truststore 0.7.0`. pydantic/httpx missing.
-- **Cannot run .exe files.** **Cannot clone conda envs** (proxy stalls at ~72 MB). → Everything ships as the no-install bundle: `WWNet-ArcGIS/` with `vendor/` (wwnet_native .pyd + anthropic + deps) put on `sys.path` by `wwnet_arcgis/vendor.py`.
-- Install path: `C:\Users\lawrend0\Desktop\WWNet\WWNet-ArcGIS` (Desktop may be OneDrive-redirected; models kept in `...\Desktop\WWNet\models\`).
-- Install routine the user knows: close Pro → download CI artifact **`wwnet-arcgis-bundle-win-py311`** from the latest green run → Unblock outer zip → extract → Unblock inner `wwnet-arcgis-0.1.0.zip` → extract → replace folder → reopen Pro.
-- Source GIS layers are **GDA94 geographic (EPSG:4283)**; ArcGIS has no NTv2 grids installed, so the import uses `GDA_1994_To_GDA2020_1`.
-- AI assistant: user has **not** set an API key yet (skipped). Verify Setup shows `anthropic` and `wwnet_native` import OK.
+- ArcGIS Pro **3.3.5**, Python **3.11.8**. Pro env pins `anyio 4.2.0`, `typing_extensions 4.9.0`, `sniffio 1.3.0`, `idna 3.4`, `certifi 2024.2.2`, `truststore 0.7.0`.
+- **Cannot run .exe**, **cannot clone conda envs**, **cannot install the Claude desktop app** (so no Remote Control into their PC). Everything ships as the no-install bundle `WWNet-ArcGIS/` (+ `vendor/` with `wwnet_native` .pyd, anthropic, deps).
+- Install path `C:\Users\lawrend0\Desktop\WWNet\WWNet-ArcGIS`; models in `...\Desktop\WWNet\models\` (not OneDrive-synced).
+- InfoWorks ICM **2024.5.0**. ODIC field mapping works; the user saved ODIC configs.
+- Source GIS: GDA94 geographic (EPSG:4283); model CRS GDA2020 / MGA 50 (EPSG:7850).
+- Large Pro project (~90 layers on network shares). **Geoprocessing history/metadata logging made every GP call cost 2–6 s** there → all tools now run inside `gpenv.quiet(arcpy)` (Export To ICM 265 s → 23 s).
+- AI assistant: API key not set (not needed so far).
 
-## 3. Architecture (what exists)
+## 3. Install / update workflow (new this session)
+
+- **Python-only change** → CI artifact **`wwnet-arcgis-update`** (~120 KB, one zip layer, job `arcgis-update`, < 1 min) → user runs **Update WWNet** on the downloaded zip. No extract, no Unblock, no restart (modules are purged and re-imported on every tool run via `_impl()` in `WWNet.pyt`). If `WWNet.pyt` changed: right-click toolbox › Refresh.
+- **Native (Rust) change** → full bundle **`wwnet-arcgis-bundle-win-py311`** (close Pro, Unblock, extract, replace folder). Update WWNet can stage a locked `.pyd` as `.pending`; `vendor.activate` swaps it at the next Pro start.
+- After every update ask the user to run **Self Test** (tick map steps) and paste `WWNet_selftest_report.txt`.
+- Last reviewed build installed by the user: **`c4e67cb`** (run #62). Everything after it is docs only.
+
+## 4. Architecture
 
 | Path | Role |
 |---|---|
-| `crates/wwnet-core` | Model structs, GeoPackage I/O (schema v2, `gpkg::upgrade` for v1), topology (petgraph), validation |
+| `crates/wwnet-core` | Model structs, GeoPackage I/O (schema v2), topology, validation |
 | `crates/wwnet-hydraulics` | Colebrook-White / Manning part-full |
-| `crates/wwnet-rules` | DS 50 rule set (`rulesets/ds50_v2r4.toml`), clause-referenced checks, `CheckResult::{Pass,Info,Warn,Fail}` |
-| `crates/wwnet-design` | Steady design: loading (subcatchments, node loads, manual ADWF), GSDF = ADWF × 1.5, checks; `service.rs` = JSON services shared by CLI + Python |
-| `crates/wwnet-swmm-sys` | Vendored EPA **SWMM 5.2.4** C (public domain), built with `cc` (MSVC + gcc), hand-written FFI |
-| `crates/wwnet-sim` | .inp writer, runner (global mutex), results; `service.rs` simulate → `wwn_sim_*` tables |
-| `crates/wwnet-cli` | `wwnet new/check/trace/design/simulate/profile import` (optional; exe can't run at work) |
-| `crates/wwnet-py` | PyO3 abi3 module **`wwnet_native`**: check, design, trace, simulate, write_model, import_profile, new_model, part_full_flow_lps, ... |
-| `qgis_plugin/wwnet/core/` | Pure-Python shared code (importer, rules fallback, native probe) — reused by ArcGIS as `wwnet_shared` |
-| `qgis_plugin/wwnet/assistant/` | Claude assistant engine (manual tool loop, approval-gated edits) |
-| `arcgis_toolbox/WWNet.pyt` + `wwnet_arcgis/` | ArcGIS Pro toolbox (11 tools, below) |
-| `templates/schema.sql` | GeoPackage schema v2 (EPSG:7850) |
-| `templates/import/watercorp_sewer.toml` | Field-role defaults + code maps for Water Corp import |
-| `templates/profiles/example_residential.csv` | **APPROXIMATE** diurnal profile digitised from a screenshot |
+| `crates/wwnet-rules`, `rulesets/` | DS 50 clause-referenced checks |
+| `crates/wwnet-design` | Steady design (ADWF, GSDF = ADWF × 1.5, checks) |
+| `crates/wwnet-swmm-sys` | Vendored EPA SWMM 5.2.4 C + hand-written FFI |
+| `crates/wwnet-sim` | .inp writer (`inp.rs`), **pump stations / rising mains (`pumps.rs`)**, runner, results → `wwn_sim_*` tables |
+| `crates/wwnet-cli` | `wwnet` CLI (dev/CI only) |
+| `crates/wwnet-py` | PyO3 abi3 module `wwnet_native` |
+| `qgis_plugin/wwnet/core/` | Shared pure Python (importer, schema, **repair.py**) — packaged for ArcGIS as `wwnet_shared` |
+| `arcgis_toolbox/WWNet.pyt` + `wwnet_arcgis/` | ArcGIS Pro toolbox (20 tools, §5) |
+| `templates/schema.sql` | GeoPackage schema (incl. `wwn_sim_pumps`, `wwn_sim_pump_stations`, `wwn_sim_rising_mains`) |
+| `templates/import/watercorp_sewer.toml` | Field roles + code maps (gravity and `[pressure]`) |
+| `templates/demo/demo.gpkg` (from `examples/demo`) | Shipped demo model used by Self Test |
 
-ArcGIS tools: Set Pump Station Data (2026-11-23, `wwnet_arcgis/pumpdata.py`; manual entry of wet well / levels / pumps / curve paste), pump results in Run Simulation (tables + flags: overflow, starts/h > 10, RM velocity outside 0.7-2.0 m/s; memory layer 'Simulation pump stations'), Import Pressure Data (2026-11-23, `wwnet_arcgis/pressure_import.py`: SewerPumpStation + SewerPressureMain -> wwn_pump_stations / wwn_rising_mains, chains segments from the PS, discharge = nearest gravity node, wet well = terminal gravity node; UPSTREAM/DOWNSTREAM levels ignored (user: unreliable); re-run keeps hand-entered pump data; pump hydraulics are in a separate corporate system -> manual entry), Self Test (2026-11-23, `wwnet_arcgis/selftest.py`: runs every tool on templates/demo/demo.gpkg in a temp folder, writes WWNet_selftest_report.txt — ask the user to run it after each update and paste the report), Update WWNet (2026-11-23, `wwnet_arcgis/updater.py`: applies the `wwnet-arcgis-update` CI artifact in place, modules purged per run via `_impl()` in WWNet.pyt, locked native files staged as `.pending` and swapped in `vendor.activate`; commit c3e5f7a is complete despite its WIP title), Export To ICM (new 2026-11-23, `wwnet_arcgis/icm_export.py`; not yet tried in Pro/ICM), New Model, Import Sewer Data, Import Diurnal Profile, Add Model To Map, Check Model, Run Design, Run Simulation, Trace, Pipe Capacity, Set Assistant API Key, Ask WWNet Assistant, Verify Setup.
+Key ArcGIS modules: `tools_impl.py` (tool logic), `gpkg.py` (`split_datasource` handles Pro's `Instance=<file>.gpkg,Dataset=main.%<table>`), `maplayers.py`, `sewer_import.py`, `pressure_import.py`, `pumpdata.py`, `icm_export.py`, `gpenv.py`, `updater.py`, `selftest.py`, `symbology.py`.
 
-## 4. Verified in real ArcGIS Pro vs not
+## 5. Toolbox tools and status
 
-Verified by the user: toolbox loads; Verify Setup (vendor imports OK); Add Model To Map (demo); Run Design (calc + messages); **Import Sewer Data** on a 61-sewer selection (final run: 0 unknown directions, 25 tees, model check clean); **Run Simulation** engine (86 conduits, 7.7 s, continuity 0.07 %, ADWF 1.12 L/s, peak 3.07 L/s @ 07:40).
+| Tool | Category | Status |
+|---|---|---|
+| New Model | Model | verified |
+| Add Model To Map | Model | verified |
+| Check Model | Model | verified (now also lists missing pump data) |
+| **Join Dangling Sewer Ends** | Model | new: splits the main at a missed tee, inserts a tee node, invert = US invert − grade × distance; preview default. Used by the user to fix E4/E46 |
+| Import Sewer Data | Data | verified (61 sewers); new Advanced param *Tee join distance* (0.5 m) + "possible missed tee" report |
+| **Import Pressure Data** | Data | new, **not yet run on real data** |
+| **Set Pump Station Data** | Data | new, not yet run in Pro (manual entry: wet well dia/area, levels AHD or depth, duty/assist/standby, rate or pasted curve) |
+| Import Diurnal Profile | Data | fake-tested; Self Test PASS in Pro |
+| **Export To ICM** | Data | **verified: gravity model loads into ICM 2024.5 and runs.** Terminal chambers → Outfall; dangling ends stay Break (warned); DEM fill of missing ground levels; GDA2020 or GDA94 output |
+| Run Design | Analysis | verified |
+| Run Simulation | Analysis | verified (gravity); **pump station results new, not yet seen in Pro** |
+| Trace | Analysis | verified (after dataSource fix) |
+| Pipe Capacity | Analysis | verified (Self Test) |
+| **Self Test** | Assistant | verified in Pro |
+| **Update WWNet** | Assistant | verified in Pro |
+| Verify Setup | Assistant | verified |
+| Set Assistant API Key / Ask WWNet Assistant | Assistant | unverified (no key) |
 
-Not yet working / unverified in Pro:
-- **FIXED 2026-11-23 (user confirmed Trace works):** real Pro 3.x GeoPackage `layer.dataSource` is `Instance=C:\...\import_test.gpkg,Dataset=main.%wwn_nodes` (pasted by the user). `gpkg.split_datasource` now parses this (plus the SQLite connection-string form seen on mobile-gdb layers); arcpy reads go through `gpkg.dataset_path`. Regression tests use the real string.
-- (was) **OPEN BUG:** after the latest build (`d900db8`), Trace/Run Simulation complete but report the model layer is "not in the active map", so nothing is selected / no results layer. Likely `maplayers.find_layer_for` not matching Pro's `layer.dataSource` string for GeoPackage layers (format differs from `gpkg.split_datasource` regex `...\.gpkg\main.<table>`), or `layer.supports("DATASOURCE")` returning False. **First step next session:** ask the user to paste the output of this one-liner in Pro's Python window, then fix `gpkg.split_datasource` / `maplayers.layer_source` and add a test with the real string:
-  ```python
-  import arcpy; m=arcpy.mp.ArcGISProject("CURRENT").activeMap; print([(l.name, l.supports("DATASOURCE"), l.dataSource if l.supports("DATASOURCE") else None) for l in m.listLayers() if l.supports("NAME")])
-  ```
-- Design/Simulation results layers (memory FC + symbology), Import Diurnal Profile tool, assistant live API call, DPAPI key storage, edit sessions — all fake-arcpy tested only.
+## 6. Done this session (2026-11-23), in order
 
-## 5. Water Corporation data facts (learned from the user)
+1. Fixed "model layer not in the active map": Pro reports GeoPackage sources as `Instance=...,Dataset=main.%table`.
+2. Export To ICM (file gdb + CSV + mapping notes), then: `Shape` field clash (ERROR 000012) → `conduit_shape`; AddFields in one call; per-stage timing; DEM fill; GP logging off.
+3. Testing workflow: `wwnet-arcgis-update` artifact, Update WWNet, per-run module reload, Self Test; map tables removed with `removeTable`.
+4. GP logging off in every tool (`gpenv.quiet`).
+5. Pressure side: SWMM pump stations (storage wet well, PUMP3 curve / PUMP2 constant rate, start/stop depths, duty/assist, force mains D-W ks mm or H-W) + results (starts/h, run %, max wet-well level, overflow m³, rising-main Qmax/vmax); Import Pressure Data; Set Pump Station Data; pump results tables, flags and layer in Run Simulation; Self Test pump scenario.
+6. ICM "not connected to outfall": terminal nodes exported as Outfall; dangling sewer ends kept as Break (an outfall would silently drop their flow); engine warns when a dangling end becomes a free outfall; Join Dangling Sewer Ends tool; tee join distance parameter.
 
-- Access chambers: `PACID` (id), `TOPLEV` (lid, m AHD), `CHAMBER_TY`: M = manhole → `ac`, J = maintenance shaft → `ms`, I = inspection shaft → skipped (no PACID).
-- Connection points: `ID`. 846,956 in the layer — never full-scan (id + extent filters).
-- Gravity sewers: `ID`, `US_MANHOLE_ID`/`DS_MANHOLE_ID` = PACID, `UPSTREAM`/`DOWNSTREAM` = invert levels m AHD, `HEIGHT` = diameter mm, `LENGTH` m (= geometry length), `FLOW_GRADE` 1-in-x (informational; calculated grade from levels takes preference; median ratio levels/FLOW_GRADE ≈ 1.089, cause unknown), `MAINTYPE`: R retic, B branch, M main, E = **inspection shaft (IS) sewer** (no upstream chamber), `STATUS` A = actual, `MATERIAL` "PVC- ...", "VC- ...".
-- Runs are **segmented** between chambers (all segments carry the run's US/DS ids); IS sewers often **tee mid-line** into another sewer with no chamber; the GIS is drawn **downstream → upstream** (all 61 reversed). Falls through manholes are normal.
-- Loading agreed: **630 L/day per connection** (3.5 × 180) as ADWF; **× 1.5 peaking** = GSDF for capacity; diurnal profile for dynamic runs. In ICM the user enters a **manually calculated ADWF per catchment** → supported via `wwn_subcatchments.adwf_lps` + `profile_id`, and `wwn_node_loads` (source `manual` / `connection_points`). Lot-size/zoning loading = future revision.
+## 7. Water Corporation data facts
 
-## 6. Pending from the user
+- Access chambers: `PACID`, `TOPLEV` (m AHD), `CHAMBER_TY` M → `ac`, J → `ms`, I (IS) skipped. Some chambers have blank `TOPLEV` → DEM fill in the export.
+- Connection points: `ID`; ~847 k features — never full-scan.
+- Gravity sewers: `ID`, `US_MANHOLE_ID`/`DS_MANHOLE_ID`, `UPSTREAM`/`DOWNSTREAM` invert m AHD, `HEIGHT` mm, `LENGTH`, `FLOW_GRADE`, `MAINTYPE` (E = IS sewer), `STATUS`, `MATERIAL`. Segmented runs; IS sewers tee mid-line; digitised downstream → upstream.
+- **Sewer Pump Station**: `ID`, `SAP_ID` (e.g. S0037310), `SAP_NAME`, `STATUS`, `TYPE`, `PSNAME`, `PSNUMBER`, `ASSET_ID`, `DATEINST` — **no hydraulics**.
+- **Sewer Pressure Main**: `ID`, `STATUS`, `DIAMETER`, `INDIAM1/2`, `OUTDIAM`, `MATERIAL`, `LENGTH`, `MAINNAME`, `PRESCLAS`; sentinels −99.9, −9996, −9998; dates 1800-01-01 = unknown. **`UPSTREAM`/`DOWNSTREAM` are unreliable — ignored** (no rising-main profile).
+- Station hydraulics (wet well, pumps, curves, levels) live in a **separate corporate system that cannot be linked** → manual entry via Set Pump Station Data.
+- Loading: 630 L/day per connection ADWF; × 1.5 = GSDF; diurnal profile for dynamic runs; manual ADWF per catchment supported (`wwn_subcatchments.adwf_lps`, `wwn_node_loads`).
 
-1. Paste of the layer dataSource one-liner above (for the open bug).
-2. Real ICM diurnal profile export ("1 Dunkley Ave Applecross PS4", Design, 5-min, 288 rows; copy the Time/Factor table).
-3. **Pressure side** data (rising mains, pump stations: wet well, pumps/curves, start/stop levels) — schema tables exist (`wwn_pump_stations`, `wwn_pumps`, `wwn_rising_mains`); importer and SWMM pump/force-main export not built yet.
-4. DS 51 (pump stations/pressure mains) if still wanted — `rulesets/ds51_TODO.toml` placeholder.
+## 8. Next steps (in order)
 
-## 7. Suggested next steps (in order)
+1. **Verify the pressure side on real data**, one step at a time: (a) select a PS + its pressure main inside a gravity model's area, remove model layers from the map, run Import Pressure Data (use selected) and check wet well / chaining / discharge messages; (b) Set Pump Station Data from a data sheet; (c) Run Simulation → pump tables, flags, pump station layer. Fix what real data breaks (assumptions listed in the importer: mains join end to end within 1 m; main starts within 30 m of the PS; wet well = terminal gravity node; GeoPackage without R-tree tables).
+2. **Sub-catchments** (user's stated next item): export `wwn_subcatchments` to ICM (polygons, outlet node, manual ADWF / population, profile) and check ICM's subcatchment import fields; possibly an import tool for catchment polygons.
+3. Export pump stations / rising mains to ICM (pumps, wet wells, force mains) — currently a wet well exports as Manhole with a warning.
+4. Real ICM diurnal profile ("1 Dunkley Ave Applecross PS4", 5-min, 288 rows) → compare simulated peaks with ICM.
+5. Write the user's saved ODIC `.cfg` files out with Export To ICM (needs the files from the user).
+6. R-tree handling in sqlite writers (repair / pressure import refuse or may fail if Pro adds spatial indexes).
+7. Long-section (HGL) view; lot/zoning loading; DS 50 extras — lower priority.
 
-1. Fix the "not in the active map" bug (section 4) → re-test Trace + Run Simulation results layer.
-2. Import the real ICM profile; compare one catchment's simulated peak against ICM.
-3. Pressure side: import tool for rising mains + pump stations; SWMM export with wet well storage nodes, pump curves (type 3/4), on/off level controls, force mains (D-W/H-W); pump starts/hr and wet-well results.
-4. Long-section view (HGL from simulation/design) in ArcGIS.
-5. Lots + zoning loading (DS 50 4.2.1(j) net area) and the "select pipe → upstream connections / flow" trace summary the user asked for.
-6. DS 50 extras (IS sewer rules 4.2.2, max-grade exemption) — low priority now.
+## 9. Gotchas (ArcGIS Pro, learned the hard way)
 
-## 8. Gotchas (ArcGIS Pro, learned the hard way)
+- Pro resets `sys.path` before each tool run → `_vendor.activate(_HERE)` first line of every `execute`, then `impl = _impl()` (tests count this pattern: `tests/test_vendor.py` n_exec, label list in `tests/test_tools_impl.py`).
+- `parameterDependencies` must be parameter **names**.
+- `arcpy.AddError` marks the tool failed → data issues as warnings with `ERROR:` prefix.
+- Unsupported Layer properties raise → use `maplayers.layer_name/layer_source`.
+- GeoPackage layer `dataSource` = `Instance=<file>.gpkg,Dataset=main.%<table>`.
+- Geodatabase field names are case-insensitive: never name a field `shape`/`objectid`/... (`icm_export.RESERVED_FIELDS`).
+- Standalone tables: `Map.removeTable()`, never `removeLayer()`.
+- Every GP call is slow in the user's project → wrap in `gpenv.quiet`, prefer one `AddFields`, avoid per-row GP tools (DEM read uses `RasterToNumPyArray`, `GetCellValue` fallback).
+- GeoPackage writes via sqlite3 fail while Pro holds a lock → tools tell the user to remove the model's layers / close attribute tables.
+- The fake arcpy must be made stricter whenever real Pro fails differently (done for Shape clash, removeTable, tables list).
+- Pro's Python window: give one-liners.
 
-- Pro **resets `sys.path` before each tool run** → `_vendor.activate(_HERE)` at the top of every `execute`; never cache a failed native import.
-- `parameterDependencies` must be parameter **names**, not indices (else "tool has failed to open").
-- `arcpy.AddError` marks the tool **failed** → data issues go out as warnings (`ERROR:` prefix).
-- Unsupported Layer properties raise (`AttributeError: The attribute 'name' is not supported on this instance of Layer`) — always use `maplayers.layer_name/layer_source`.
-- Pro's Python is 3.11: check new Python with `/usr/bin/python3.11 -c "import ast; ast.parse(...)"`.
-- The fake arcpy is permissive — when a real-Pro failure is found, make the fake stricter and add a regression test.
-- Standalone map tables: `Map.removeTable()`, never `removeLayer()` (fake now enforces it; `maplayers.remove_item`).
-- Each geoprocessing tool call costs 2-6 s on the user's PC (Self Test 2026-11-23: CreateFeatureclass 2.3-2.8 s, AddFields 5.5-6.2 s, row copy 0.5 s); minimise GP calls. Suspect: their project has ~90 network-share layers — blank-project test pending.
-- Multi-line code in Pro's Python window needs an extra Enter; give users one-liners.
-
-## 8b. Open items (2026-11-23)
-
-- MILESTONE (user, 2026-11-23): gravity model exported with Export To ICM loads into InfoWorks ICM 2024.5 and runs (after Join Dangling Sewer Ends + terminal Outfall fix). ODIC mapping works (user saved configs).
-- NEXT: verify pressure side on real data (Import Pressure Data -> Set Pump Station Data -> Run Simulation pump results); then sub-catchment data (export to ICM subcatchments with manual ADWF / profile).
-
-- ICM: two IS sewers (E4 -> 565141383, E46 -> 565269012) not joined as tees. New tool Join Dangling Sewer Ends (`qgis_plugin/wwnet/core/repair.py`, preview default) splits the main and inserts a tee (invert = us - grade x distance); Import Sewer Data has a 'Tee join distance' parameter (default 0.5) and reports possible missed tees within 5 m. Refuses models with rtree_wwn_* tables. Not yet run on real data.
-- Export: dangling ends stay Break (not Outfall); engine warns their flow leaves the model.
-- Export now writes terminal nodes as Outfall (ICM needed one).
-- Pump stations not exported to ICM yet.
-- Test venv in scratchpad has wwnet_native + anthropic installed: full arcgis suite must be 100 % green.
-
-## 9. Dev commands
+## 10. Dev commands and verification gate
 
 ```bash
 cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
-# Python venvs in the session scratchpad (recreate if gone): venv (maturin), venv-plugin (pytest, anthropic, wwnet_native wheel)
+# test venv in the session scratchpad: pytest, pyflakes, maturin, anthropic, wwnet_native wheel (rebuild after Rust changes)
 (cd crates/wwnet-py && maturin build --release) && pip install --force-reinstall target/wheels/wwnet_native-*.whl
-pytest -q qgis_plugin/tests
-(cd arcgis_toolbox && WWNET_EXE=../target/debug/wwnet python -m pytest -q tests)
-python -m pyflakes arcgis_toolbox/WWNet.pyt arcgis_toolbox/wwnet_arcgis   # CI lint gate: run it before pushing (and tell agents to)
+pytest -q qgis_plugin/tests                                         # 104 passed at handover
+(cd arcgis_toolbox && WWNET_EXE=../target/debug/wwnet python -m pytest -q tests)   # 252 passed at handover — must be 100 % green
+python -m pyflakes arcgis_toolbox/WWNet.pyt arcgis_toolbox/wwnet_arcgis qgis_plugin/wwnet/core   # CI lint gate
+/usr/bin/python3.11 -c "import ast; ast.parse(open('arcgis_toolbox/WWNet.pyt').read())"
 ```
-CI (`.github/workflows/ci.yml`): Rust (ubuntu + windows), plugin, arcgis-toolbox, Windows wheel, and **arcgis-bundle** (builds `wwnet-arcgis-bundle-win-py311` + smoke test with Pro's pinned package versions). Check runs with the GitHub MCP `actions_list` (owner `daniellawrence38`, repo `icm-development-`, branch filter).
+CI jobs: rust (ubuntu + windows), plugin, arcgis-toolbox (pyflakes + pytest), wheel, **arcgis-bundle** (full bundle + Pro-like smoke test), **arcgis-update** (Python-only zip). Check runs with GitHub MCP `actions_list` (owner `daniellawrence38`, repo `icm-development-`, branch filter).
