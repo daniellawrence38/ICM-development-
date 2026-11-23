@@ -15,7 +15,6 @@ _vendor.activate(_HERE)  # no-install bundle: <toolbox>/vendor first on sys.path
 from wwnet_arcgis import updater as _updater  # noqa: E402
 from wwnet_arcgis import settings as _settings  # noqa: E402
 from wwnet_arcgis import tools_impl as impl  # noqa: E402
-from wwnet_arcgis.messages import Messages  # noqa: E402
 
 MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
 EFFORTS = ["low", "medium", "high"]

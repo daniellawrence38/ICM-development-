@@ -93,5 +93,6 @@ cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warni
 (cd crates/wwnet-py && maturin build --release) && pip install --force-reinstall target/wheels/wwnet_native-*.whl
 pytest -q qgis_plugin/tests
 (cd arcgis_toolbox && WWNET_EXE=../target/debug/wwnet python -m pytest -q tests)
+python -m pyflakes arcgis_toolbox/WWNet.pyt arcgis_toolbox/wwnet_arcgis   # CI lint gate: run it before pushing (and tell agents to)
 ```
 CI (`.github/workflows/ci.yml`): Rust (ubuntu + windows), plugin, arcgis-toolbox, Windows wheel, and **arcgis-bundle** (builds `wwnet-arcgis-bundle-win-py311` + smoke test with Pro's pinned package versions). Check runs with the GitHub MCP `actions_list` (owner `daniellawrence38`, repo `icm-development-`, branch filter).
