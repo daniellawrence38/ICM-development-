@@ -198,3 +198,70 @@ def test_export_icm_timing_lines_and_log_settings_restored(fake_arcpy, demo_gpkg
     assert "create gdb" not in conduits[0]
     assert a.log_settings[:2] and set(a.log_settings[:2]) == {("history", False), ("metadata", False)}
     assert a.log_history is True and a.log_metadata is True
+
+
+def _edit(demo_gpkg, *sql):
+    con = sqlite3.connect(demo_gpkg)
+    for s in sql:
+        con.execute(s)
+    con.commit()
+    con.close()
+
+
+def test_demo_outfall_type_is_not_a_terminal_conversion(demo_gpkg):
+    d = icm_export.build(demo_gpkg)
+    nodes = {n["node_id"]: n for n in d["nodes"]}
+    assert nodes["OUT1"]["node_type"] == "Outfall" and nodes["OUT1"]["wwn_outfall_reason"] == ""
+    assert all(n["wwn_outfall_reason"] == "" for n in d["nodes"])
+    assert not any("terminal node" in w or "wet well" in w for w in d["warnings"])
+
+
+def test_terminal_ac_node_exported_as_outfall(demo_gpkg):
+    _edit(demo_gpkg, "UPDATE wwn_nodes SET node_type='ac' WHERE node_id='OUT1'")
+    d = icm_export.build(demo_gpkg)
+    nodes = {n["node_id"]: n for n in d["nodes"]}
+    assert nodes["OUT1"]["node_type"] == "Outfall" and nodes["OUT1"]["wwn_node_type"] == "ac"
+    assert nodes["OUT1"]["wwn_outfall_reason"] == "terminal"
+    assert nodes["N08"]["node_type"] == "Manhole" and nodes["N08"]["wwn_outfall_reason"] == ""
+    assert "1 terminal node(s) exported as Outfall: OUT1" in d["warnings"]
+    assert not any("sewer end" in w for w in d["warnings"])
+
+
+def test_dangling_junction_exported_as_outfall(demo_gpkg, fake_arcpy, tmp_path):
+    # a junction fed from B1 (pipe in, nothing out): a sewer that should have joined another pipe
+    _edit(demo_gpkg,
+          "INSERT INTO wwn_nodes (geom, node_id, node_type, surface_level, invert_level) "
+          "SELECT geom, 'J1', 'junction', 27.5, 26.5 FROM wwn_nodes WHERE node_id='N08'",
+          "INSERT INTO wwn_conduits (geom, conduit_id, us_node_id, ds_node_id, dn, us_invert, ds_invert, "
+          "length_m, ks_mm, internal_diameter_mm) SELECT geom, 'P98', 'B1', 'J1', 150, 27.0, 26.5, 50.0, 1.0, "
+          "150.0 FROM wwn_conduits WHERE conduit_id='P09'")
+    d = icm_export.build(demo_gpkg)
+    nodes = {n["node_id"]: n for n in d["nodes"]}
+    assert nodes["J1"]["node_type"] == "Outfall" and nodes["J1"]["wwn_node_type"] == "junction"
+    assert nodes["J1"]["wwn_outfall_reason"] == "dangling end"
+    assert not any("terminal node" in w for w in d["warnings"])
+    expected = ("1 sewer end(s) have no downstream pipe and are not chambers (possible missed tee / main outside "
+                "the selection) — exported as Outfall: J1")
+    assert expected in d["warnings"]
+
+    a = fake_arcpy([])
+    tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path))
+    row = _icm_nodes(a, tmp_path)["J1"]
+    assert row["node_type"] == "Outfall" and row["wwn_outfall_reason"] == "dangling end"
+    assert [f for f, _ in icm_export.NODE_FIELDS].index("wwn_outfall_reason") == \
+        [f for f, _ in icm_export.NODE_FIELDS].index("wwn_ground_source") + 1
+
+
+@pytest.mark.parametrize("how", ["wet_well_type", "pump_station"])
+def test_terminal_wet_well_stays_manhole(demo_gpkg, how):
+    if how == "wet_well_type":
+        _edit(demo_gpkg, "UPDATE wwn_nodes SET node_type='wet_well' WHERE node_id='OUT1'")
+    else:       # typed as 'ac' but it is the wet well of a pump station
+        _edit(demo_gpkg, "UPDATE wwn_nodes SET node_type='ac' WHERE node_id='OUT1'",
+              "INSERT INTO wwn_pump_stations (ps_id, wet_well_node_id, discharge_node_id) "
+              "VALUES ('PS9', 'OUT1', 'N08')")
+    d = icm_export.build(demo_gpkg)
+    out1 = next(n for n in d["nodes"] if n["node_id"] == "OUT1")
+    assert out1["node_type"] == "Manhole" and out1["wwn_outfall_reason"] == ""
+    assert "OUT1: wet well exported as Manhole (pumps not exported to ICM yet)" in d["warnings"]
+    assert not any("terminal node" in w for w in d["warnings"])

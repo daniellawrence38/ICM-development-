@@ -28,7 +28,8 @@ ICM_NODE_TYPE = {"ac": "Manhole", "drop_ac": "Manhole", "ms": "Manhole", "wet_we
 NODE_FIELDS = [("node_id", "TEXT"), ("node_type", "TEXT"), ("ground_level", "DOUBLE"),
                ("flood_level", "DOUBLE"), ("chamber_floor", "DOUBLE"), ("chamber_area", "DOUBLE"),
                ("shaft_area", "DOUBLE"), ("wwn_node_type", "TEXT"), ("wwn_floor_source", "TEXT"),
-               ("wwn_ground_source", "TEXT"), ("asset_id", "TEXT"), ("status", "TEXT"), ("notes", "TEXT")]
+               ("wwn_ground_source", "TEXT"), ("wwn_outfall_reason", "TEXT"), ("asset_id", "TEXT"),
+               ("status", "TEXT"), ("notes", "TEXT")]
 CONDUIT_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "TEXT"),
                   ("us_invert", "DOUBLE"), ("ds_invert", "DOUBLE"), ("conduit_length", "DOUBLE"),
                   ("conduit_shape", "TEXT"), ("conduit_width", "DOUBLE"), ("conduit_height", "DOUBLE"),
@@ -37,6 +38,10 @@ CONDUIT_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id"
                   ("asset_id", "TEXT"), ("status", "TEXT"), ("notes", "TEXT")]
 
 # Names that clash (case-insensitively) with geodatabase system fields -> AddField ERROR 000012.
+# WWNet node types that, with pipes in and none out, are a sewer end that should have joined another
+# pipe (missed tee / main outside the selection) rather than a chamber at a free outfall.
+DANGLING_TYPES = ("junction", "is_end", "io_end")
+
 RESERVED_FIELDS = {"shape", "objectid", "oid", "fid", "shape_length", "shape_area", "globalid"}
 
 
@@ -75,6 +80,10 @@ def _rows(con, sql):
     return [dict(zip(names, r)) for r in cur]
 
 
+def _ids(ids, limit=20):
+    return ", ".join(ids[:limit]) + (" ..." if len(ids) > limit else "")
+
+
 def _r(v, nd=3):
     return None if v is None else round(float(v), nd)
 
@@ -96,6 +105,10 @@ def build(gpkg_path: str) -> dict:
                 n = con.execute(f'SELECT COUNT(*) FROM "{t}"').fetchone()[0]
                 if n:
                     skipped[t] = n
+        pump_wet_wells = set()
+        if "wwn_pump_stations" in present:
+            pump_wet_wells = {r[0] for r in con.execute(
+                "SELECT wet_well_node_id FROM wwn_pump_stations WHERE wet_well_node_id IS NOT NULL")}
     finally:
         con.close()
 
@@ -127,6 +140,7 @@ def build(gpkg_path: str) -> dict:
             "chamber_floor": _r(floor), "chamber_area": area, "shaft_area": area,
             "wwn_node_type": n["node_type"], "wwn_floor_source": src,
             "wwn_ground_source": "model" if n["surface_level"] is not None else "",
+            "wwn_outfall_reason": "",
             "asset_id": n["asset_id"], "status": n["status"], "notes": n["notes"]})
     n_fallback = sum(1 for n in out_nodes if n["wwn_floor_source"] == "lowest connected invert")
     if n_fallback:
@@ -171,6 +185,32 @@ def build(gpkg_path: str) -> dict:
     if missing_node:
         warnings.append(f"{len(missing_node)} conduit end(s) reference a node that doesn't exist (ICM will reject "
                         "them): " + ", ".join(missing_node[:20]))
+    # A terminal node (pipes in, none out) is a free outfall in the WWNet engine, so it is exported as an
+    # ICM Outfall (ICM rejects links with no outfall). Wet wells stay Manhole: pumps are not exported yet.
+    n_in, n_out = {}, {}
+    for c in out_links:
+        n_out[c["us_node_id"]] = n_out.get(c["us_node_id"], 0) + 1
+        n_in[c["ds_node_id"]] = n_in.get(c["ds_node_id"], 0) + 1
+    terminal, dangling = [], []
+    for n in out_nodes:
+        nid = n["node_id"]
+        if n_in.get(nid, 0) == 0 or n_out.get(nid, 0) > 0 or n["wwn_node_type"] == "outfall":
+            continue
+        if n["wwn_node_type"] == "wet_well" or nid in pump_wet_wells:
+            warnings.append(f"{nid}: wet well exported as Manhole (pumps not exported to ICM yet)")
+            continue
+        n["node_type"] = "Outfall"
+        if n["wwn_node_type"] in DANGLING_TYPES:
+            n["wwn_outfall_reason"] = "dangling end"
+            dangling.append(nid)
+        else:
+            n["wwn_outfall_reason"] = "terminal"
+            terminal.append(nid)
+    if terminal:
+        warnings.append(f"{len(terminal)} terminal node(s) exported as Outfall: " + _ids(terminal))
+    if dangling:
+        warnings.append(f"{len(dangling)} sewer end(s) have no downstream pipe and are not chambers (possible missed "
+                        "tee / main outside the selection) \u2014 exported as Outfall: " + _ids(dangling))
     for t, n in skipped.items():
         warnings.append(f"{t}: {n} row(s) NOT exported (pressure side / sub-catchments not supported yet).")
     return {"nodes": out_nodes, "conduits": out_links, "warnings": warnings, "skipped": skipped}
@@ -211,6 +251,7 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
         "",
         "Node table",
         "  node_id -> Node ID | node_type -> Node type (Manhole / Break / Outfall)",
+        "  Terminal nodes (pipes in, none out) are exported as Outfall (free outfall, as in the WWNet engine)",
         "  ground_level -> Ground level | flood_level -> Flood level | chamber_floor -> Chamber floor level",
         "  chamber_area / shaft_area -> Chamber area / Shaft area (m2, from chamber_diameter_mm; blank = ICM default)",
         "Conduit table",
