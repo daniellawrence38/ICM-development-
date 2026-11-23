@@ -375,6 +375,12 @@ def make_fake(layers=None, map_name="Map"):
         AddField=add_field, AddFields=add_fields, GetCellValue=get_cell, Delete=delete_fc, CreateFeatureclass=create_fc, CreateFileGDB=create_gdb)
 
     layers = layers if layers is not None else []
+    tables = []                 # standalone (non-spatial) tables in the map
+    a.tables = tables
+    TABLE_NAMES = ("wwn_node_loads", "wwn_results_conduits")
+
+    def _is(item, seq):
+        return any(item is x for x in seq)
 
     class Map:
         name = map_name
@@ -383,17 +389,30 @@ def make_fake(layers=None, map_name="Map"):
             return list(layers)
 
         def listTables(self):
-            return []
+            return list(tables)
 
         def addDataFromPath(self, path):
-            lyr = make_layer(os.path.basename(path), path)
             a.added.append(("data", path))
+            table = path.rsplit("main.", 1)[-1] if "main." in path else ""
+            if table in TABLE_NAMES:
+                tbl = make_layer(os.path.basename(path), path, feature=False)
+                tables.append(tbl)
+                return tbl
+            lyr = make_layer(os.path.basename(path), path)
             layers.append(lyr)
             return lyr
 
         def removeLayer(self, lyr):
+            if _is(lyr, tables):
+                raise ValueError("removeLayer: not a layer")
             layers.remove(lyr)
             a.removed.append(lyr.name)
+
+        def removeTable(self, tbl):
+            if not _is(tbl, tables):
+                raise ValueError("removeTable: not a table")
+            tables.pop(next(i for i, x in enumerate(tables) if x is tbl))
+            a.removed.append(tbl.name)
 
     m = Map()
     a.mp = NS(ArcGISProject=lambda _x: NS(activeMap=m, filePath="C:/p/test.aprx"))

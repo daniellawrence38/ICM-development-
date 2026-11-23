@@ -98,7 +98,8 @@ def test_include_map_adds_and_removes_layers(fake_arcpy, wwnet_exe, tmp_path):
     selftest, tools_impl = _mods()
     layers = []
     a = fake_arcpy(layers)
-    res = selftest.run(a, Rec(), _root(tmp_path), out_dir=str(tmp_path / "st"), include_map=True, exe=wwnet_exe)
+    m = Rec()
+    res = selftest.run(a, m, _root(tmp_path), out_dir=str(tmp_path / "st"), include_map=True, exe=wwnet_exe)
     steps = _by(res)
     assert steps["map: add model to map"]["status"] in ("PASS", "WARN")
     assert steps["map: trace with selection"]["status"] in ("PASS", "WARN")
@@ -106,6 +107,13 @@ def test_include_map_adds_and_removes_layers(fake_arcpy, wwnet_exe, tmp_path):
     assert any(k == "data" for k, *_ in a.added) and a.removed
     assert layers == []
     assert a.selections
+    # the node loads table is a standalone table: it must be removed via removeTable, not left behind
+    assert any(p.endswith("main.wwn_node_loads") for k, p in a.added if k == "data")
+    assert a.tables == []
+    # every item the run added (layers and the table) was removed successfully, so the cleanup count
+    # covers the table too (a.removed only records successful removeLayer / removeTable calls)
+    added_items = [p for k, p in a.added if k == "data"]
+    assert len(a.removed) == len(added_items)
 
 
 def test_default_out_dir_is_temp(fake_arcpy, tmp_path, monkeypatch):

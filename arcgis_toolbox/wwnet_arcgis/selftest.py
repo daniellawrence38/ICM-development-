@@ -94,14 +94,14 @@ def _map_cleanup(arcpy, before, had_group) -> int:
                 removed += 1
             except Exception:  # noqa: BLE001
                 pass
-    for x in [x for x in list(m.listLayers()) + list(m.listTables())
-              if (maplayers.layer_name(x), maplayers.layer_source(x)) not in before
-              and not getattr(x, "isGroupLayer", False)]:
-        try:
-            m.removeLayer(x)
-            removed += 1
-        except Exception:  # noqa: BLE001
-            pass
+    for is_table, items in ((False, list(m.listLayers())), (True, list(m.listTables()))):
+        for x in [x for x in items if (maplayers.layer_name(x), maplayers.layer_source(x)) not in before
+                  and not getattr(x, "isGroupLayer", False)]:
+            try:
+                maplayers.remove_item(m, x, is_table)
+                removed += 1
+            except Exception:  # noqa: BLE001
+                pass
     return removed
 
 

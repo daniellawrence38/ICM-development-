@@ -120,13 +120,24 @@ def add_results_table(arcpy, gpkg_path: str, msgs):
     return tbl
 
 
+def remove_item(m, item, is_table: bool):
+    """Remove a layer or a standalone table from map `m`. Real ArcGIS Pro only removes tables
+    via removeTable(); removeLayer() on a table fails."""
+    if is_table:
+        m.removeTable(item)
+    else:
+        m.removeLayer(item)
+
+
 def remove_layers_named(arcpy, name: str) -> int:
-    """Remove every map layer / table called `name` (also inside groups). Returns how many."""
+    """Remove every map layer / table called `name` (also inside groups). Returns how many were removed.
+    Failures propagate, so only successful removals are counted."""
     m = active_map(arcpy)
     n = 0
-    for lyr in [x for x in list(m.listLayers()) + list(m.listTables()) if layer_name(x) == name]:
-        m.removeLayer(lyr)
-        n += 1
+    for is_table, items in ((False, list(m.listLayers())), (True, list(m.listTables()))):
+        for item in [x for x in items if layer_name(x) == name]:
+            remove_item(m, item, is_table)
+            n += 1
     return n
 
 

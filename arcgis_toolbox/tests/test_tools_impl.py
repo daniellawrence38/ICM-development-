@@ -569,3 +569,17 @@ def test_trace_and_find_layer_with_real_pro_gpkg_layers(fake_arcpy, wwnet_exe, d
     assert "OUT1" in r["nodes"]
     assert [s[0] for s in a.selections] == ["Nodes", "Gravity sewers"]
     assert not any("not in the active map" in t for _, t in a.log)
+
+
+def test_remove_layers_named_removes_table_via_removetable(fake_arcpy, demo_gpkg):
+    a = fake_arcpy([])
+    m = a.mp.ArcGISProject("CURRENT").activeMap
+    tbl = m.addDataFromPath(gpkg.table_path(demo_gpkg, "wwn_node_loads"))
+    maplayers.set_layer_name(tbl, "Node loads")
+    lyr = m.addDataFromPath(gpkg.table_path(demo_gpkg, "wwn_nodes"))
+    maplayers.set_layer_name(lyr, "Node loads")
+    assert m.listTables() == [tbl]
+    assert maplayers.remove_layers_named(a, "Node loads") == 2
+    assert m.listTables() == [] and a.tables == [] and m.listLayers() == []
+    assert a.removed == ["Node loads", "Node loads"]
+    assert maplayers.remove_layers_named(a, "Node loads") == 0
