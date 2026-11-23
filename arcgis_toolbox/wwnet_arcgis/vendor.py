@@ -89,6 +89,11 @@ def vendor_dir(root) -> Path:
 def activate(root, log_fn=None):
     """Put ``<root>/vendor`` first on sys.path (once) and make sure typing_extensions is new enough.
     Returns the vendor path, or None when the folder does not exist (e.g. dev checkout)."""
+    try:                                    # swap in native files staged by Update WWNet (before wwnet_native loads)
+        from . import updater
+        updater.apply_pending(root)
+    except Exception as exc:                # noqa: BLE001 - never block activation
+        log.warning("apply_pending failed: %s", exc)
     vd = vendor_dir(root)
     if not vd.is_dir():
         return None

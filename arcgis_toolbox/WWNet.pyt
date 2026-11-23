@@ -12,12 +12,19 @@ if _HERE not in sys.path:
 from wwnet_arcgis import vendor as _vendor  # noqa: E402
 _vendor.activate(_HERE)  # no-install bundle: <toolbox>/vendor first on sys.path (before wwnet_native / anthropic)
 
+from wwnet_arcgis import updater as _updater  # noqa: E402
 from wwnet_arcgis import settings as _settings  # noqa: E402
 from wwnet_arcgis import tools_impl as impl  # noqa: E402
 from wwnet_arcgis.messages import Messages  # noqa: E402
 
 MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
 EFFORTS = ["low", "medium", "high"]
+
+
+def _impl():
+    """Fresh ``wwnet_arcgis.tools_impl`` for this tool run (drops cached WWNet modules first), so files
+    updated by *Update WWNet* take effect without restarting ArcGIS Pro."""
+    return _updater.fresh_impl()
 MULTILINE = "{E5456E51-0C41-4797-9EE4-5269820C6F0E}"
 
 
@@ -74,7 +81,7 @@ class Toolbox(object):
         self.label = "WWNet"
         self.alias = "wwnet"
         self.tools = [NewModel, ImportSewerData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity, ExportToICM,
-                      SetAssistantApiKey, AskWWNetAssistant, VerifySetup]
+                      SetAssistantApiKey, AskWWNetAssistant, VerifySetup, UpdateWWNet]
 
 
 class NewModel(object):
@@ -90,7 +97,8 @@ class NewModel(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.new_model(arcpy, Messages(arcpy), parameters[0].valueAsText,
+        impl = _impl()
+        impl.new_model(arcpy, impl.Messages(arcpy), parameters[0].valueAsText,
                        bool(parameters[1].value), bool(parameters[2].value))
 
 
@@ -157,11 +165,12 @@ class ImportSewerData(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        impl = _impl()
         from wwnet_arcgis import sewer_import as si
         fields = {role: (parameters[8 + n].valueAsText or "")
                   for n, (role, _k, _l, _q) in enumerate(si.FIELD_ROLES)}
         k = 8 + len(si.FIELD_ROLES)       # first connection-point-load parameter
-        impl.import_sewer_data(arcpy, Messages(arcpy), _source(parameters[0]), _source(parameters[1]),
+        impl.import_sewer_data(arcpy, impl.Messages(arcpy), _source(parameters[0]), _source(parameters[1]),
                                _source(parameters[2]), parameters[3].valueAsText, fields,
                                parameters[4].value if parameters[4].value is not None else 0.5,
                                parameters[5].valueAsText or "levels", bool(parameters[6].value),
@@ -193,7 +202,8 @@ class ImportDiurnalProfile(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.import_profile(Messages(arcpy), parameters[0].valueAsText, parameters[1].valueAsText,
+        impl = _impl()
+        impl.import_profile(impl.Messages(arcpy), parameters[0].valueAsText, parameters[1].valueAsText,
                             _text(parameters[2]), _text(parameters[3]) or "", bool(parameters[4].value),
                             bool(parameters[5].value), _text(parameters[6]))
 
@@ -210,7 +220,8 @@ class AddModelToMap(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.add_model_to_map(arcpy, Messages(arcpy), parameters[0].valueAsText, bool(parameters[1].value))
+        impl = _impl()
+        impl.add_model_to_map(arcpy, impl.Messages(arcpy), parameters[0].valueAsText, bool(parameters[1].value))
 
 
 class CheckModel(object):
@@ -225,7 +236,8 @@ class CheckModel(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.check_model(arcpy, Messages(arcpy), parameters[0].valueAsText, _text(parameters[1]))
+        impl = _impl()
+        impl.check_model(arcpy, impl.Messages(arcpy), parameters[0].valueAsText, _text(parameters[1]))
 
 
 class RunDesign(object):
@@ -242,7 +254,8 @@ class RunDesign(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.run_design(arcpy, Messages(arcpy), parameters[0].valueAsText, bool(parameters[1].value),
+        impl = _impl()
+        impl.run_design(arcpy, impl.Messages(arcpy), parameters[0].valueAsText, bool(parameters[1].value),
                         bool(parameters[2].value), bool(parameters[3].value))
 
 
@@ -268,8 +281,9 @@ class RunSimulation(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        impl = _impl()
         v = lambda i, d: parameters[i].value if parameters[i].value is not None else d  # noqa: E731
-        impl.run_simulation(arcpy, Messages(arcpy), parameters[0].valueAsText, float(v(1, 48.0)),
+        impl.run_simulation(arcpy, impl.Messages(arcpy), parameters[0].valueAsText, float(v(1, 48.0)),
                             float(v(2, 24.0)), parameters[3].valueAsText or "manning", float(v(4, 0.013)),
                             float(v(5, 1.0)), bool(v(6, True)), _text(parameters[7]))
 
@@ -300,7 +314,8 @@ class Trace(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.trace(arcpy, Messages(arcpy), _layer_obj(parameters[0]), parameters[1].valueAsText,
+        impl = _impl()
+        impl.trace(arcpy, impl.Messages(arcpy), _layer_obj(parameters[0]), parameters[1].valueAsText,
                    parameters[2].valueAsText, bool(parameters[3].value))
 
 
@@ -319,7 +334,8 @@ class PipeCapacity(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        res = impl.pipe_capacity(Messages(arcpy), parameters[0].value, parameters[1].value,
+        impl = _impl()
+        res = impl.pipe_capacity(impl.Messages(arcpy), parameters[0].value, parameters[1].value,
                                  parameters[2].value, parameters[3].value)
         parameters[4].value = res["full_flow_lps"]
 
@@ -343,7 +359,8 @@ class ExportToICM(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.export_icm(arcpy, Messages(arcpy), parameters[0].valueAsText, parameters[1].valueAsText,
+        impl = _impl()
+        impl.export_icm(arcpy, impl.Messages(arcpy), parameters[0].valueAsText, parameters[1].valueAsText,
                         _text(parameters[2]) or "GDA2020 / MGA zone 50 (EPSG:7850)", dem=_text(parameters[3]))
 
 
@@ -367,7 +384,8 @@ class SetAssistantApiKey(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.set_settings(Messages(arcpy), _text(parameters[0]), bool(parameters[1].value),
+        impl = _impl()
+        impl.set_settings(impl.Messages(arcpy), _text(parameters[0]), bool(parameters[1].value),
                           _text(parameters[2]), _text(parameters[3]), _text(parameters[4]) or "")
 
 
@@ -392,8 +410,9 @@ class AskWWNetAssistant(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        impl = _impl()
         lyr = _ml_name(_layer_obj(parameters[1])) if parameters[1].value else None
-        impl.ask_assistant(arcpy, Messages(arcpy), parameters[0].valueAsText, lyr,
+        impl.ask_assistant(arcpy, impl.Messages(arcpy), parameters[0].valueAsText, lyr,
                            bool(parameters[2].value), parameters[3].valueAsText,
                            parameters[4].valueAsText, bool(parameters[5].value),
                            bool(parameters[6].value))
@@ -412,4 +431,38 @@ class VerifySetup(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
-        impl.verify_setup(Messages(arcpy), bool(parameters[0].value))
+        impl = _impl()
+        impl.verify_setup(impl.Messages(arcpy), bool(parameters[0].value))
+
+
+class UpdateWWNet(object):
+    def __init__(self):
+        self.label = "Update WWNet"
+        self.description = ("Apply a downloaded WWNet update zip (the CI artifact wwnet-arcgis-update) in place: "
+                            "no extracting, no Unblock, and no restart of ArcGIS Pro for Python changes.")
+        self.category = "Assistant"
+
+    def getParameterInfo(self):
+        return [_p("zip_file", "Downloaded update zip", "DEFile", filetype=["zip"])]
+
+    def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        res = _updater.apply_update(parameters[0].valueAsText, _HERE, log=arcpy.AddMessage)
+        arcpy.AddMessage(f"Update version: {res['version'] or 'unknown'}")
+        upd = res["updated"]
+        arcpy.AddMessage(f"{len(upd)} file(s) updated, {res['unchanged']} unchanged.")
+        for rel in upd[:30]:
+            arcpy.AddMessage(f"  updated: {rel}")
+        if len(upd) > 30:
+            arcpy.AddMessage(f"  ... and {len(upd) - 30} more")
+        for rel in res["pending"]:
+            arcpy.AddWarning(f"{rel}: file is locked. Native module staged; it will be swapped in the next "
+                             "time ArcGIS Pro starts \u2014 restart Pro once to use it")
+        for rel in res["skipped"]:
+            arcpy.AddWarning(f"Skipped: {rel}")
+        if res["backup"]:
+            arcpy.AddMessage(f"Previous versions of changed files saved in: {res['backup']}")
+        if "WWNet.pyt" in upd:
+            arcpy.AddMessage("WWNet.pyt changed: right-click the WWNet toolbox in the Catalog pane > Refresh "
+                             "to see new or changed tool parameters")
+        arcpy.AddMessage("Python code changes take effect on the next tool run (no restart needed)")
