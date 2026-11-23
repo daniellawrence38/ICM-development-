@@ -37,7 +37,7 @@ Branch: `ccr-974cdaeb-c682le` (all work pushed; last commit `d900db8`). Plan: `d
 | `templates/import/watercorp_sewer.toml` | Field-role defaults + code maps for Water Corp import |
 | `templates/profiles/example_residential.csv` | **APPROXIMATE** diurnal profile digitised from a screenshot |
 
-ArcGIS tools: Import Pressure Data (2026-11-23, `wwnet_arcgis/pressure_import.py`: SewerPumpStation + SewerPressureMain -> wwn_pump_stations / wwn_rising_mains, chains segments from the PS, discharge = nearest gravity node, wet well = terminal gravity node; UPSTREAM/DOWNSTREAM levels ignored (user: unreliable); re-run keeps hand-entered pump data; pump hydraulics are in a separate corporate system -> manual entry), Self Test (2026-11-23, `wwnet_arcgis/selftest.py`: runs every tool on templates/demo/demo.gpkg in a temp folder, writes WWNet_selftest_report.txt — ask the user to run it after each update and paste the report), Update WWNet (2026-11-23, `wwnet_arcgis/updater.py`: applies the `wwnet-arcgis-update` CI artifact in place, modules purged per run via `_impl()` in WWNet.pyt, locked native files staged as `.pending` and swapped in `vendor.activate`; commit c3e5f7a is complete despite its WIP title), Export To ICM (new 2026-11-23, `wwnet_arcgis/icm_export.py`; not yet tried in Pro/ICM), New Model, Import Sewer Data, Import Diurnal Profile, Add Model To Map, Check Model, Run Design, Run Simulation, Trace, Pipe Capacity, Set Assistant API Key, Ask WWNet Assistant, Verify Setup.
+ArcGIS tools: Set Pump Station Data (2026-11-23, `wwnet_arcgis/pumpdata.py`; manual entry of wet well / levels / pumps / curve paste), pump results in Run Simulation (tables + flags: overflow, starts/h > 10, RM velocity outside 0.7-2.0 m/s; memory layer 'Simulation pump stations'), Import Pressure Data (2026-11-23, `wwnet_arcgis/pressure_import.py`: SewerPumpStation + SewerPressureMain -> wwn_pump_stations / wwn_rising_mains, chains segments from the PS, discharge = nearest gravity node, wet well = terminal gravity node; UPSTREAM/DOWNSTREAM levels ignored (user: unreliable); re-run keeps hand-entered pump data; pump hydraulics are in a separate corporate system -> manual entry), Self Test (2026-11-23, `wwnet_arcgis/selftest.py`: runs every tool on templates/demo/demo.gpkg in a temp folder, writes WWNet_selftest_report.txt — ask the user to run it after each update and paste the report), Update WWNet (2026-11-23, `wwnet_arcgis/updater.py`: applies the `wwnet-arcgis-update` CI artifact in place, modules purged per run via `_impl()` in WWNet.pyt, locked native files staged as `.pending` and swapped in `vendor.activate`; commit c3e5f7a is complete despite its WIP title), Export To ICM (new 2026-11-23, `wwnet_arcgis/icm_export.py`; not yet tried in Pro/ICM), New Model, Import Sewer Data, Import Diurnal Profile, Add Model To Map, Check Model, Run Design, Run Simulation, Trace, Pipe Capacity, Set Assistant API Key, Ask WWNet Assistant, Verify Setup.
 
 ## 4. Verified in real ArcGIS Pro vs not
 
@@ -86,6 +86,13 @@ Not yet working / unverified in Pro:
 - Standalone map tables: `Map.removeTable()`, never `removeLayer()` (fake now enforces it; `maplayers.remove_item`).
 - Each geoprocessing tool call costs 2-6 s on the user's PC (Self Test 2026-11-23: CreateFeatureclass 2.3-2.8 s, AddFields 5.5-6.2 s, row copy 0.5 s); minimise GP calls. Suspect: their project has ~90 network-share layers — blank-project test pending.
 - Multi-line code in Pro's Python window needs an extra Enter; give users one-liners.
+
+## 8b. Open items (2026-11-23)
+
+- ICM: two IS sewers (E4 -> 565141383, E46 -> 565269012) not joined as tees (importer tee tolerance fixed at 0.5 m, not a tool parameter). Waiting on distance-to-nearest-conduit output from the user; then expose tee tolerance in Import Sewer Data + near-miss warnings.
+- Export now writes terminal nodes as Outfall (ICM needed one).
+- Pump stations not exported to ICM yet.
+- Test venv in scratchpad has wwnet_native + anthropic installed: full arcgis suite must be 100 % green.
 
 ## 9. Dev commands
 
