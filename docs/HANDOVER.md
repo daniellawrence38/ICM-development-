@@ -89,6 +89,9 @@ Not yet working / unverified in Pro:
 
 ## 8b. Open items (2026-11-23)
 
+- MILESTONE (user, 2026-11-23): gravity model exported with Export To ICM loads into InfoWorks ICM 2024.5 and runs (after Join Dangling Sewer Ends + terminal Outfall fix). ODIC mapping works (user saved configs).
+- NEXT: verify pressure side on real data (Import Pressure Data -> Set Pump Station Data -> Run Simulation pump results); then sub-catchment data (export to ICM subcatchments with manual ADWF / profile).
+
 - ICM: two IS sewers (E4 -> 565141383, E46 -> 565269012) not joined as tees. New tool Join Dangling Sewer Ends (`qgis_plugin/wwnet/core/repair.py`, preview default) splits the main and inserts a tee (invert = us - grade x distance); Import Sewer Data has a 'Tee join distance' parameter (default 0.5) and reports possible missed tees within 5 m. Refuses models with rtree_wwn_* tables. Not yet run on real data.
 - Export: dangling ends stay Break (not Outfall); engine warns their flow leaves the model.
 - Export now writes terminal nodes as Outfall (ICM needed one).
