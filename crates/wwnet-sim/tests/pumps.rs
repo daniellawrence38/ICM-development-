@@ -123,7 +123,7 @@ fn inp_has_pump_sections() {
     let j = section(t, "JUNCTIONS");
     assert!(j.contains("PS1__DIS  18.0000"), "{j}");
     assert!(
-        j.contains("PS1__RM1  22.0000") && j.contains("1000.0"),
+        j.contains("PS1__RM1  22.0000") && j.contains("  1000  "),
         "{j}"
     );
     // chain of two force mains

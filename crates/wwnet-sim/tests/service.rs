@@ -162,3 +162,108 @@ fn bad_options_are_errors() {
     .unwrap_err();
     assert!(e.to_string().contains("roughness must"), "{e}");
 }
+
+#[test]
+fn pump_station_results_are_stored() {
+    use wwnet_core::{Conduit, Node, NodeLoad, NodeType, Pump, PumpStation, RisingMain};
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("ps.gpkg");
+    gpkg::create(&f).unwrap();
+    let c = gpkg::open(&f).unwrap();
+    let mk = |id: &str, x: f64, inv: f64, sf: f64| {
+        let mut n = Node::new(id, x, 0.0);
+        n.invert_level = Some(inv);
+        n.surface_level = Some(sf);
+        n
+    };
+    let mut ww = mk("WW", 100.0, 18.0, 21.0);
+    ww.node_type = NodeType::WetWell;
+    for n in [
+        mk("A", 0.0, 19.0, 22.0),
+        ww,
+        mk("D", 300.0, 25.0, 28.0),
+        mk("OUT", 350.0, 24.5, 27.5),
+    ] {
+        gpkg::insert_node(&c, &n).unwrap();
+    }
+    for (id, u, d, len, ui, di) in [
+        ("G1", "A", "WW", 100.0, 19.0, 18.0),
+        ("G2", "D", "OUT", 50.0, 25.0, 24.5),
+    ] {
+        let mut k = Conduit::new(id, u, d, 225);
+        k.length_m = Some(len);
+        k.us_invert = Some(ui);
+        k.ds_invert = Some(di);
+        gpkg::insert_conduit(&c, &k).unwrap();
+    }
+    let mut ps = PumpStation::new("PS1");
+    ps.wet_well_node_id = Some("WW".into());
+    ps.rising_main_id = Some("RM1".into());
+    ps.wet_well_area_m2 = Some(7.07);
+    ps.stop_level = Some(18.5);
+    ps.start_level = Some(19.5);
+    ps.overflow_level = Some(20.5);
+    gpkg::insert_pump_station(&c, &ps).unwrap();
+    let mut p = Pump {
+        pump_id: "PU1".into(),
+        ps_id: "PS1".into(),
+        role: "duty".into(),
+        curve_json: Some("[[0, 20], [10, 16.5], [20, 11.5], [30, 5]]".into()),
+        speed_pct: 100.0,
+        notes: None,
+    };
+    gpkg::insert_pump(&c, &p).unwrap();
+    p.pump_id = "PU2".into();
+    p.role = "standby".into();
+    gpkg::insert_pump(&c, &p).unwrap();
+    let rm = RisingMain {
+        rm_id: "RM1".into(),
+        geom: None,
+        ps_id: Some("PS1".into()),
+        discharge_node_id: Some("D".into()),
+        dn: Some(150),
+        internal_diameter_mm: None,
+        material: None,
+        roughness_type: "ks".into(),
+        roughness: Some(1.0),
+        length_m: Some(200.0),
+        profile_json: None,
+        status: Default::default(),
+        data_source: Default::default(),
+        notes: None,
+    };
+    gpkg::insert_rising_main(&c, &rm).unwrap();
+    let l = NodeLoad {
+        load_id: "L1".into(),
+        node_id: "A".into(),
+        connections: None,
+        adwf_lps: Some(8.0),
+        profile_id: None,
+        source: None,
+        notes: None,
+    };
+    gpkg::insert_node_load(&c, &l).unwrap();
+    drop(c);
+
+    let o = ServiceOptions {
+        duration_h: 12.0,
+        warmup_h: 6.0,
+        ..ServiceOptions::default()
+    };
+    let out = simulate_file(&f, &o, true).unwrap();
+    assert_eq!(out.pumps.len(), 1);
+    assert!(out.pumps[0].starts > 3);
+    assert_eq!(out.pump_stations[0].overflow_volume_m3, 0.0);
+    assert_eq!(out.rising_mains.len(), 1);
+    assert!(out.series_ids.contains(&"WW".to_string()));
+    assert!(simulate_json(&out).unwrap().contains("starts_per_hour"));
+    assert_eq!(count(&f, "SELECT count(*) FROM wwn_sim_pumps"), 1);
+    assert_eq!(count(&f, "SELECT count(*) FROM wwn_sim_pump_stations"), 1);
+    assert_eq!(count(&f, "SELECT count(*) FROM wwn_sim_rising_mains"), 1);
+    assert!(
+        count(
+            &f,
+            "SELECT count(*) FROM wwn_sim_series WHERE object_id='WW'"
+        ) > 0
+    );
+}

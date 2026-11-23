@@ -389,15 +389,17 @@ SURCHARGE_METHOD     SLOT\n\
         if !nm.is_outfall && nm.storage_area_m2.is_none() {
             let _ = writeln!(
                 out,
-                "{}  {:.4}  {:.4}  0  {:.1}  0",
+                "{}  {:.4}  {:.4}  0  {}  0",
                 nm.swmm, nm.invert, md, nm.sur_depth_m
             );
         }
     }
     // wet wells: constant plan area, a0 + a1*d^a2 with a1 = a2 = 0 (node.c storage_readParams)
-    out.push_str(
-        "\n[STORAGE]\n;;Name  Invert  MaxDepth  InitDepth  Shape  a1  a2  a0  SurDepth  Fevap\n",
-    );
+    if nodes.iter().any(|n| n.storage_area_m2.is_some()) {
+        out.push_str(
+            "\n[STORAGE]\n;;Name  Invert  MaxDepth  InitDepth  Shape  a1  a2  a0  SurDepth  Fevap\n",
+        );
+    }
     for (nm, md) in nodes.iter().zip(&max_depths) {
         if let Some(a) = nm.storage_area_m2 {
             let _ = writeln!(
