@@ -661,7 +661,10 @@ def missing_hydraulic(path: str, ps_ids) -> list:
 
 
 def model_has_tables(path: str) -> bool:
-    present = gpkg.contents(path)
+    try:
+        present = gpkg.contents(path)
+    except sqlite3.Error:
+        return False
     return "wwn_nodes" in present and "wwn_conduits" in present
 
 
