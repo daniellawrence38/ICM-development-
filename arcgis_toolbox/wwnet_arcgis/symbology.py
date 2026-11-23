@@ -131,8 +131,18 @@ def style_sim_nodes(layer):
     layer.symbology = sym
 
 
+def style_sim_pumps(layer):
+    """Pump stations: red when any flag was raised (flag != 'ok'), green otherwise."""
+    _unique(layer, "flag", lambda v: SIM_COLOURS["surcharged"] if str(v) != "ok" else SIM_COLOURS["low"],
+            size=11)
+    layer.showLabels = True
+    lc = layer.listLabelClasses()[0]
+    lc.expression = "$feature.ps_id"
+    lc.visible = True
+
+
 _STYLERS = {"wwn_nodes": style_nodes, "wwn_conduits": style_conduits, "results": style_results,
-            "sim": style_sim, "sim_nodes": style_sim_nodes}
+            "sim": style_sim, "sim_nodes": style_sim_nodes, "sim_pumps": style_sim_pumps}
 
 
 def apply(table: str, layer, msgs):

@@ -2,12 +2,20 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 
 from . import (arcpy_tools, assistant_run, capacity, cli, dpapi, gpenv, gpkg, issues_table, maplayers,
-               pressure_import, settings, shared, sewer_import, symbology, vendor)
+               pressure_import, pumpdata, settings, shared, sewer_import, symbology, vendor)
 from .messages import Messages
 
 MAX_LINES = 300
+
+# Pump / rising main review thresholds (one place; printed in the Run Simulation messages).
+# MAX_STARTS_PER_HOUR depends on the motor size (small submersibles tolerate more starts than large
+# motors): treat it as a screening value and check against the station's own specification.
+MAX_STARTS_PER_HOUR = 10.0
+MIN_RM_VELOCITY = 0.7     # m/s: below this solids settle in a rising main (self-cleansing concern)
+MAX_RM_VELOCITY = 2.0     # m/s: above this headloss and surge (water hammer) become a concern
 
 
 # --------------------------------------------------------------- model tools
@@ -258,6 +266,8 @@ def report_issues(msgs: Messages, issues: list):
 def check_model(arcpy, msgs: Messages, gpkg_path: str, out_table: str | None = None, exe=None):
     issues, rc = cli.run_check(gpkg_path, exe)
     counts = report_issues(msgs, issues)
+    for line in station_report_lines(gpkg_path):
+        msgs.info(f"Pump station data: {line}")
     msgs.info(f"Check finished: {counts['error']} error(s), {counts['warning']} warning(s), "
               f"{counts['info']} info.")
     if out_table:
@@ -265,6 +275,48 @@ def check_model(arcpy, msgs: Messages, gpkg_path: str, out_table: str | None = N
             n = issues_table.write_issues_table(arcpy, out_table, issues)
         msgs.info(f"Wrote {n} issue(s) to {out_table}")
     return issues
+
+
+def station_report_lines(gpkg_path: str) -> list:
+    """pumpdata.station_report for the model; [] when it has no pump stations or cannot be read."""
+    try:
+        return pumpdata.station_report(gpkg_path)
+    except Exception:  # noqa: BLE001 - older / non-WWNet files: nothing to report
+        return []
+
+
+def set_pump_station_data(arcpy, msgs: Messages, gpkg_path: str, ps_id: str, **values):
+    """Write pump station data typed in from the data sheet (see pumpdata.set_station).
+
+    `values`: wet_well_diameter_m, wet_well_area_m2, level_mode, start, stop, overflow,
+    emergency_storage_m3, n_duty, n_assist, n_standby, duty_rate_lps, curve_text, curve_order,
+    flow_units, speed_pct, source_note, replace_pumps. Data errors are reported as an "ERROR:" warning
+    (never AddError: that would mark the tool as failed) and None is returned."""
+    v = dict(values)
+    curve_text = v.pop("curve_text", None)
+    order = v.pop("curve_order", None) or "flow_head"
+    units = v.pop("flow_units", None) or "L/s"
+    try:
+        curve, curve_warnings = None, []
+        if curve_text and str(curve_text).strip():
+            curve, curve_warnings = pumpdata.parse_curve(curve_text, order=order, flow_units=units)
+        result = pumpdata.set_station(gpkg_path, ps_id, curve=curve, **v)
+    except ValueError as exc:
+        msgs.warn(f"ERROR: {exc}")
+        return None
+    except sqlite3.OperationalError as exc:
+        text = str(exc).lower()
+        if "locked" in text or "busy" in text or "readonly" in text or "read-only" in text:
+            msgs.warn("ERROR: The model GeoPackage is locked by ArcGIS Pro. Close any open attribute tables "
+                      "and remove the model's layers from the map (or use a copy), then run the tool again.")
+            return None
+        raise
+    msgs.info(result["summary"])
+    for w in list(curve_warnings) + list(result["warnings"]):
+        msgs.warn(w)
+    for line in station_report_lines(gpkg_path):
+        msgs.info(line)
+    return result
 
 
 def _select(arcpy, layer, ids, field):
@@ -497,6 +549,114 @@ def build_sim_nodes_fc(arcpy, gpkg_path: str, nodes: list) -> str:
     return fc
 
 
+SIM_PUMP_FIELDS = [("ps_id", "TEXT"), ("max_level_m", "DOUBLE"), ("overflow_m3", "DOUBLE"),
+                   ("starts_per_hour", "DOUBLE"), ("run_time_pct", "DOUBLE"),
+                   ("rm_max_velocity_mps", "DOUBLE"), ("flag", "TEXT")]
+
+
+def pump_flags(d: dict) -> list:
+    """[(ps_id, kind, text)] review flags for the pump results of a simulate result: kind is one of
+    'overflow', 'starts', 'v_low', 'v_high'. Thresholds: MAX_STARTS_PER_HOUR, MIN/MAX_RM_VELOCITY."""
+    out = []
+    for s in d.get("pump_stations", []):
+        if _num(s, "overflow_volume_m3") > 0:
+            out.append((s["ps_id"], "overflow",
+                        f"{s['ps_id']}: wet well overflow {_num(s, 'overflow_volume_m3'):.2f} m3"))
+    for p in d.get("pumps", []):
+        sph = _num(p, "starts_per_hour")
+        if sph > MAX_STARTS_PER_HOUR:
+            out.append((p.get("ps_id"), "starts",
+                        f"{p.get('ps_id')}: pump {p['pump_id']} {sph:.1f} starts/h exceeds {MAX_STARTS_PER_HOUR:g} "
+                        "(limit depends on motor size: check against the station specification)"))
+    for m in d.get("rising_mains", []):
+        v = _num(m, "max_velocity_mps")
+        if v < MIN_RM_VELOCITY:
+            out.append((m.get("ps_id"), "v_low",
+                        f"{m.get('ps_id')}: rising main {m['rm_id']} peak velocity {v:.2f} m/s < {MIN_RM_VELOCITY:g} "
+                        "m/s (sediment / self-cleansing concern)"))
+        elif v > MAX_RM_VELOCITY:
+            out.append((m.get("ps_id"), "v_high",
+                        f"{m.get('ps_id')}: rising main {m['rm_id']} peak velocity {v:.2f} m/s > {MAX_RM_VELOCITY:g} "
+                        "m/s (headloss / surge concern)"))
+    return out
+
+
+def _station_levels(gpkg_path: str) -> dict:
+    """{ps_id: (start, stop, overflow)} (m AHD) from wwn_pump_stations; {} when unreadable."""
+    try:
+        con = sqlite3.connect(f"file:{gpkg_path}?mode=ro", uri=True)
+        try:
+            return {r[0]: (r[1], r[2], r[3]) for r in con.execute(
+                "SELECT ps_id, start_level, stop_level, overflow_level FROM wwn_pump_stations")}
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return {}
+
+
+def _lv(v) -> str:
+    return "-" if v is None else f"{float(v):.2f}"
+
+
+def pump_table_lines(d: dict, levels: dict | None = None) -> list:
+    """Pump station / pump / rising main tables for the messages (empty when the run has no stations)."""
+    stations = d.get("pump_stations", [])
+    if not stations:
+        return []
+    levels = levels or {}
+    lines = ["Pump stations (levels m AHD)"]
+    hdr = f"{'PS':<10}{'Max lvl':>8}{'Start':>8}{'Stop':>8}{'Overflow':>9}{'Ovfl m3':>9}  Max at"
+    lines += [hdr, "-" * len(hdr)]
+    for s in stations:
+        st, sp, ov = levels.get(s["ps_id"], (None, None, None))
+        lines.append(f"{str(s['ps_id'])[:10]:<10}{_lv(s.get('max_level_m')):>8}{_lv(st):>8}{_lv(sp):>8}"
+                     f"{_lv(ov):>9}{_num(s, 'overflow_volume_m3'):>9.2f}  {s.get('time_of_max_level') or '-'}")
+    pumps = d.get("pumps", [])
+    if pumps:
+        hdr = f"{'Pump':<12}{'PS':<8}{'Role':<9}{'Starts':>7}{'Starts/h':>9}{'Run %':>7}{'Qmax L/s':>10}"
+        lines += ["Pumps", hdr, "-" * len(hdr)]
+        for p in pumps:
+            lines.append(f"{str(p['pump_id'])[:12]:<12}{str(p.get('ps_id') or '')[:8]:<8}"
+                         f"{str(p.get('role') or '')[:9]:<9}{int(_num(p, 'starts')):>7}"
+                         f"{_num(p, 'starts_per_hour'):>9.1f}{_num(p, 'run_time_pct'):>7.1f}"
+                         f"{_num(p, 'max_flow_lps'):>10.2f}")
+    rms = d.get("rising_mains", [])
+    if rms:
+        hdr = f"{'Rising main':<12}{'PS':<8}{'ID mm':>7}{'Length m':>10}{'Qmax L/s':>10}{'v m/s':>7}"
+        lines += ["Rising mains", hdr, "-" * len(hdr)]
+        for m in rms:
+            lines.append(f"{str(m['rm_id'])[:12]:<12}{str(m.get('ps_id') or '')[:8]:<8}"
+                         f"{_num(m, 'diameter_mm'):>7.0f}{_num(m, 'length_m'):>10.1f}"
+                         f"{_num(m, 'max_flow_lps'):>10.2f}{_num(m, 'max_velocity_mps'):>7.2f}")
+    lines.append(f"Pump flags: wet well overflow; starts/h > {MAX_STARTS_PER_HOUR:g}; rising main velocity "
+                 f"< {MIN_RM_VELOCITY:g} or > {MAX_RM_VELOCITY:g} m/s")
+    return lines
+
+
+def build_sim_pumps_fc(arcpy, gpkg_path: str, d: dict) -> str:
+    """memory\\wwnet_simpumps_<stem> (POINT): one row per pump station with its pump / rising main maxima."""
+    fc = _memory_fc(arcpy, gpkg_path, "wwnet_simpumps", "POINT", SIM_PUMP_FIELDS)
+    by_id = {s["ps_id"]: s for s in d.get("pump_stations", [])}
+    kinds: dict = {}
+    for ps, kind, _t in pump_flags(d):
+        kinds.setdefault(ps, []).append(kind)
+    cols = [f for f, _ in SIM_PUMP_FIELDS] + ["SHAPE@"]
+    with arcpy.da.SearchCursor(gpkg.table_path(gpkg_path, "wwn_pump_stations"), ["ps_id", "SHAPE@"]) as src, \
+            arcpy.da.InsertCursor(fc, cols) as ins:
+        for ps, shape in src:
+            s = by_id.get(ps)
+            if s is None:
+                continue
+            pumps = [p for p in d.get("pumps", []) if p.get("ps_id") == ps]
+            rms = [m for m in d.get("rising_mains", []) if m.get("ps_id") == ps]
+            ins.insertRow([ps, _num(s, "max_level_m"), _num(s, "overflow_volume_m3"),
+                           max([_num(p, "starts_per_hour") for p in pumps] or [0.0]),
+                           max([_num(p, "run_time_pct") for p in pumps] or [0.0]),
+                           max([_num(m, "max_velocity_mps") for m in rms] or [0.0]),
+                           ",".join(kinds.get(ps, [])) or "ok", shape])
+    return fc
+
+
 def sim_table_lines(links: list, top: int = 20) -> list:
     """Top conduits by max d/D."""
     hdr = f"{'Conduit':<10}{'DN':>5}{'Qmax L/s':>10}{'d/D':>6}{'v m/s':>7}{'Surch min':>10}  Peak at"
@@ -527,6 +687,13 @@ def _show_sim_layers(arcpy, msgs, gpkg_path: str, d: dict):
         nlyr = maplayers.add_results_layer(arcpy, nfc, nname, msgs)
         symbology.apply("sim_nodes", nlyr, msgs)
         msgs.info(f"Flooding layer added: {nname} ({len(flooded)} node(s))")
+    pname = f"Simulation pump stations \u2014 {stem}"
+    maplayers.remove_layers_named(arcpy, pname)
+    if d.get("pump_stations"):
+        pfc = build_sim_pumps_fc(arcpy, gpkg_path, d)
+        play = maplayers.add_results_layer(arcpy, pfc, pname, msgs)
+        symbology.apply("sim_pumps", play, msgs)
+        msgs.info(f"Pump station layer added: {pname} ({len(d['pump_stations'])} station(s); red = flagged)")
 
 
 def run_simulation(arcpy, msgs: Messages, gpkg_path: str, duration_h: float = 48.0, warmup_h: float = 24.0,
@@ -546,6 +713,10 @@ def run_simulation(arcpy, msgs: Messages, gpkg_path: str, duration_h: float = 48
               f"{s['flooded_nodes']} node(s) flooded ({s['total_flood_volume_m3']:.2f} m3).")
     for line in sim_table_lines(d["links"]):
         msgs.info(line)
+    for line in pump_table_lines(d, _station_levels(gpkg_path)):
+        msgs.info(line)
+    for _ps, _kind, text in pump_flags(d):
+        msgs.warn(text)
     for w in d.get("warnings", [])[:MAX_LINES]:
         msgs.warn(w)
     if export_inp:

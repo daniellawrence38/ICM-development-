@@ -167,6 +167,7 @@ class FakeParameter:
         self.value, self.filter = None, _Filter()
         self.controlCLSID = None
         self.hasBeenValidated = False
+        self.message, self.message_level = None, None
         self._deps = []
 
     @property
@@ -180,6 +181,15 @@ class FakeParameter:
         if not all(isinstance(d, str) for d in deps):
             raise ValueError(f"parameterDependencies must be parameter names, got {deps!r}")
         self._deps = list(deps)
+
+    def setErrorMessage(self, text):
+        self.message, self.message_level = text, "error"
+
+    def setWarningMessage(self, text):
+        self.message, self.message_level = text, "warning"
+
+    def clearMessage(self):
+        self.message, self.message_level = None, None
 
     @property
     def valueAsText(self):

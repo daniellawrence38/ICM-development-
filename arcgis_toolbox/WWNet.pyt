@@ -15,6 +15,7 @@ _vendor.activate(_HERE)  # no-install bundle: <toolbox>/vendor first on sys.path
 from wwnet_arcgis import updater as _updater  # noqa: E402
 from wwnet_arcgis import settings as _settings  # noqa: E402
 from wwnet_arcgis import tools_impl as impl  # noqa: E402
+from wwnet_arcgis import pumpdata as _pumpdata  # noqa: E402  (stdlib only; used by getParameterInfo / updateParameters)
 
 MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
 EFFORTS = ["low", "medium", "high"]
@@ -79,7 +80,7 @@ class Toolbox(object):
     def __init__(self):
         self.label = "WWNet"
         self.alias = "wwnet"
-        self.tools = [NewModel, ImportSewerData, ImportPressureData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity, ExportToICM,
+        self.tools = [NewModel, ImportSewerData, ImportPressureData, SetPumpStationData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity, ExportToICM,
                       SetAssistantApiKey, AskWWNetAssistant, VerifySetup, SelfTest, UpdateWWNet]
 
 
@@ -239,6 +240,132 @@ class ImportPressureData(object):
                                   _source(parameters[2]), fields, bool(parameters[3].value),
                                   parameters[4].value, parameters[5].value, parameters[6].value,
                                   bool(parameters[7].value), bool(parameters[8].value))
+
+
+PS_SEP = " \u2014 "
+LEVEL_MODES = {"AHD": "AHD", "Depth above wet well invert": "depth"}
+CURVE_ORDERS = {"flow,head": "flow_head", "head,flow": "head_flow"}
+FLOW_UNITS = ["L/s", "m3/h", "m3/s"]
+
+
+def _station_label(s):
+    return f"{s['ps_id']}{PS_SEP}{s['notes']}" if s.get("notes") else str(s["ps_id"])
+
+
+def _station_id(text):
+    return None if not text else str(text).split(PS_SEP)[0].strip()
+
+
+def _curve_text(curve):
+    return "\n".join(f"{q:g}\t{h:g}" for q, h in curve) if curve else None
+
+
+class SetPumpStationData(object):
+    # fixed positions: 0 model, 1 station, 2 diameter, 3 area, 4 level mode, 5 stop, 6 start, 7 overflow,
+    # 8 emergency storage, 9 duty, 10 assist, 11 standby, 12 duty rate, 13 curve, 14 column order,
+    # 15 flow units, 16 speed, 17 source note, 18 replace pumps
+    def __init__(self):
+        self.label = "Set Pump Station Data"
+        self.description = ("Enter the hydraulic data of a pump station from its data sheet (wet well size, "
+                            "stop / start / overflow levels, pumps and pump curve), which the GIS does not hold. "
+                            "Choose a station created by Import Pressure Data; its current values are filled in. "
+                            "The pump curve can be pasted from the data sheet, Excel or InfoWorks ICM.")
+        self.category = "Data"
+
+    def getParameterInfo(self):
+        station = _p("station", "Pump station", "GPString")
+        station.filter.type = "ValueList"
+        station.filter.list = []
+        curve = _p("pump_curve", "Pump curve (paste: flow and head, one point per line)", "GPString", required=False)
+        curve.controlCLSID = MULTILINE
+        return [_p("gpkg", "WWNet GeoPackage (existing model)", "DEFile", filetype=["gpkg"]),
+                station,
+                _p("diameter_m", "Wet well diameter (m)", "GPDouble", required=False),
+                _p("area_m2", "Wet well area (m2)", "GPDouble", required=False),
+                _p("level_mode", "Levels are", "GPString", required=False, default="AHD",
+                   values=list(LEVEL_MODES)),
+                _p("stop_level", "Stop level", "GPDouble", required=False),
+                _p("start_level", "Start level", "GPDouble", required=False),
+                _p("overflow_level", "Overflow level", "GPDouble", required=False),
+                _p("emergency_m3", "Emergency storage (m3)", "GPDouble", required=False),
+                _p("n_duty", "Duty pumps", "GPLong", required=False, default=1),
+                _p("n_assist", "Assist pumps", "GPLong", required=False, default=0),
+                _p("n_standby", "Standby pumps", "GPLong", required=False, default=0),
+                _p("duty_rate", "Duty pump rate (L/s, used when no curve)", "GPDouble", required=False),
+                curve,
+                _p("curve_order", "Curve column order", "GPString", required=False, default="flow,head",
+                   values=list(CURVE_ORDERS)),
+                _p("flow_units", "Curve flow units", "GPString", required=False, default="L/s", values=FLOW_UNITS),
+                _p("speed_pct", "Pump speed (%)", "GPDouble", required=False, default=100.0),
+                _p("source_note", "Source note (e.g. Data sheet PS4 rev C)", "GPString", required=False),
+                _p("replace_pumps", "Replace the station's existing pumps", "GPBoolean", required=False,
+                   default=True)]
+
+    def updateParameters(self, parameters):
+        gp, station = parameters[0], parameters[1]
+        stations = []
+        if gp.value is not None:
+            try:
+                stations = _pumpdata.list_stations(gp.valueAsText)
+            except Exception:
+                stations = []
+        if gp.value is not None and not gp.hasBeenValidated:
+            station.filter.list = [_station_label(s) for s in stations]
+            if station.value is not None and _station_id(station.valueAsText) not in [s["ps_id"] for s in stations]:
+                station.value = None
+        if station.value is None or station.hasBeenValidated:
+            return
+        sel = next((s for s in stations if s["ps_id"] == _station_id(station.valueAsText)), None)
+        if sel is None:
+            return
+        parameters[2].value = None                      # area is stored; the diameter is derived
+        parameters[3].value = sel["wet_well_area_m2"]
+        parameters[4].value = "AHD"                      # levels below are always AHD
+        parameters[5].value = sel["stop_level"]
+        parameters[6].value = sel["start_level"]
+        parameters[7].value = sel["overflow_level"]
+        parameters[8].value = sel["emergency_storage_m3"]
+        counts = sel["pumps"]
+        if sum(counts.values()):
+            parameters[9].value, parameters[10].value, parameters[11].value = (
+                counts.get("duty", 0), counts.get("assist", 0), counts.get("standby", 0))
+        else:
+            parameters[9].value, parameters[10].value, parameters[11].value = 1, 0, 0
+        parameters[12].value = sel["pump_rate_lps"]
+        parameters[13].value = _curve_text(sel["curve"])
+        parameters[14].value = "flow,head"               # the curve is shown as L/s and m
+        parameters[15].value = "L/s"
+        return
+
+    def updateMessages(self, parameters):
+        curve = parameters[13]
+        if curve.value is None or not str(curve.valueAsText).strip():
+            return
+        try:
+            _pts, warns = _pumpdata.parse_curve(
+                curve.valueAsText, order=CURVE_ORDERS.get(parameters[14].valueAsText or "flow,head", "flow_head"),
+                flow_units=parameters[15].valueAsText or "L/s")
+        except ValueError as exc:
+            curve.setErrorMessage(str(exc))
+            return
+        if warns:
+            curve.setWarningMessage(" ".join(warns))
+        return
+
+    def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        impl = _impl()
+        v = lambda i, d=None: parameters[i].value if parameters[i].value is not None else d  # noqa: E731
+        impl.set_pump_station_data(
+            arcpy, impl.Messages(arcpy), parameters[0].valueAsText, _station_id(parameters[1].valueAsText),
+            wet_well_diameter_m=v(2), wet_well_area_m2=v(3),
+            level_mode=LEVEL_MODES.get(parameters[4].valueAsText or "AHD", "AHD"),
+            stop=v(5), start=v(6), overflow=v(7), emergency_storage_m3=v(8),
+            n_duty=int(v(9, 1)), n_assist=int(v(10, 0)), n_standby=int(v(11, 0)), duty_rate_lps=v(12),
+            curve_text=_text(parameters[13]),
+            curve_order=CURVE_ORDERS.get(parameters[14].valueAsText or "flow,head", "flow_head"),
+            flow_units=parameters[15].valueAsText or "L/s", speed_pct=float(v(16, 100.0)),
+            source_note=_text(parameters[17]), replace_pumps=bool(v(18, True)))
 
 
 class ImportDiurnalProfile(object):

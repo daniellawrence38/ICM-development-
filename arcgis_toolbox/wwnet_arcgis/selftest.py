@@ -176,6 +176,40 @@ def run(arcpy, msgs, root, out_dir=None, include_map=False, exe=None) -> dict:
         need_model()
         tools_impl.run_simulation(arcpy, c, copy, 2.0, 1.0, "manning", 0.013, 1.0, False, None, exe)
 
+    def step_pump_simulation(c):
+        need_model()
+        from . import pumpdata
+        pgp = os.path.join(out_dir, "selftest_pumps.gpkg")
+        shutil.copyfile(_find_demo(root), pgp)
+        con = sqlite3.connect(pgp)
+        try:   # P08 now ends in a wet well WW; rising main PS1 -> D, then a short gravity pipe D -> OUT1
+            geom = con.execute("SELECT geom FROM wwn_nodes WHERE node_id='OUT1'").fetchone()[0]
+            for nid, typ, inv, sf in (("WW", "wet_well", 22.2, 25.5), ("D", "ac", 25.0, 28.0)):
+                con.execute("INSERT INTO wwn_nodes (geom, node_id, node_type, invert_level, surface_level) "
+                            "VALUES (?,?,?,?,?)", (geom, nid, typ, inv, sf))
+            con.execute("UPDATE wwn_conduits SET ds_node_id='WW' WHERE conduit_id='P08'")
+            con.execute("INSERT INTO wwn_conduits (conduit_id, us_node_id, ds_node_id, dn, length_m, us_invert, "
+                        "ds_invert) VALUES ('PSG1','D','OUT1',225,50.0,25.0,22.2)")
+            con.execute("INSERT INTO wwn_pump_stations (ps_id, wet_well_node_id, discharge_node_id, "
+                        "rising_main_id, notes) VALUES ('PS1','WW','D','RM1','Self Test station')")
+            con.execute("INSERT INTO wwn_rising_mains (rm_id, ps_id, discharge_node_id, dn, length_m, "
+                        "roughness_type, roughness) VALUES ('RM1','PS1','D',150,200.0,'ks',1.0)")
+            con.commit()
+        finally:
+            con.close()
+        r = pumpdata.set_station(pgp, "PS1", wet_well_area_m2=1.0, stop=22.6, start=23.0, overflow=25.0,
+                                 n_duty=1, n_standby=1,
+                                 curve=[(0, 20), (10, 16.5), (20, 11.5), (30, 5)], source_note="Self Test")
+        c.info(r["summary"])
+        pc = CapturingMessages()
+        d = tools_impl.run_simulation(arcpy, pc, pgp, 6.0, 2.0, "manning", 0.013, 1.0, False, None, exe)
+        if "pumps" not in d:
+            raise Skip("the simulation engine has no pump support (no 'pumps' in the result)")
+        c.lines.extend(pc.lines)
+        text = "\n".join(t for _, t in pc.lines)
+        if not d["pumps"] or not any(p["starts"] > 0 for p in d["pumps"]) or "Pump stations" not in text or "Rising mains" not in text:
+            raise RuntimeError("pump station results are missing from the simulation messages")
+
     def step_export(c):
         need_model()
         tools_impl.export_icm(arcpy, c, copy, os.path.join(out_dir, "icm"))
@@ -201,7 +235,8 @@ def run(arcpy, msgs, root, out_dir=None, include_map=False, exe=None) -> dict:
     steps = [("environment", step_environment), ("copy demo model", step_copy),
              ("check model", step_check), ("run design", step_design), ("trace", step_trace),
              ("pipe capacity", step_capacity), ("import diurnal profile", step_profile),
-             ("run simulation (2 h, 1 h warm-up)", step_simulation), ("export to ICM", step_export)]
+             ("run simulation (2 h, 1 h warm-up)", step_simulation), ("pump station simulation", step_pump_simulation),
+             ("export to ICM", step_export)]
     if include_map:
         steps += [("map: add model to map", step_map_add), ("map: trace with selection", step_map_trace),
                   ("map: remove added layers", step_map_remove)]
