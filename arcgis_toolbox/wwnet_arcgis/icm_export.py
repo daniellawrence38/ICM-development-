@@ -199,18 +199,21 @@ def build(gpkg_path: str) -> dict:
         if n["wwn_node_type"] == "wet_well" or nid in pump_wet_wells:
             warnings.append(f"{nid}: wet well exported as Manhole (pumps not exported to ICM yet)")
             continue
-        n["node_type"] = "Outfall"
         if n["wwn_node_type"] in DANGLING_TYPES:
+            # NOT an outfall: its flow belongs in the main it should join (missed tee). Making it an outfall
+            # would silently drop that flow from the downstream network; leave the ICM validation error.
             n["wwn_outfall_reason"] = "dangling end"
             dangling.append(nid)
         else:
+            n["node_type"] = "Outfall"
             n["wwn_outfall_reason"] = "terminal"
             terminal.append(nid)
     if terminal:
         warnings.append(f"{len(terminal)} terminal node(s) exported as Outfall: " + _ids(terminal))
     if dangling:
         warnings.append(f"{len(dangling)} sewer end(s) have no downstream pipe and are not chambers (possible missed "
-                        "tee / main outside the selection) \u2014 exported as Outfall: " + _ids(dangling))
+                        "tee / main outside the selection). NOT made outfalls (their flow would leave the network): ICM will "
+                        "report them as not connected to an outfall until the join is fixed: " + _ids(dangling))
     for t, n in skipped.items():
         warnings.append(f"{t}: {n} row(s) NOT exported (pressure side / sub-catchments not supported yet).")
     return {"nodes": out_nodes, "conduits": out_links, "warnings": warnings, "skipped": skipped}
@@ -251,7 +254,8 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
         "",
         "Node table",
         "  node_id -> Node ID | node_type -> Node type (Manhole / Break / Outfall)",
-        "  Terminal nodes (pipes in, none out) are exported as Outfall (free outfall, as in the WWNet engine)",
+        "  Terminal chambers (pipes in, none out) are exported as Outfall (free outfall, as in the WWNet engine);",
+        "  dangling sewer ends (tee / IS / IO ends with nothing downstream) stay Break: fix the join, not the outfall",
         "  ground_level -> Ground level | flood_level -> Flood level | chamber_floor -> Chamber floor level",
         "  chamber_area / shaft_area -> Chamber area / Shaft area (m2, from chamber_diameter_mm; blank = ICM default)",
         "Conduit table",

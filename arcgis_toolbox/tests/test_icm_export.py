@@ -227,7 +227,7 @@ def test_terminal_ac_node_exported_as_outfall(demo_gpkg):
     assert not any("sewer end" in w for w in d["warnings"])
 
 
-def test_dangling_junction_exported_as_outfall(demo_gpkg, fake_arcpy, tmp_path):
+def test_dangling_junction_not_made_outfall(demo_gpkg, fake_arcpy, tmp_path):
     # a junction fed from B1 (pipe in, nothing out): a sewer that should have joined another pipe
     _edit(demo_gpkg,
           "INSERT INTO wwn_nodes (geom, node_id, node_type, surface_level, invert_level) "
@@ -237,17 +237,18 @@ def test_dangling_junction_exported_as_outfall(demo_gpkg, fake_arcpy, tmp_path):
           "150.0 FROM wwn_conduits WHERE conduit_id='P09'")
     d = icm_export.build(demo_gpkg)
     nodes = {n["node_id"]: n for n in d["nodes"]}
-    assert nodes["J1"]["node_type"] == "Outfall" and nodes["J1"]["wwn_node_type"] == "junction"
+    assert nodes["J1"]["node_type"] == "Break" and nodes["J1"]["wwn_node_type"] == "junction"
     assert nodes["J1"]["wwn_outfall_reason"] == "dangling end"
     assert not any("terminal node" in w for w in d["warnings"])
     expected = ("1 sewer end(s) have no downstream pipe and are not chambers (possible missed tee / main outside "
-                "the selection) — exported as Outfall: J1")
+                "the selection). NOT made outfalls (their flow would leave the network): ICM will report them as "
+                "not connected to an outfall until the join is fixed: J1")
     assert expected in d["warnings"]
 
     a = fake_arcpy([])
     tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path))
     row = _icm_nodes(a, tmp_path)["J1"]
-    assert row["node_type"] == "Outfall" and row["wwn_outfall_reason"] == "dangling end"
+    assert row["node_type"] == "Break" and row["wwn_outfall_reason"] == "dangling end"
     assert [f for f, _ in icm_export.NODE_FIELDS].index("wwn_outfall_reason") == \
         [f for f, _ in icm_export.NODE_FIELDS].index("wwn_ground_source") + 1
 
