@@ -40,7 +40,7 @@ Plan: `docs/PLAN.md`. OSS survey: `docs/reference-survey.md`. Function overview 
 | `crates/wwnet-cli` | `wwnet` CLI (dev/CI only) |
 | `crates/wwnet-py` | PyO3 abi3 module `wwnet_native` |
 | `qgis_plugin/wwnet/core/` | Shared pure Python (importer, schema, **repair.py**) — packaged for ArcGIS as `wwnet_shared` |
-| `arcgis_toolbox/WWNet.pyt` + `wwnet_arcgis/` | ArcGIS Pro toolbox (20 tools, §5) |
+| `arcgis_toolbox/WWNet.pyt` + `wwnet_arcgis/` | ArcGIS Pro toolbox (18 tools, §5) |
 | `templates/schema.sql` | GeoPackage schema (incl. `wwn_sim_pumps`, `wwn_sim_pump_stations`, `wwn_sim_rising_mains`) |
 | `templates/import/watercorp_sewer.toml` | Field roles + code maps (gravity and `[pressure]`) |
 | `templates/demo/demo.gpkg` (from `examples/demo`) | Shipped demo model used by Self Test |
