@@ -89,7 +89,8 @@ Not yet working / unverified in Pro:
 
 ## 8b. Open items (2026-11-23)
 
-- ICM: two IS sewers (E4 -> 565141383, E46 -> 565269012) not joined as tees (importer tee tolerance fixed at 0.5 m, not a tool parameter). Waiting on distance-to-nearest-conduit output from the user; then expose tee tolerance in Import Sewer Data + near-miss warnings.
+- ICM: two IS sewers (E4 -> 565141383, E46 -> 565269012) not joined as tees. New tool Join Dangling Sewer Ends (`qgis_plugin/wwnet/core/repair.py`, preview default) splits the main and inserts a tee (invert = us - grade x distance); Import Sewer Data has a 'Tee join distance' parameter (default 0.5) and reports possible missed tees within 5 m. Refuses models with rtree_wwn_* tables. Not yet run on real data.
+- Export: dangling ends stay Break (not Outfall); engine warns their flow leaves the model.
 - Export now writes terminal nodes as Outfall (ICM needed one).
 - Pump stations not exported to ICM yet.
 - Test venv in scratchpad has wwnet_native + anthropic installed: full arcgis suite must be 100 % green.

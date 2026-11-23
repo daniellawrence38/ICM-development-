@@ -80,7 +80,7 @@ class Toolbox(object):
     def __init__(self):
         self.label = "WWNet"
         self.alias = "wwnet"
-        self.tools = [NewModel, ImportSewerData, ImportPressureData, SetPumpStationData, ImportDiurnalProfile, AddModelToMap, CheckModel, RunDesign, RunSimulation, Trace, PipeCapacity, ExportToICM,
+        self.tools = [NewModel, ImportSewerData, ImportPressureData, SetPumpStationData, ImportDiurnalProfile, AddModelToMap, CheckModel, JoinDanglingEnds, RunDesign, RunSimulation, Trace, PipeCapacity, ExportToICM,
                       SetAssistantApiKey, AskWWNetAssistant, VerifySetup, SelfTest, UpdateWWNet]
 
 
@@ -111,7 +111,8 @@ def _source(param):
 
 class ImportSewerData(object):
     # fixed parameter positions: 0 ACs, 1 connection points, 2 sewers, 3 output, 4 snap, 5 grade source,
-    # 6 selected only, 7 add to map, 8.. one Field parameter per role in sewer_import.FIELD_ROLES
+    # 6 selected only, 7 add to map, 8.. one Field parameter per role in sewer_import.FIELD_ROLES, then
+    # load connection points, cp search distance, and last (Advanced) the tee join distance (m)
     _LAYER_PARAM = {"ac": 0, "cp": 1, "sewer": 2}
     _LAYER_NAME = {"ac": "ac_layer", "cp": "cp_layer", "sewer": "sewer_layer"}
 
@@ -146,7 +147,9 @@ class ImportSewerData(object):
         loads.category = "Connection point loads"
         radius = _p("cp_radius", "Connection point search distance (m)", "GPDouble", required=False, default=10.0)
         radius.category = "Connection point loads"
-        return params + [loads, radius]
+        tee = _p("tee_join", "Tee join distance (m)", "GPDouble", required=False, default=0.5)
+        tee.category = "Advanced"
+        return params + [loads, radius, tee]
 
     def updateParameters(self, parameters):
         from wwnet_arcgis import sewer_import as si
@@ -177,7 +180,8 @@ class ImportSewerData(object):
                                bool(parameters[7].value),
                                load_connection_points=bool(parameters[k].value) if parameters[k].value is not None
                                else True,
-                               cp_load_search_m=parameters[k + 1].value)
+                               cp_load_search_m=parameters[k + 1].value,
+                               tee_tolerance=parameters[k + 2].value)
 
 
 class ImportPressureData(object):
@@ -426,6 +430,31 @@ class CheckModel(object):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
         impl = _impl()
         impl.check_model(arcpy, impl.Messages(arcpy), parameters[0].valueAsText, _text(parameters[1]))
+
+
+class JoinDanglingEnds(object):
+    # fixed positions: 0 model, 1 maximum distance (m), 2 preview only
+    def __init__(self):
+        self.label = "Join Dangling Sewer Ends"
+        self.description = ("Repair dangling downstream ends (junction / inspection shaft / inspection opening nodes "
+                            "that receive a sewer but have no outgoing sewer, which InfoWorks ICM and SWMM treat "
+                            "wrongly): each is joined to the nearest sewer within the maximum distance, splitting "
+                            "that sewer at a new tee node (inverts by grade, surface level interpolated). "
+                            "Preview first, then untick 'Preview only'. Edits the GeoPackage: close attribute "
+                            "tables and remove its layers from the map first.")
+        self.category = "Model"
+
+    def getParameterInfo(self):
+        return [_p("gpkg", "WWNet GeoPackage (existing model)", "DEFile", filetype=["gpkg"]),
+                _p("max_distance", "Maximum join distance (m)", "GPDouble", required=False, default=5.0),
+                _p("preview", "Preview only (do not change the model)", "GPBoolean", required=False, default=True)]
+
+    def execute(self, parameters, messages):
+        _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        impl = _impl()
+        impl.join_dangling_ends(arcpy, impl.Messages(arcpy), parameters[0].valueAsText,
+                                parameters[1].value if parameters[1].value is not None else 5.0,
+                                bool(parameters[2].value) if parameters[2].value is not None else True)
 
 
 class RunDesign(object):

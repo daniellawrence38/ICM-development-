@@ -213,7 +213,7 @@ def test_pyt_tool_parameters_and_execute(world, tmp_path):
     names = [p.name for p in params]
     assert names[:8] == ["ac_layer", "cp_layer", "sewer_layer", "out_gpkg", "snap", "grade_source",
                          "use_selected", "add_to_map"]
-    assert names[8:] == ["f_" + r for r, *_ in sewer_import.FIELD_ROLES] + ["load_cps", "cp_radius"]
+    assert names[8:] == ["f_" + r for r, *_ in sewer_import.FIELD_ROLES] + ["load_cps", "cp_radius", "tee_join"]
     byn = {p.name: p for p in params}
     assert byn["snap"].value == 0.5 and byn["grade_source"].value == "levels"
     assert byn["use_selected"].value is False and byn["add_to_map"].value is True
@@ -572,6 +572,7 @@ def test_pyt_import_params_pass_cp_options(world, tmp_path):
     params = t.getParameterInfo()
     byn = {p.name: p for p in params}
     assert byn["load_cps"].value is True and byn["cp_radius"].value == 10.0
+    assert byn["tee_join"].value == 0.5 and byn["tee_join"].category == "Advanced"
     byn["ac_layer"].value, byn["cp_layer"].value, byn["sewer_layer"].value = lyr["ac"], lyr["cp"], lyr["sew"]
     byn["f_diameter"].value = "HEIGHT"
     byn["f_ac_id"].value, byn["f_pipe_id"].value, byn["f_cp_id"].value = "PACID", "ID", "ID"

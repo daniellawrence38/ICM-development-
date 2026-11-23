@@ -149,7 +149,7 @@ def test_pyt_compiles_and_defines_tools(fake_arcpy):
     loader.exec_module(mod)
     tb = mod.Toolbox()
     labels = [t().label for t in tb.tools]
-    assert labels == ["New Model", "Import Sewer Data", "Import Pressure Data", "Set Pump Station Data", "Import Diurnal Profile", "Add Model To Map", "Check Model", "Run Design", "Run Simulation", "Trace",
+    assert labels == ["New Model", "Import Sewer Data", "Import Pressure Data", "Set Pump Station Data", "Import Diurnal Profile", "Add Model To Map", "Check Model", "Join Dangling Sewer Ends", "Run Design", "Run Simulation", "Trace",
                       "Pipe Capacity", "Export To ICM", "Set Assistant API Key", "Ask WWNet Assistant", "Verify Setup", "Self Test", "Update WWNet"]
     for t in tb.tools:
         params = t().getParameterInfo()

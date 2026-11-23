@@ -16,6 +16,7 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
 | New Model | Creates a GeoPackage from `schema.sql` (sqlite3, schema v2) and adds the layers to the active map in a `WWNet` group layer |
 | Add Model To Map | Adds the `wwn_*` layers (`<file>.gpkg\main.<table>`) of an existing model and applies symbology: nodes by `node_type`, conduits by DN with an Arcade label `DN225 1:300`. Symbology failures only warn |
 | Check Model | `wwnet_native.check` (same output as `wwnet check --json`); messages via AddMessage/AddWarning/AddError; optional output issues table |
+| Join Dangling Sewer Ends | (category Model) Repairs dangling downstream ends (junction / inspection shaft / inspection opening nodes with an incoming sewer and no outgoing one, which ICM and SWMM treat wrongly): joins each to the nearest sewer within the maximum distance (5 m), splitting it at a new tee node; *Preview only* (default on) just lists what would change; see [Join Dangling Sewer Ends](#join-dangling-sewer-ends) |
 | Run Design | `wwnet_native.design` (same output as `wwnet design --json`); prints the pass/warn/fail summary, a per-conduit table (DN, grade, GSDF / pumped / total / governing capacity (Cap = lesser of Table 4.4 and hydraulic) / T4.4 / Hyd L/s, d/D, velocity, result, worst message) and failing/warning checks with DS 50 clauses (max 5 per rule; info such as "cover not checked" is summarised in one line). By default adds a temporary in-memory layer `Design results — <model>` (polylines coloured pass/warn/fail, labelled with flow/capacity and d/D) to the active map and selects failed conduits on it and on the model's conduit layer. The layer lives in `memory\` and is not saved: re-run Run Design after restarting Pro. "Add results table to map" (off by default) also adds the standalone `wwn_results_conduits` table |
 | Trace | Upstream / downstream from a node (value list filled from the Nodes layer); selects traced nodes and conduits |
 | Run Simulation | `wwnet_native.simulate` (SWMM dynamic wave; needs a wheel built with the simulation service, else the `wwnet simulate` CLI fallback). Parameters: duration h (48), warm-up h (24), roughness manning/ks, Manning n (0.013), flow scale (1.0), show results layer, optional `.inp` export. Messages: summary (inflow ADWF, peak outlet flow, continuity error, surcharged / flooded counts), top-20 conduits by max d/D, warnings. Adds the temporary layer `Simulation results — <model>` (conduits green < 0.5, yellow 0.5-0.75, orange 0.75-1.0 d/D, red surcharged; labelled `<flow> L/s d/D <x>`; fields `max_flow_lps`, `max_d_over_d`, `max_velocity_mps`, `surcharged_min`) and, only if a node floods, `Simulation nodes — <model>` (red points). Full results are stored in the model's `wwn_sim_*` tables. With pump stations in the model it also prints, after the conduit table, **Pump stations** (max level, start / stop / overflow levels m AHD, overflow m3, time of max), **Pumps** (starts, starts/h, run %, Qmax) and **Rising mains** (ID mm, length, Qmax, vmax) tables and warns for: wet well overflow > 0; a pump above 10 starts/h (`MAX_STARTS_PER_HOUR`; the right limit depends on motor size, check the station's spec); rising main peak velocity below 0.7 m/s (`MIN_RM_VELOCITY`, sediment) or above 2.0 m/s (`MAX_RM_VELOCITY`, headloss / surge). The thresholds are constants at the top of `tools_impl.py` and are printed with the tables. The temporary layer `Simulation pump stations — <model>` (points; fields `ps_id`, `max_level_m`, `overflow_m3`, `starts_per_hour` and `run_time_pct` = worst pump, `rm_max_velocity_mps`, `flag`; red if flagged, green if `ok`) is added when the run has pump stations and replaced on re-run. Results are also in `wwn_sim_pumps`, `wwn_sim_pump_stations`, `wwn_sim_rising_mains` |
@@ -113,7 +114,7 @@ its fields with the Water Corporation names that exist in it; change any of them
   "split at tee for <branch>"; lengths are split by chainage and inverts interpolated linearly along the oriented
   main; a junction node `T<n>` ("tee (mid-line junction)", invert = interpolated main invert) is created and the
   branch end attaches to it (warning `tee_joined`; `tee_adverse` when the branch ds invert is >0.01 m below the
-  main's invert). Points within the snap tolerance of the main's own ends are endpoint cases, not tees. Any other
+  main's invert). Points within the snap tolerance of the main's own ends are endpoint cases, not tees. Any other The tolerance is the *Tee join distance (m)* parameter (Advanced, last). Lone ends within 5 m of another sewer's mid-line but beyond it are listed in the report as `possible missed tee` (fix with Join Dangling Sewer Ends).
   lone end becomes a dangling end node `E<n>`. No per-sewer placeholders are created.
 - Direction: for each (US id, DS id) run the chain of segments is oriented from the end at the US chamber (or the
   DS chamber) through the shared junctions; leftovers take the direction of already oriented neighbours, else the
@@ -165,6 +166,34 @@ its fields with the Water Corporation names that exist in it; change any of them
   findings are never `AddError` (Pro would mark a finished tool "Failed"): error-severity ones are warnings prefixed
   `ERROR:`; `AddError` is only for real failures (exceptions). The same applies to Check Model.
 - After writing, `wwnet_native.check` runs; counts and the first 50 issues are printed, then the layers are added.
+
+## Join Dangling Sewer Ends
+
+The importer joins a lone sewer end to another sewer's mid-line only within its *Tee join distance* (0.5 m). A sewer end a
+little further away stays a dangling node (`junction` / `is_end` / `io_end` that receives a sewer and has no outgoing one),
+which InfoWorks ICM and the SWMM engine treat wrongly. Import Sewer Data now lists these near misses in its report
+(`possible missed tee: E4 1.3 m from P123 ...`) and takes an *Advanced* parameter **Tee join distance (m)** (last
+parameter; default 0.5). This tool repairs an existing model without re-importing. Logic: `wwnet_shared/core/repair.py`
+(sqlite3 only, shared with QGIS); the tool body is `tools_impl.join_dangling_ends`.
+
+**Parameters**: model `.gpkg`, *Maximum join distance (m)* (5), *Preview only* (on: first run prints the table, nothing is
+changed). Close attribute tables and remove the model's layers from the map before applying (a locked file gives a clear
+message); afterwards re-add the layers and re-run Check Model / Export To ICM.
+
+**Rules**
+- Dangling node: >= 1 incoming non-abandoned sewer, none outgoing, `node_type` junction / is_end / io_end. Real terminal
+  chambers (ac, ms, drop_ac, outfall, wet_well) are never touched.
+- Main: nearest other sewer (not touching the node) by perpendicular distance to its polyline, within the maximum
+  distance. Beyond it the node is listed as not joined with the nearest sewer and its distance.
+- Projection within 0.5 m of an end node of the main: the branch is re-pointed to that node (no split).
+- Otherwise the main is split at the projected point (chainage measured from its upstream node, whichever way it is
+  digitised). Tee node `T_<node>` (junction, status / data source of the main): invert = us invert - fall x chainage / length,
+  surface level interpolated when both ends have one. The upstream piece keeps the sewer id, the new downstream piece is
+  `<id>~t` (geometry cut, lengths split in proportion, all other attributes copied, notes `split at tee for <branch>`).
+- Branch sewers are re-pointed to the tee and their end vertex moved onto it (`length_m` grows by the gap when set). The
+  branch invert is kept; one arriving below the main invert is warned (`check levels`). The dangling node is deleted once
+  nothing refers to it (loads / pump station links are moved to the tee).
+- One transaction; rolled back on any error. A GeoPackage with R-tree spatial index tables is refused.
 
 ## Install
 

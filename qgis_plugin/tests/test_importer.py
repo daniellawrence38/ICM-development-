@@ -765,3 +765,21 @@ def test_cp_loads_roundtrip_to_native_design():
         adwf = out["conduit_results"][0]["adwf_lps"]
         assert abs(adwf - 10 * 630 / 86400) < 1e-9
         assert abs(out["conduit_results"][0]["gsdf_lps"] - adwf * 1.5) < 1e-9
+
+
+def test_possible_missed_tee_diagnostic():
+    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("C", 40, 20)]
+    main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0)
+    # 1.3 m off the main (> tee 0.5): stays dangling, reported as a possible missed tee
+    model, rep = build_model(acs, [], [main, tseg("BR", [(40, 20), (40, 1.3)], None, None, 21.0, 20.5)])
+    assert rep.counts["possible_missed_tees"] == 1 and rep.counts.get("tee_junctions", 0) == 0
+    lines = [x for x in rep.summary_lines(0) if "possible missed tee" in x]
+    assert any("possible missed tee: E1 1.3 m from M" in x and "Join Dangling Sewer Ends" in x for x in lines), lines
+    assert any(x.startswith("Possible missed tees: 1 lone sewer end(s) lie within 5 m") for x in rep.summary_lines(0))
+    # joined by a larger tolerance: no diagnostic
+    _m, rep = build_model(acs, [], [main, tseg("BR", [(40, 20), (40, 1.3)], None, None, 21.0, 20.5)],
+                          options=ImportOptions(tee_tolerance_m=2.0))
+    assert "possible_missed_tees" not in rep.counts
+    # 8 m away: not reported
+    _m, rep = build_model(acs, [], [main, tseg("BR", [(40, 20), (40, 8.0)], None, None, 21.0, 20.5)])
+    assert "possible_missed_tees" not in rep.counts

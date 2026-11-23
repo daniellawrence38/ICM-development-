@@ -319,6 +319,73 @@ def set_pump_station_data(arcpy, msgs: Messages, gpkg_path: str, ps_id: str, **v
     return result
 
 
+def _table_lines(header: tuple, rows: list) -> list:
+    widths = [max(len(str(x)) for x in col) for col in zip(header, *rows)]
+    fmt = " | ".join("{:<%d}" % w for w in widths)
+    return [fmt.format(*header).rstrip(), "-+-".join("-" * w for w in widths)] + [fmt.format(*r).rstrip() for r in rows]
+
+
+def join_dangling_ends(arcpy, msgs: Messages, gpkg_path: str, max_distance_m: float | None = 5.0,
+                       preview: bool = True):
+    """Join dangling sewer ends (junction / is_end / io_end with an incoming sewer and no outgoing one) to the
+    nearest sewer within `max_distance_m`: the main is split at the tee (or the branch joins an existing end
+    node when the projection is within 0.5 m of it). `preview` only reports. The core is sqlite only (no arcpy
+    layer is touched); returns the core result dict, or None after an "ERROR:" warning."""
+    repair = shared.core("repair")
+    max_d = 5.0 if max_distance_m is None else float(max_distance_m)
+    if not gpkg_path or not os.path.isfile(gpkg_path):
+        msgs.warn(f"ERROR: model GeoPackage not found: {gpkg_path}")
+        return None
+    if max_d <= 0:
+        msgs.warn("ERROR: the maximum distance must be greater than 0 m.")
+        return None
+    try:
+        res = repair.join_dangling_ends(gpkg_path, max_d, preview=bool(preview))
+    except repair.RepairError as exc:
+        msgs.warn(f"ERROR: {exc}")
+        return None
+    except sqlite3.OperationalError as exc:
+        text = str(exc).lower()
+        if "locked" in text or "busy" in text or "readonly" in text or "read-only" in text:
+            msgs.warn("ERROR: The model GeoPackage is locked by ArcGIS Pro. Close any open attribute tables "
+                      "and remove the model's layers from the map (or use a copy), then run the tool again.")
+            return None
+        raise
+    joins, skipped = res["joins"], res["skipped"]
+    verb = "would be joined" if preview else "joined"
+    msgs.info(f"{len(joins)} dangling end(s) {verb}, {len(skipped)} not joined (maximum distance {max_d:g} m)"
+              + (" - PREVIEW ONLY, nothing was changed." if preview else "."))
+    rows = []
+    for j in joins:
+        main = j["main_conduit"]
+        to = (f"{j['tee_node']} (existing end of {main})" if j["action"] == "join_node"
+              else f"{main} (tee {j['tee_node']}, new pipe {j['new_conduit']})")
+        inv = "n/a" if j.get("invert_at_tee") is None else f"{j['invert_at_tee']:.3f}"
+        rows.append((j["dangling_node"], ", ".join(j["branch_conduits"]), to, f"{j['distance_m']:.2f}", inv,
+                     j["note"]))
+    if rows:
+        for line in _table_lines(("Dangling node", "Branch", "Joined to", "Distance m", "Invert at tee", "Note"), rows):
+            msgs.info(line)
+        for j in joins:
+            for w in j.get("warnings", []):
+                msgs.warn(f"{j['dangling_node']}: {w}")
+            for ch in j.get("branch_changes", []):
+                msgs.info(f"{j['dangling_node']}: branch {ch['conduit']} extended by {ch['gap_m']:.2f} m "
+                          f"(length_m now {ch['length_m']:.2f})")
+    if skipped:
+        msgs.info("Not joined:")
+        for s in skipped:
+            msgs.warn(f"{s['dangling_node']} ({', '.join(s.get('branch_conduits', []))}): {s.get('reason', '')}")
+    if not joins and not skipped:
+        msgs.info("No dangling sewer ends found.")
+    if joins and not preview:
+        msgs.info("The model changed on disk: refresh or re-add its layers in the map.")
+    elif joins:
+        msgs.info("Untick 'Preview only' to apply these joins.")
+    msgs.info("Re-run Check Model / Export To ICM.")
+    return res
+
+
 def _select(arcpy, layer, ids, field):
     ds = gpkg.dataset_path(maplayers.layer_source(layer))
     where = gpkg.in_clause(arcpy.AddFieldDelimiters(ds, field), ids)

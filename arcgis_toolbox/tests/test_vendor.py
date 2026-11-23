@@ -261,5 +261,5 @@ def test_vendor_module_importable_after_pro_resets_sys_path(tmp_path, clean, mon
 def test_every_pyt_execute_reactivates_vendor():
     src = (TOOLBOX / "WWNet.pyt").read_text()
     n_exec = src.count("def execute(self, parameters, messages):")
-    assert n_exec == 17
+    assert n_exec == 18
     assert src.count("def execute(self, parameters, messages):\n        _vendor.activate(_HERE)") == n_exec
