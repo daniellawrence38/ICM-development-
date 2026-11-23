@@ -593,6 +593,7 @@ PUMP_NAME = "Simulation pump stations — demo"
 def _add_station(gp, ps_id="PS1", node="N01", **cols):
     con = sqlite3.connect(gp)
     geom = con.execute("SELECT geom FROM wwn_nodes WHERE node_id=?", (node,)).fetchone()[0]
+    con.execute("UPDATE wwn_nodes SET invert_level=18.0 WHERE node_id=?", (node,))
     cols = {"start_level": 19.5, "stop_level": 18.5, "overflow_level": 20.5, **cols}
     con.execute(f"INSERT INTO wwn_pump_stations (geom, ps_id, wet_well_node_id, {', '.join(cols)}) "
                 f"VALUES (?, ?, ?, {', '.join('?' * len(cols))})", (geom, ps_id, node, *cols.values()))

@@ -131,7 +131,9 @@ def test_execute_writes_gpkg(pyt, model, fake_arcpy):
     con = sqlite3.connect(model)
     row = con.execute("SELECT wet_well_area_m2, stop_level, start_level, overflow_level, emergency_storage_m3, "
                       "duty_config, notes FROM wwn_pump_stations WHERE ps_id='PS2'").fetchone()
-    assert row[:6] == (4.0, 18.0 + 0.0 if False else row[1], row[2], row[3], 12.0, "2 duty + 1 assist")
+    inv = 25.3                                   # N02 invert in the demo model: depths are added to it
+    assert row[:6] == (4.0, pytest.approx(inv + 0.5), pytest.approx(inv + 1.5), pytest.approx(inv + 2.5), 12.0,
+                       "2 duty + 1 assist")
     pumps = con.execute("SELECT pump_id, role, curve_json FROM wwn_pumps WHERE ps_id='PS2' ORDER BY pump_id").fetchall()
     con.close()
     assert [p[1] for p in pumps] == ["duty", "duty", "assist"]

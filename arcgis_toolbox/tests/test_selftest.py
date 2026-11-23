@@ -47,7 +47,9 @@ def test_selftest_report_and_steps(fake_arcpy, wwnet_exe, tmp_path):
     assert all(s["status"] in ("PASS", "WARN", "FAIL", "SKIP") for s in res["steps"])
     for name in ("check model", "run design", "trace", "pipe capacity", "import diurnal profile", "export to ICM"):
         assert steps[name]["status"] in ("PASS", "WARN"), (name, steps[name])
+    assert steps["pump station simulation"]["status"] in ("PASS", "WARN"), steps["pump station simulation"]
     text = open(res["report"], encoding="utf-8").read()
+    assert "Pump stations (levels m AHD)" in text and "Rising mains" in text
     assert "Summary" in text and "PASS" in text and "check model" in text
     assert not any(lv == "error" for lv, _ in m.calls)
     assert any(t.startswith("Report: ") for _, t in m.calls)
