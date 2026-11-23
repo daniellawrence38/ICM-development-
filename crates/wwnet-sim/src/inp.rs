@@ -4,7 +4,7 @@ use crate::pumps::{self, ExtraNode, PumpMeta, RisingMainMeta, StationBuild, Stat
 use crate::types::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
-use wwnet_core::Node;
+use wwnet_core::{Node, NodeType};
 
 #[derive(Debug, Clone)]
 pub struct NodeMeta {
@@ -278,6 +278,19 @@ pub fn build_inp(input: &SimInput<'_>) -> Result<BuiltInp> {
                 n.node_id, depth
             ));
             depth = crown - invert + 0.01;
+        }
+        if !has_out[i]
+            && wet.is_none()
+            && matches!(
+                n.node_type,
+                NodeType::Junction | NodeType::IsEnd | NodeType::IoEnd
+            )
+        {
+            warnings.push(format!(
+                "node {}: sewer end with no downstream pipe (possible missed tee or main outside the model) \
+                 is treated as a free outfall; its flow leaves the model here",
+                n.node_id
+            ));
         }
         node_swmm_ix.insert(i, nodes.len());
         nodes.push(NodeMeta {

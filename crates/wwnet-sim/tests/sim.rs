@@ -292,3 +292,32 @@ fn ks_roughness_gives_plausible_n() {
     let n: f64 = line.split_whitespace().nth(4).unwrap().parse().unwrap();
     assert!((0.009..0.016).contains(&n), "n = {n}");
 }
+
+#[test]
+fn dangling_sewer_end_warns_that_flow_leaves_the_model() {
+    let mut m = single_pipe(150, 0.01);
+    let ds = m.conduits[0].ds_node_id.clone();
+    let mut b = build_inp(&SimInput {
+        model: &m,
+        inflows: vec![],
+        options: opts(),
+    })
+    .unwrap();
+    assert!(!b
+        .warnings
+        .iter()
+        .any(|w| w.contains("flow leaves the model")));
+    for n in m.nodes.iter_mut().filter(|n| n.node_id == ds) {
+        n.node_type = wwnet_core::NodeType::Junction;
+    }
+    b = build_inp(&SimInput {
+        model: &m,
+        inflows: vec![],
+        options: opts(),
+    })
+    .unwrap();
+    assert!(b
+        .warnings
+        .iter()
+        .any(|w| w.contains(&ds) && w.contains("flow leaves the model")));
+}
