@@ -42,12 +42,7 @@ def table_of(ds: str):
 
 def contents(gpkg: str) -> dict:
     """{table: (identifier, data_type)} for wwn_* tables present in the file."""
-    con = sqlite3.connect(f"file:{gpkg}?mode=ro", uri=True)
-    try:
-        rows = con.execute("SELECT table_name, identifier, data_type FROM gpkg_contents").fetchall()
-    finally:
-        con.close()
-    return {r[0]: (r[1], r[2]) for r in rows if r[0].startswith("wwn_")}
+    return shared.core("schema").table_identifiers(gpkg, "wwn_")
 
 
 def row_count(gpkg: str, table: str) -> int:

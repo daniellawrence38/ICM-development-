@@ -127,14 +127,15 @@ def schema_version(path: str) -> int:
         return 1
 
 
-def table_identifiers(gpkg: str) -> dict:
-    """{table_name: (identifier, data_type)} from gpkg_contents."""
-    con = sqlite3.connect(gpkg)
+def table_identifiers(gpkg: str, prefix: str = "") -> dict:
+    """{table_name: (identifier, data_type)} from gpkg_contents (read-only), optionally only names
+    starting with `prefix` (e.g. 'wwn_')."""
+    con = sqlite3.connect(f"file:{os.fspath(gpkg)}?mode=ro", uri=True)
     try:
         rows = con.execute("SELECT table_name, identifier, data_type FROM gpkg_contents").fetchall()
     finally:
         con.close()
-    return {r[0]: (r[1], r[2]) for r in rows}
+    return {r[0]: (r[1], r[2]) for r in rows if r[0].startswith(prefix)}
 
 
 def column_summary(sql: str | None = None) -> str:
