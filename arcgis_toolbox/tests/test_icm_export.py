@@ -463,3 +463,41 @@ def test_dem_fill_skips_delivery_nodes_and_copies_wet_well_ground(fake_arcpy, de
     assert rows["PS1_DEL"]["ground_level"] == 26.0 and rows["PS1_DEL"]["wwn_ground_source"] == "wet well"
     assert not any("outside the DEM" in w for w in r["warnings"])
 
+
+
+def test_null_pump_station_geometry_is_not_a_location(fake_arcpy, demo_gpkg, tmp_path):
+    # Pro regression (Self Test 2026-11-24): SHAPE@XY of a station without geometry is (None, None)
+    _pump_model(demo_gpkg)
+    a = fake_arcpy([])
+    with a.da.SearchCursor(demo_gpkg + "\\wwn_pump_stations", ["ps_id", "SHAPE@XY"]) as cur:
+        assert list(cur) == [["PS1", (None, None)]]                       # the fake behaves like Pro
+    r = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path))
+    assert r["counts"]["pumps"] == 2 and r["counts"]["rising_mains"] == 1
+
+
+def test_rising_main_geometry_copied_and_delivery_node_at_its_start(fake_arcpy, demo_gpkg, tmp_path):
+    from pressure_line import line_blob_between
+    _pump_model(demo_gpkg)
+    con = sqlite3.connect(demo_gpkg)
+    blob = line_blob_between(con, "N08", "D", mid=(5.0, 7.0))
+    con.execute("UPDATE wwn_rising_mains SET geom=? WHERE rm_id='RM1'", (blob,))
+    con.commit()
+    con.close()
+    a = fake_arcpy([])
+    tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path))
+    gdb = str(tmp_path / "demo_ICM.gdb")
+    nodes = {x["node_id"]: x for x in a.memory[os.path.join(gdb, "ICM_Nodes")]["rows"]}
+    line = next(x for x in a.memory[os.path.join(gdb, "ICM_Conduits")]["rows"] if x["wwn_conduit_id"] == "RM1")
+    assert len(line["SHAPE@"].points) == 3                                  # the main's own vertices
+    first = line["SHAPE@"].firstPoint
+    pt = nodes["PS1_DEL"]["SHAPE@"].firstPoint
+    assert (pt.X, pt.Y) == (first.X, first.Y)
+
+
+def test_node_without_geometry_has_blank_csv_xy(fake_arcpy, demo_gpkg, tmp_path):
+    _edit(demo_gpkg, "UPDATE wwn_nodes SET geom=NULL WHERE node_id='N05'")
+    a = fake_arcpy([])
+    r = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path))
+    with open(r["nodes_csv"], newline="") as fh:
+        n5 = next(x for x in csv.DictReader(fh) if x["node_id"] == "N05")
+    assert n5["x"] == n5["y"] == ""

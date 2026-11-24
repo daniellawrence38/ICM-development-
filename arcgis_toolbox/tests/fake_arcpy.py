@@ -40,6 +40,23 @@ def gpkg_point_xy(blob: bytes):
     return struct.unpack(bo + "dd", wkb[5:21])
 
 
+def gpkg_shape(blob: bytes):
+    """GeoPackage POINT / LINESTRING blob -> FakePointGeometry / FakePolyline (None for NULL)."""
+    if blob is None:
+        return None
+    env = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}[(blob[3] >> 1) & 7]
+    wkb = blob[8 + env:]
+    bo = "<" if wkb[0] == 1 else ">"
+    gtype = struct.unpack(bo + "I", wkb[1:5])[0]
+    if gtype == 1:
+        x, y = struct.unpack(bo + "dd", wkb[5:21])
+        return FakePointGeometry(NS(X=x, Y=y))
+    assert gtype == 2, f"fake arcpy: geometry type {gtype} not supported"
+    n = struct.unpack(bo + "I", wkb[5:9])[0]
+    pts = [NS(X=x, Y=y) for x, y in (struct.unpack(bo + "dd", wkb[9 + 16 * i:25 + 16 * i]) for i in range(n))]
+    return FakePolyline(pts)
+
+
 class _Cursor:
     def __init__(self, arcpy, ds, fields, where_clause=None, writable=False):
         self.arcpy, self.writable = arcpy, writable
@@ -55,8 +72,19 @@ class _Cursor:
         self.i = -1
 
     def _convert(self, raw):
-        return [gpkg_line_length(v) if f == "SHAPE@LENGTH" else gpkg_point_xy(v) if f == "SHAPE@XY" else v
-                for f, v in zip(self.fields, raw)]
+        # Like real arcpy: SHAPE@XY of a NULL geometry is (None, None), not None; SHAPE@ is a geometry
+        # object (None for NULL).
+        out = []
+        for f, v in zip(self.fields, raw):
+            if f == "SHAPE@LENGTH":
+                out.append(gpkg_line_length(v))
+            elif f == "SHAPE@XY":
+                out.append((None, None) if v is None else gpkg_point_xy(v))
+            elif f == "SHAPE@":
+                out.append(gpkg_shape(v))
+            else:
+                out.append(v)
+        return out
 
     def __iter__(self):
         for i, r in enumerate(self.rows):

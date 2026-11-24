@@ -632,6 +632,23 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
     return "\n".join(lines) + "\n"
 
 
+def _xy(p):
+    """(x, y) floats, or None. arcpy returns (None, None) for SHAPE@XY of a feature without geometry."""
+    if p is None:
+        return None
+    try:
+        x, y = float(p[0]), float(p[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return (x, y) if math.isfinite(x) and math.isfinite(y) else None
+
+
+def _first_xy(shape):
+    """First vertex of a polyline as (x, y), or None (no geometry / empty geometry)."""
+    fp = getattr(shape, "firstPoint", None)
+    return None if fp is None else _xy((getattr(fp, "X", None), getattr(fp, "Y", None)))
+
+
 def point_geometry(arcpy, xy, sr):
     return arcpy.PointGeometry(arcpy.Point(xy[0], xy[1]), sr)
 
@@ -650,11 +667,11 @@ def read_pressure_geometry(arcpy, gpkg_path: str, data: dict, sr) -> dict:
     if "ps" in hints:
         with arcpy.da.SearchCursor(gpkg.table_path(gpkg_path, "wwn_pump_stations"), ["ps_id", "SHAPE@XY"],
                                    spatial_reference=sr) as cur:
-            out["ps"] = {pid: xy for pid, xy in cur if xy is not None}
+            out["ps"] = {pid: _xy(xy) for pid, xy in cur if _xy(xy) is not None}
     if hints & {"rm_start", "rm_line"}:
         with arcpy.da.SearchCursor(gpkg.table_path(gpkg_path, "wwn_rising_mains"), ["rm_id", "SHAPE@"],
                                    spatial_reference=sr) as cur:
-            out["rm"] = {rid: shp for rid, shp in cur if shp is not None}
+            out["rm"] = {rid: shp for rid, shp in cur if _first_xy(shp) is not None}   # skip NULL / empty
     return out
 
 
@@ -664,17 +681,16 @@ def node_geometry_fn(arcpy, sr, geo: dict):
         pt = None
         for h in row.get("_geom", ()):
             if h[0] == "rm_start":
-                fp = getattr(geo["rm"].get(h[1]), "firstPoint", None)
-                pt = (fp.X, fp.Y) if fp is not None else None
+                pt = _first_xy(geo["rm"].get(h[1]))
             elif h[0] == "ps":
-                pt = geo["ps"].get(h[1])
+                pt = _xy(geo["ps"].get(h[1]))
             elif h[0] == "node":
-                pt = xy.get(h[1])
+                pt = _xy(xy.get(h[1]))
             if pt is not None:
                 break
         if pt is None:
             return None
-        ref = xy.get(row.get("_offset_from"))
+        ref = _xy(xy.get(row.get("_offset_from")))
         if ref is not None and math.hypot(pt[0] - ref[0], pt[1] - ref[1]) < 0.01:
             pt = (pt[0] + DELIVERY_OFFSET_M, pt[1])          # keep it off the wet well (ICM: distinct nodes)
         return point_geometry(arcpy, pt, sr)
@@ -683,12 +699,13 @@ def node_geometry_fn(arcpy, sr, geo: dict):
 
 def link_geometry_fn(arcpy, sr, geo: dict, node_xy: dict):
     """write_gdb `extra_geom` callback for rising mains (their own line) and pumps (wet well -> delivery)."""
-    def fn(row, _xy):
+    def fn(row, _seen):
         for h in row.get("_geom", ()):
             if h[0] == "rm_line" and geo["rm"].get(h[1]) is not None:
                 return geo["rm"][h[1]]
-            if h[0] == "nodes" and node_xy.get(h[1]) is not None and node_xy.get(h[2]) is not None:
-                return line_geometry(arcpy, [node_xy[h[1]], node_xy[h[2]]], sr)
+            a, b = (_xy(node_xy.get(h[1])), _xy(node_xy.get(h[2]))) if h[0] == "nodes" else (None, None)
+            if a is not None and b is not None:
+                return line_geometry(arcpy, [a, b], sr)
         return None
     return fn
 
@@ -743,14 +760,15 @@ def write_gdb(arcpy, gdb: str, table: str, geom_type: str, fields: list, rows: l
                     if r is None:
                         continue
                     ins.insertRow([r.get(f) for f, _ in fields] + [rec[1]])
-                    if geom_type == "POINT" and rec[2] is not None:
-                        xy[rec[0]] = rec[2]
+                    p = _xy(rec[2]) if geom_type == "POINT" else None
+                    if p is not None:
+                        xy[rec[0]] = p
         for r in extras:
             g = extra_geom(r, xy) if extra_geom is not None else None
             ins.insertRow([r.get(f) for f, _ in fields] + [g])
-            fp = getattr(g, "firstPoint", None) if geom_type == "POINT" else None
-            if fp is not None:
-                xy[r[key]] = (fp.X, fp.Y)
+            p = _first_xy(g) if geom_type == "POINT" else None
+            if p is not None:
+                xy[r[key]] = p
     tm["copy"] = pc() - t0
     if isinstance(timings, dict):
         timings.update(tm)
@@ -797,8 +815,8 @@ def fill_ground_from_dem(arcpy, msgs, nodes: list, nodes_ds: str, dem: str):
     pts = {}
     with arcpy.da.SearchCursor(nodes_ds, ["node_id", "SHAPE@XY"], spatial_reference=sr) as cur:
         for nid, xy in cur:
-            if nid in todo and xy is not None:
-                pts[nid] = xy
+            if nid in todo and _xy(xy) is not None:
+                pts[nid] = _xy(xy)
     filled, nodata = 0, []
     for nid in sorted(todo):
         xy = pts.get(nid)
