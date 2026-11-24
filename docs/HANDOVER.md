@@ -143,6 +143,6 @@ User report: "Pressure pipes are not being included in the export to ICM". Cause
   downstream → Outfall (`wwn_outfall_reason` = rising main discharge).
 - New fields: nodes `flood_type`; conduits `solution_model`, `bottom/top_roughness_HW`, `wwn_link_kind`. The user's
   saved ODIC configs need these mapped (else rising mains import as Full conduits).
-- Self Test step "export to ICM (pump station)". Unverified in ICM: link_type spelling (`Rotpmp`/`Fixpmp`), whether
+- Self Test step "export to ICM (pump station)": first Pro run FAILED (SHAPE@XY of a PS without geometry is `(None, None)`; fixed in `60e8cc8`, fake arcpy now mimics it); **Pro Self Test on `60e8cc8`: WARN (expected warnings only), 1 rising main + 1 Rotpmp pump exported**. Next: import into ICM via ODIC. Unverified in ICM: link_type spelling (`Rotpmp`/`Fixpmp`), whether
   ODIC can import the head-discharge CSV directly, `discharge` units (L/s vs ICM's flow unit).
 
