@@ -149,7 +149,7 @@ class ArcpyTools:
     def list_layers(self, args):
         out = []
         for lyr in self.layers():
-            ds = lyr.dataSource
+            ds = gpkg.dataset_path(maplayers.layer_source(lyr))
             tbl = self.table_of(lyr)
             try:
                 names = [f.name for f in self._fields(ds)]
@@ -167,7 +167,7 @@ class ArcpyTools:
 
     def get_selected_features(self, args):
         lyr = self.find_layer(args["layer"])
-        ds = lyr.dataSource
+        ds = gpkg.dataset_path(maplayers.layer_source(lyr))
         sel = self._selection(lyr)
         if not sel:
             return {"layer": lyr.name, "selected_count": 0, "features": [], "truncated": False}
@@ -179,7 +179,7 @@ class ArcpyTools:
 
     def query_features(self, args):
         lyr = self.find_layer(args["layer"])
-        ds = lyr.dataSource
+        ds = gpkg.dataset_path(maplayers.layer_source(lyr))
         limit = max(1, min(int(args.get("limit") or 50), MAX_ROWS))
         names = [f.name for f in self._fields(ds)]
         try:
@@ -190,7 +190,7 @@ class ArcpyTools:
 
     def get_feature(self, args):
         lyr = self.find_layer(args["layer"])
-        ds, tbl = lyr.dataSource, self.table_of(lyr)
+        ds, tbl = gpkg.dataset_path(maplayers.layer_source(lyr)), self.table_of(lyr)
         idf = _schema().ID_FIELDS.get(tbl or "")
         if not idf:
             raise _engine().ToolError(f"Layer {lyr.name!r} has no known business id field")
@@ -220,7 +220,7 @@ class ArcpyTools:
     def propose_edits(self, args):
         eng = _engine()
         lyr = self.find_layer(args["layer"])
-        ds, tbl = lyr.dataSource, self.table_of(lyr)
+        ds, tbl = gpkg.dataset_path(maplayers.layer_source(lyr)), self.table_of(lyr)
         ws, _ = gpkg.split_datasource(ds)
         if not tbl or not ws:
             raise eng.ToolError("Only WWNet GeoPackage layers can be edited by the assistant")

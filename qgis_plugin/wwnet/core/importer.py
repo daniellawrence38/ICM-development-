@@ -81,6 +81,9 @@ class FieldMap:
         return FieldMap(**d)
 
 
+NEAR_MISS_M = 5.0                           # lone ends this close to another sewer's mid-line are reported
+
+
 @dataclass
 class ImportOptions:
     snap_tolerance_m: float = 0.5
@@ -683,6 +686,43 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 rep.count("dangling_ends", -1)
         rep.count("tee_mains", len(by_t))
         rep.diagnostics.append(f"Tees: {len(tees)} branch end(s) joined mid-line to {len(by_t)} sewer(s).")
+    # Near misses: lone ends still dangling that lie within NEAR_MISS_M of another sewer's mid-line but
+    # beyond the tee tolerance (a joined-looking end that did not join). Reported only.
+    near_miss: list = []
+    still = [t for t in singles if t[0] in nodes]
+    if still:
+        ngrid = _SegGrid(10.0, NEAR_MISS_M)
+        for si, s in enumerate(segs):
+            for k, (a, b) in enumerate(zip(s["line"], s["line"][1:])):
+                ngrid.add((si, k), a, b)
+        for nid, si, e, pt in still:
+            if stype_of(segs[si]["row"]) in ("is", "io") and segs[si]["ends"][1 - e] in ac_ids:
+                continue                 # IS / IO upstream end: free by design
+            best = None
+            for (tj, k), a, b in ngrid.candidates(pt):
+                if segs[tj]["parent"] == segs[si]["parent"]:
+                    continue
+                d, _t, q = _project(pt, a, b)
+                if d > NEAR_MISS_M or (best is not None and d >= best[0]):
+                    continue
+                tl = segs[tj]["line"]
+                if _dist(q, tl[0]) <= tol or _dist(q, tl[-1]) <= tol:
+                    continue             # next to a chamber / node: the snap case, not a tee
+                best = (d, tj)
+            if best is not None:
+                near_miss.append((best[0], nid, segs[best[1]]["pid"]))
+    if near_miss:
+        near_miss.sort()
+        rep.count("possible_missed_tees", len(near_miss))
+        rep.diagnostics.append(
+            f"Possible missed tees: {len(near_miss)} lone sewer end(s) lie within {_fmt(NEAR_MISS_M, 1)} m of "
+            f"another sewer's mid-line but beyond the tee join distance ({_fmt(tee_tol, 2)} m).")
+        for d, nid, cid in near_miss[:20]:
+            rep.diagnostics.append(
+                f"  possible missed tee: {nid} {_fmt(d, 2)} m from {cid} - run Join Dangling Sewer Ends or "
+                "re-import with a larger tee join distance")
+        if len(near_miss) > 20:
+            rep.diagnostics.append(f"  ... {len(near_miss) - 20} more not listed.")
     parents: dict = {}
     for si, s in enumerate(segs):
         parents.setdefault(s["parent"], []).append(si)

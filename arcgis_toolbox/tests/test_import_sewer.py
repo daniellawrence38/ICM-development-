@@ -89,9 +89,9 @@ def test_end_to_end_valid_gpkg_and_messages(world, tmp_path):
     assert all(sr.factoryCode == 7850 for _, sr in a.cursor_calls)
     assert {f[-1] for f, _ in a.cursor_calls} == {"SHAPE@XY", "SHAPE@"}
     # added to the map
-    # 5 model layers + the Issues layer (import warnings + check) + the node loads table
+    # 5 model layers + the Issues layer (import warnings + check) + the node loads and pumps tables
     added = [os.path.basename(p) for k, p in a.added if k == "data"]
-    assert len(added) == 7 and "main.wwn_issues" in added
+    assert len(added) == 8 and "main.wwn_issues" in added and "main.wwn_pumps" in added
     c = con(res)
     assert c.execute("select count(*) from wwn_issues where source='import'").fetchone()[0] == \
         len(res["report"].warnings)
@@ -220,16 +220,16 @@ def test_pyt_tool_parameters_and_execute(world, tmp_path):
     assert t.label == "Import Sewer Data" and t.category == "Data"
     params = t.getParameterInfo()
     names = [p.name for p in params]
-    assert names[:10] == ["ac_layer", "cp_layer", "sewer_layer", "out_gpkg", "use_selected", "add_to_map",
-                          "load_cps", "cp_radius", "snap", "grade_source"]
-    assert names[10:] == ["f_" + r for r, *_ in sewer_import.FIELD_ROLES]
+    assert names[:11] == ["ac_layer", "cp_layer", "sewer_layer", "out_gpkg", "use_selected", "add_to_map",
+                          "load_cps", "cp_radius", "snap", "grade_source", "tee_join"]
+    assert names[11:] == ["f_" + r for r, *_ in sewer_import.FIELD_ROLES]
     byn = {p.name: p for p in params}
     assert byn["snap"].value == 0.5 and byn["grade_source"].value == "levels"
     assert byn["use_selected"].value is False and byn["add_to_map"].value is True
     assert byn["cp_layer"].parameterType == "Optional" and byn["f_pipe_id"].parameterType == "Required"
     assert byn["f_diameter"].parameterDependencies == ["sewer_layer"]
     assert byn["f_ac_id"].parameterDependencies == ["ac_layer"]
-    assert byn["f_chamber_type"].parameterDependencies == ["ac_layer"] and names.index("f_chamber_type") == 12
+    assert byn["f_chamber_type"].parameterDependencies == ["ac_layer"] and names.index("f_chamber_type") == 13
     assert byn["f_chamber_type"].parameterType == "Optional"
     # picking layers fills the field parameters with defaults present in the layer
     byn["ac_layer"].value, byn["sewer_layer"].value = lyr["ac"], lyr["sew"]
@@ -581,6 +581,7 @@ def test_pyt_import_params_pass_cp_options(world, tmp_path):
     params = t.getParameterInfo()
     byn = {p.name: p for p in params}
     assert byn["load_cps"].value is True and byn["cp_radius"].value == 10.0
+    assert byn["tee_join"].value == 0.5 and byn["tee_join"].category == "Options"
     byn["ac_layer"].value, byn["cp_layer"].value, byn["sewer_layer"].value = lyr["ac"], lyr["cp"], lyr["sew"]
     byn["f_diameter"].value = "HEIGHT"
     byn["f_ac_id"].value, byn["f_pipe_id"].value, byn["f_cp_id"].value = "PACID", "ID", "ID"

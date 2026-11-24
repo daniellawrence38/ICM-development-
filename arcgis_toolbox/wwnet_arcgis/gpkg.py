@@ -7,7 +7,7 @@ import sqlite3
 
 from . import shared
 
-ATTRIBUTE_ORDER = ("wwn_node_loads",)     # attribute tables worth showing in the map
+ATTRIBUTE_ORDER = ("wwn_node_loads", "wwn_pumps")     # attribute tables worth showing in the map
 FEATURE_ORDER = ("wwn_subcatchments", "wwn_rising_mains", "wwn_conduits",
                  "wwn_pump_stations", "wwn_nodes")      # bottom -> top
 #: result / issue layers (schema v3), bottom -> top; added when they hold data
@@ -21,12 +21,48 @@ def table_path(gpkg: str, table: str) -> str:
 
 
 _SPLIT = re.compile(r"^(.*?\.gpkg)(?:[\\/]+(?:main\.)?([^\\/|]+))?(?:\|.*)?$", re.IGNORECASE)
+# real Pro 3.x GeoPackage layer: 'Instance=C:\\m\\a.gpkg,Dataset=main.%wwn_nodes' (verified in Pro 3.3.5)
+_INSTANCE_DATASET = re.compile(r"^\s*Instance=(.+?\.gpkg)\s*,\s*Dataset=(?:main\.)?%?([A-Za-z_]\w*)\s*$",
+                               re.IGNORECASE)
+_CONN_FILE_KEYS = ("DB_CONNECTION_PROPERTIES", "INSTANCE", "DATABASE")
+
+
+def _split_connection_string(ds: str):
+    """Pro reports SQLite-family layers (GeoPackage, mobile gdb) as a connection string with the
+    dataset appended after the last separator, e.g.
+    'AUTHENTICATION_MODE=OSA;main;DB_CONNECTION_PROPERTIES=C:\\m\\a.gpkg;INSTANCE=sde:sqlite:C:\\m\\a.gpkg;
+    IS_GEODATABASE=false;IS_NOSERVER=0;SERVER=C:\\main.wwn_nodes'."""
+    props = {}
+    for part in ds.split(";"):
+        k, sep, v = part.partition("=")
+        if sep:
+            props.setdefault(k.strip().upper(), v.strip())
+    path = None
+    for k in _CONN_FILE_KEYS:
+        v = props.get(k, "")
+        if v.lower().startswith("sde:sqlite:"):
+            v = v[len("sde:sqlite:"):]
+        if v.lower().endswith(".gpkg"):
+            path = v
+            break
+    if path is None:
+        return None, None
+    tail = ds.rsplit(";", 1)[-1].partition("=")[2] or ds.rsplit(";", 1)[-1]
+    last = re.sub(r"^main\.", "", re.split(r"[\\/]", tail)[-1], flags=re.IGNORECASE)
+    return path, (last if re.fullmatch(r"[A-Za-z_]\w*", last) else None)
 
 
 def split_datasource(ds: str):
-    """'C:\\m\\a.gpkg\\main.wwn_nodes' -> ('C:\\m\\a.gpkg', 'wwn_nodes'); also '...gpkg/wwn_nodes' and
-    QGIS-style '...gpkg|layername=wwn_nodes'; a bare '.gpkg' gives (path, None); else (None, None)."""
+    """(gpkg path, table) of a GeoPackage data source, in any form Pro / QGIS report it:
+    'C:\\m\\a.gpkg\\main.wwn_nodes', Pro's 'Instance=<file>.gpkg,Dataset=main.%<table>', Pro's SQLite connection
+    string (see _split_connection_string), '...gpkg/wwn_nodes' and QGIS '...gpkg|layername=wwn_nodes'. A bare
+    '.gpkg' gives (path, None); anything else (None, None)."""
     text = (ds or "").strip()
+    m = _INSTANCE_DATASET.match(text)
+    if m:
+        return m.group(1), m.group(2)
+    if "=" in text and ";" in text:
+        return _split_connection_string(text)
     m = re.match(r"^(.*?\.gpkg)\|layername=([^|]+)", text, re.IGNORECASE)
     if m:
         return m.group(1), m.group(2)
@@ -34,6 +70,12 @@ def split_datasource(ds: str):
     if not m:
         return None, None
     return m.group(1), m.group(2)
+
+
+def dataset_path(ds: str) -> str:
+    """A path arcpy cursors accept: '<file>.gpkg\\main.<table>' for GeoPackage sources, else `ds`."""
+    path, table = split_datasource(ds)
+    return table_path(path, table) if path and table else ds
 
 
 def table_of(ds: str):

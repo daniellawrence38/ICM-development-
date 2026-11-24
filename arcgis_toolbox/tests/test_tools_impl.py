@@ -53,7 +53,7 @@ def test_new_model_creates_v3_gpkg_and_adds_layers(fake_arcpy, tmp_path):
     added = [os.path.basename(p) for k, p in a.added if k == "data"]
     # empty result layers are not added
     assert added == [f"main.{t}" for t in ("wwn_subcatchments", "wwn_rising_mains", "wwn_conduits",
-                                           "wwn_pump_stations", "wwn_nodes", "wwn_node_loads")]
+                                           "wwn_pump_stations", "wwn_nodes", "wwn_node_loads", "wwn_pumps")]
     assert "Symbology" in text(a, "warn")        # fake layers have no symbology -> warn, no raise
     with pytest.raises(FileExistsError):
         tools_impl.new_model(a, Messages(a), path, False)
@@ -340,10 +340,12 @@ def test_pyt_tools_parameters_and_categories(fake_arcpy):
     mod = load_pyt()
     tb = mod.Toolbox()
     tools = {t().label: t() for t in tb.tools}
-    assert list(tools) == ["New Model", "Add Model To Map", "Model Settings", "Import Sewer Data",
-                           "Import Diurnal Profile", "Assign Profile", "Check Model", "Run Design", "Run Simulation",
-                           "Trace", "Show Simulation Run", "Compare Simulation Runs", "Plot Hydrograph",
-                           "Pipe Capacity", "Ask WWNet Assistant", "Set Assistant API Key", "Verify Setup"]
+    assert list(tools) == ["New Model", "Add Model To Map", "Model Settings", "Join Dangling Sewer Ends",
+                           "Import Sewer Data", "Import Pressure Data", "Set Pump Station Data",
+                           "Import Diurnal Profile", "Assign Profile", "Export To ICM", "Check Model", "Run Design",
+                           "Run Simulation", "Trace", "Show Simulation Run", "Compare Simulation Runs",
+                           "Plot Hydrograph", "Pipe Capacity", "Ask WWNet Assistant", "Set Assistant API Key",
+                           "Verify Setup", "Self Test", "Update WWNet"]
     assert {t.category for t in tools.values()} == {"Model", "Data", "Analysis", "Results", "Calculators",
                                                     "Assistant", "Setup"}
     for t in tools.values():
@@ -432,3 +434,214 @@ def test_tools_tolerate_layers_without_name(fake_arcpy, flows_gpkg):
     assert names(layers).count("Simulation results (conduits)") == 1
     assert "Could not show the Simulation results layers" not in text(a)
     assert maplayers.same_file(maplayers.default_model(a), flows_gpkg)
+
+
+# ================================================================ merged from the 2026-11-23/24 session
+# (Pro dataSource strings, pump station results, pump station data) adapted to the v3 tools.
+
+def pro_sqlite_source(gpkg_path, table):
+    """dataSource as real Pro reports a SQLite-family layer (shape copied from a mobile-gdb layer
+    on the user's PC: connection properties, then the dataset after the last separator)."""
+    return (f"AUTHENTICATION_MODE=OSA;main;DB_CONNECTION_PROPERTIES={gpkg_path};"
+            f"INSTANCE=sde:sqlite:{gpkg_path};IS_GEODATABASE=false;IS_NOSERVER=0;SERVER=C:\\main.{table}")
+
+
+def pro_gpkg_source(gpkg_path, table):
+    """dataSource exactly as real Pro 3.x reports a GeoPackage layer (pasted from the user's PC)."""
+    return f"Instance={gpkg_path},Dataset=main.%{table}"
+
+
+def test_split_datasource_pro_connection_string():
+    p = r"C:\Users\x\Desktop\WWNet\models\Dunkley Ave PS4.gpkg"
+    assert gpkg.split_datasource(pro_sqlite_source(p, "wwn_nodes")) == (p, "wwn_nodes")
+    assert gpkg.dataset_path(pro_sqlite_source(p, "wwn_conduits")) == gpkg.table_path(p, "wwn_conduits")
+    real = (r"AUTHENTICATION_MODE=OSA;main;DB_CONNECTION_PROPERTIES=C:\Users\u\Desktop\Shapefiles\WWLine.geodatabase;"
+            r"INSTANCE=sde:sqlite:C:\Users\u\Desktop\Shapefiles\WWLine.geodatabase;IS_GEODATABASE=true;"
+            r"IS_NOSERVER=0;SERVER=C:\main.WWProjects")
+    assert gpkg.split_datasource(real) == (None, None) and gpkg.dataset_path(real) == real
+    assert gpkg.split_datasource(f"AUTHENTICATION_MODE=OSA;DATABASE={p};SERVER=C:") == (p, None)
+
+
+def test_split_datasource_real_pro_gpkg_string():
+    real = r"Instance=C:\Users\lawrend0\Desktop\WWNet\models\import_test.gpkg,Dataset=main.%wwn_nodes"
+    p = r"C:\Users\lawrend0\Desktop\WWNet\models\import_test.gpkg"
+    assert gpkg.split_datasource(real) == (p, "wwn_nodes")
+    assert gpkg.dataset_path(real) == gpkg.table_path(p, "wwn_nodes")
+    sp = r"C:\a, b\my model.GPKG"   # comma and space in the folder
+    assert gpkg.split_datasource(pro_gpkg_source(sp, "wwn_conduits")) == (sp, "wwn_conduits")
+
+
+@pytest.mark.parametrize("source", [pro_gpkg_source, pro_sqlite_source])
+def test_model_found_and_traced_with_real_pro_layer_sources(fake_arcpy, demo_gpkg, source):
+    """The 2026-11-20 bug ('not in the active map'): Pro's GeoPackage dataSource strings."""
+    layers = [_ProBasemapLayer(), fa.make_layer("Nodes", source(demo_gpkg, "wwn_nodes")),
+              fa.make_layer("Gravity sewers", source(demo_gpkg, "wwn_conduits"))]
+    a = fake_arcpy(layers)
+    assert maplayers.find_layer_for(a, demo_gpkg, "wwn_conduits") is layers[2]
+    assert maplayers.same_file(maplayers.default_model(a), demo_gpkg)
+    r = tools_impl.trace(a, Messages(a), demo_gpkg, "N03", "Downstream", True)
+    assert "OUT1" in r["nodes"]
+    assert [s[0] for s in a.selections] == ["Nodes", "Gravity sewers"]
+    assert not any("not in the active map" in t for _, t in a.log)
+
+
+def test_remove_layers_named_removes_table_via_removetable(fake_arcpy, demo_gpkg):
+    a = fake_arcpy([])
+    m = a.mp.ArcGISProject("CURRENT").activeMap
+    tbl = m.addDataFromPath(gpkg.table_path(demo_gpkg, "wwn_node_loads"))
+    maplayers.set_layer_name(tbl, "Node loads")
+    lyr = m.addDataFromPath(gpkg.table_path(demo_gpkg, "wwn_nodes"))
+    maplayers.set_layer_name(lyr, "Node loads")
+    assert m.listTables() == [tbl]
+    assert maplayers.remove_layers_named(a, "Node loads") == 2
+    assert m.listTables() == [] and a.tables == [] and m.listLayers() == []
+    assert maplayers.remove_layers_named(a, "Node loads") == 0
+
+
+PUMP_NAME = "Simulation pump stations \u2014 demo"
+
+
+def _add_station(gp, ps_id="PS1", node="N01", **cols):
+    con = sqlite3.connect(gp)
+    geom = con.execute("SELECT geom FROM wwn_nodes WHERE node_id=?", (node,)).fetchone()[0]
+    con.execute("UPDATE wwn_nodes SET invert_level=18.0 WHERE node_id=?", (node,))
+    cols = {"start_level": 19.5, "stop_level": 18.5, "overflow_level": 20.5, **cols}
+    con.execute(f"INSERT INTO wwn_pump_stations (geom, ps_id, wet_well_node_id, {', '.join(cols)}) "
+                f"VALUES (?, ?, ?, {', '.join('?' * len(cols))})", (geom, ps_id, node, *cols.values()))
+    con.commit()
+    con.close()
+
+
+def _fake_sim():
+    links = [dict(conduit_id="P01", dn=150, max_flow_lps=1.0, max_d_over_d=0.3, max_velocity_mps=0.5,
+                  surcharged_min=0.0, time_of_max_flow="07:30"),
+             dict(conduit_id="P04", dn=225, max_flow_lps=40.0, max_d_over_d=0.8, max_velocity_mps=1.2,
+                  surcharged_min=15.0, time_of_max_flow="08:05")]
+    nodes = [dict(node_id="N01", max_hgl_m=1.0, max_depth_m=1.0, flood_volume_m3=0.0, surcharged_min=30.0)]
+    return dict(run_id="2026-01-01T00:00:00Z", label="", summary=dict(
+        inflow_adwf_lps=1.0, inflow_simulated_lps=1.5, peak_outlet_flow_lps=3.0, continuity_error_pct=-0.1,
+        conduits=2, nodes=1, surcharged_conduits=1, flooded_nodes=0, total_flood_volume_m3=0.0),
+        links=links, nodes=nodes, issues=[], warnings=[])
+
+
+def _fake_pump_sim(overflow=0.0, sph=4.0, v=1.0):
+    d = _fake_sim()
+    d["pumps"] = [dict(pump_id="PS1_P1", ps_id="PS1", role="duty", max_flow_lps=28.5, starts=40,
+                       starts_per_hour=sph, run_time_pct=12.5),
+                  dict(pump_id="PS1_P2", ps_id="PS1", role="assist", max_flow_lps=27.0, starts=10,
+                       starts_per_hour=2.0, run_time_pct=3.0)]
+    d["pump_stations"] = [dict(ps_id="PS1", wet_well_node_id="N01", max_level_m=19.62, max_depth_m=1.62,
+                               overflow_volume_m3=overflow, time_of_max_level="08:10")]
+    d["rising_mains"] = [dict(rm_id="RM1", ps_id="PS1", length_m=420.0, diameter_mm=150.0,
+                              max_flow_lps=28.5, max_velocity_mps=v)]
+    return d
+
+
+def test_pump_results_messages_and_layer(fake_arcpy, demo_gpkg, monkeypatch):
+    _add_station(demo_gpkg)
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    monkeypatch.setattr(tools_impl.engine, "run_simulate", lambda *args: _fake_pump_sim())
+    styled = []
+    monkeypatch.setattr(tools_impl.symbology, "apply", lambda t, lyr, m: styled.append(t) or True)
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg)
+    t = [x for _, x in a.log]
+    assert t.index("Pump stations (levels m AHD)") > max(i for i, x in enumerate(t) if x.startswith("P0"))
+    row = next(x for x in t if x.startswith("PS1 ") and "19.62" in x)
+    for tok in ("19.50", "18.50", "20.50", "0.00", "08:10"):
+        assert tok in row
+    assert any(x.startswith("RM1") and "150" in x and "420.0" in x and "1.00" in x for x in t)
+    assert not any(lv == "warn" and x.startswith("PS1:") for lv, x in a.log)     # nothing flagged
+    assert "sim_pumps" in styled
+    r = a.memory["memory\\wwnet_simpumps_demo"]["rows"][0]
+    assert r["ps_id"] == "PS1" and r["starts_per_hour"] == 4.0 and r["flag"] == "ok"
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg)                  # re-run replaces the layer
+    assert names(layers).count(PUMP_NAME) == 1
+
+
+def test_pump_flags(fake_arcpy, demo_gpkg, monkeypatch):
+    _add_station(demo_gpkg)
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    monkeypatch.setattr(tools_impl.engine, "run_simulate", lambda *args: _fake_pump_sim(overflow=3.25, sph=12.0, v=0.5))
+    monkeypatch.setattr(tools_impl.symbology, "apply", lambda t, lyr, m: True)
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg)
+    warns = [x for lv, x in a.log if lv == "warn" and x.startswith("PS1:")]
+    assert any("wet well overflow 3.25 m3" in w for w in warns)
+    assert any("PS1_P1" in w and "12.0 starts/h" in w and "motor size" in w for w in warns)
+    assert any("RM1" in w and "0.50 m/s < 0.7" in w for w in warns)
+    assert a.memory["memory\\wwnet_simpumps_demo"]["rows"][0]["flag"] == "overflow,starts,v_low"
+
+
+def test_no_pump_layer_without_stations_or_show_layer(fake_arcpy, demo_gpkg, monkeypatch):
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    monkeypatch.setattr(tools_impl.engine, "run_simulate", lambda *args: _fake_sim())
+    monkeypatch.setattr(tools_impl.symbology, "apply", lambda t, lyr, m: True)
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg)
+    assert not any(x.startswith("Pump") for _, x in a.log) and PUMP_NAME not in names(layers)
+    _add_station(demo_gpkg)
+    monkeypatch.setattr(tools_impl.engine, "run_simulate", lambda *args: _fake_pump_sim())
+    tools_impl.run_simulation(a, Messages(a), demo_gpkg, show_layer=False)
+    assert PUMP_NAME not in names(layers) and "Pump stations (levels m AHD)" in [x for _, x in a.log]
+
+
+def test_run_simulation_real_engine_pump_station(fake_arcpy, demo_gpkg):
+    from wwnet_arcgis import pumpdata
+    con = sqlite3.connect(demo_gpkg)
+    geom = con.execute("SELECT geom FROM wwn_nodes WHERE node_id='OUT1'").fetchone()[0]
+    for nid, typ, inv, sf in (("WW", "wet_well", 22.2, 25.5), ("D", "ac", 25.0, 28.0)):
+        con.execute("INSERT INTO wwn_nodes (geom, node_id, node_type, invert_level, surface_level) "
+                    "VALUES (?,?,?,?,?)", (geom, nid, typ, inv, sf))
+    con.execute("UPDATE wwn_conduits SET ds_node_id='WW' WHERE conduit_id='P08'")
+    con.execute("INSERT INTO wwn_conduits (conduit_id, us_node_id, ds_node_id, dn, length_m, us_invert, ds_invert)"
+                " VALUES ('PSG1','D','OUT1',225,50.0,25.0,22.2)")
+    con.execute("INSERT INTO wwn_pump_stations (geom, ps_id, wet_well_node_id, discharge_node_id, rising_main_id)"
+                " VALUES (?, 'PS1','WW','D','RM1')", (geom,))
+    con.execute("INSERT INTO wwn_rising_mains (rm_id, ps_id, discharge_node_id, dn, length_m, roughness_type, "
+                "roughness) VALUES ('RM1','PS1','D',150,200.0,'ks',1.0)")
+    con.commit()
+    con.close()
+    pumpdata.set_station(demo_gpkg, "PS1", wet_well_area_m2=1.0, stop=22.6, start=23.0, overflow=25.0,
+                         curve=[(0, 20), (10, 16.5), (20, 11.5), (30, 5)])
+    a, layers = mk(fake_arcpy, demo_gpkg)
+    d = tools_impl.run_simulation(a, Messages(a), demo_gpkg, 6.0, 2.0)
+    assert d["pumps"] and d["pumps"][0]["starts"] > 0 and d["rising_mains"][0]["rm_id"] == "RM1"
+    t = [x for _, x in a.log]
+    assert "Pump stations (levels m AHD)" in t and "Rising mains" in t
+    assert not any("PUMP_STATION_NOT_SIMULATED" in x for x in t)          # the pressure side is simulated now
+    assert names(layers).count(PUMP_NAME) == 1
+    assert rows(demo_gpkg, "select count(*) from wwn_sim_pump_stations") == [(1,)]
+
+
+def test_check_model_prints_station_report(fake_arcpy, demo_gpkg):
+    a, _ = mk(fake_arcpy, demo_gpkg)
+    tools_impl.check_model(a, Messages(a), demo_gpkg, False)
+    assert not any("Pump station data" in t for _, t in a.log)           # no stations -> silent
+    _add_station(demo_gpkg)
+    tools_impl.check_model(a, Messages(a), demo_gpkg, False)
+    assert ("info", "Pump station data: PS1: missing wet_well_area_m2, pumps") in a.log
+
+
+def test_style_sim_pumps_uses_shared_palette(monkeypatch):
+    from wwnet_arcgis import shared
+    st = shared.core("style")
+    seen = {}
+    monkeypatch.setattr(symbology, "_unique", lambda layer, field, fn, size=None, width=None:
+                        seen.update(field=field, ok=fn("ok"), bad=fn("overflow,starts")))
+    monkeypatch.setattr(symbology, "_label", lambda layer, expr: seen.update(label=expr))
+    symbology.style_sim_pumps(object())
+    assert seen == {"field": "flag", "ok": st.SIM_CLASS["low"], "bad": st.SIM_CLASS["surcharged"],
+                    "label": "$feature.ps_id"}
+
+
+def test_set_pump_station_data_messages(fake_arcpy, demo_gpkg):
+    _add_station(demo_gpkg, ps_id="PS1")
+    _add_station(demo_gpkg, ps_id="PS2", node="N02")
+    a = fake_arcpy([])
+    r = tools_impl.set_pump_station_data(
+        a, Messages(a), demo_gpkg, "PS1", wet_well_area_m2=7.0, level_mode="AHD", n_duty=2,
+        curve_text="Flow\tHead\n10\t30\n20\t10", curve_order="flow_head", flow_units="L/s",
+        source_note="Data sheet rev C")
+    assert r["pumps"] == ["PS1_P1", "PS1_P2"]
+    assert ("info", "PS1: pump data complete") in a.log and ("info", "PS2: missing wet_well_area_m2, pumps") in a.log
+    a.log.clear()
+    assert tools_impl.set_pump_station_data(a, Messages(a), demo_gpkg, "PS1", stop=19.9, start=19.5) is None
+    assert a.log == [("warn", "ERROR: Stop level must be below start level.")]

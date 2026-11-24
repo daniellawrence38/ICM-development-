@@ -141,11 +141,18 @@ def style_issues(layer):
     _unique(layer, "severity", lambda v: s.ISSUE.get(str(v), s.DEFAULT), size=8)
 
 
+def style_sim_pumps(layer):
+    """Pump stations: red when any flag was raised (flag != 'ok'), green otherwise."""
+    s = _style()
+    _unique(layer, "flag", lambda v: s.SIM_CLASS["surcharged"] if str(v) != "ok" else s.SIM_CLASS["low"], size=11)
+    _label(layer, "$feature.ps_id")
+
+
 _STYLERS = {"wwn_nodes": style_nodes, "wwn_conduits": style_conduits, "wwn_subcatchments": style_subcatchments,
             "wwn_pump_stations": style_pump_stations, "wwn_rising_mains": style_rising_mains,
             "wwn_results_conduits": style_results, "wwn_sim_conduit_results": style_sim,
             "wwn_sim_node_results": style_sim_nodes, "wwn_sim_compare": style_compare,
-            "wwn_issues": style_issues}
+            "wwn_issues": style_issues, "sim_pumps": style_sim_pumps}
 
 
 def apply(table: str, layer, msgs):

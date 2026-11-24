@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
-use wwnet_core::{gpkg, Error, Issue, Model, Network, Result, Severity};
+use wwnet_core::{gpkg, Error, Issue, Model, Result, Severity};
 use wwnet_design::loads::{resolve_node_loads, resolve_subcatchment_loads};
 use wwnet_rules::RuleSet;
 
@@ -90,6 +90,40 @@ pub struct SimNodeOut {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SimPumpOut {
+    pub pump_id: String,
+    pub ps_id: String,
+    pub role: String,
+    pub max_flow_lps: f64,
+    pub starts: u32,
+    pub starts_per_hour: f64,
+    pub run_time_pct: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SimStationOut {
+    pub ps_id: String,
+    pub wet_well_node_id: String,
+    /// Maximum wet well level, m AHD.
+    pub max_level_m: f64,
+    /// Maximum depth above the wet well invert, m.
+    pub max_depth_m: f64,
+    pub overflow_volume_m3: f64,
+    /// Time of day (HH:MM) of the maximum level.
+    pub time_of_max_level: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SimRisingMainOut {
+    pub rm_id: String,
+    pub ps_id: String,
+    pub length_m: f64,
+    pub diameter_mm: f64,
+    pub max_flow_lps: f64,
+    pub max_velocity_mps: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct SimulateOutput {
     /// Run id (UTC timestamp); `None` when nothing was written.
     pub run_id: Option<String>,
@@ -100,6 +134,10 @@ pub struct SimulateOutput {
     pub nodes: Vec<SimNodeOut>,
     /// Loading / engine findings (stored in `wwn_issues` with source `simulate` when written).
     pub issues: Vec<Issue>,
+    /// Pump / pump station / rising main results (pressure side).
+    pub pumps: Vec<SimPumpOut>,
+    pub pump_stations: Vec<SimStationOut>,
+    pub rising_mains: Vec<SimRisingMainOut>,
     /// The issue messages (warning and error severity), for plain-text front ends.
     pub warnings: Vec<String>,
     /// Ids whose series were stored (empty when not written).
@@ -304,70 +342,25 @@ pub fn build_inflows(model: &Model) -> (Vec<NodeInflow>, f64, Vec<Issue>) {
     (inflows, total, issues)
 }
 
-/// Pump stations are not simulated yet: one warning per station with the ADWF that reaches its
-/// wet well (and so never reaches the discharge node), replacing the engine's generic note.
-fn pump_station_issues(model: &Model, inflows: &[NodeInflow], scale: f64) -> Vec<Issue> {
-    let Ok(net) = Network::build(model) else {
-        return Vec::new();
-    };
-    let base: HashMap<&str, f64> = inflows
-        .iter()
-        .map(|f| {
-            let mean = match &f.profile {
-                Some(p) if !p.is_empty() => {
-                    let p = sorted(p);
-                    (0..1440)
-                        .step_by(5)
-                        .map(|m| profile_factor(&p, m as f64))
-                        .sum::<f64>()
-                        / 288.0
+/// An engine / translator warning as an issue, placed at its pump station / rising main / conduit /
+/// node when the text starts with one ("pump station PS1: ..."), else at model level.
+fn engine_issue(w: &str) -> Issue {
+    for (prefix, ot) in [
+        ("pump station ", "pump_station"),
+        ("rising main ", "rising_main"),
+        ("pump ", "pump"),
+        ("conduit ", "conduit"),
+        ("node ", "node"),
+    ] {
+        if let Some(rest) = w.strip_prefix(prefix) {
+            if let Some((id, _)) = rest.split_once(':') {
+                if !id.is_empty() && !id.contains(' ') {
+                    return Issue::new(Severity::Warning, "ENGINE", ot, id, None, w);
                 }
-                _ => 1.0,
-            };
-            (f.node_id.as_str(), f.base_lps * mean)
-        })
-        .collect();
-    let mut out = Vec::new();
-    for ps in &model.pump_stations {
-        let lost = ps.wet_well_node_id.as_deref().map(|w| {
-            let mut nodes: Vec<&str> = net.upstream_trace(w).unwrap_or_default();
-            nodes.push(w);
-            nodes.iter().filter_map(|n| base.get(n)).sum::<f64>() * scale
-        });
-        let msg = match (lost, ps.discharge_node_id.as_deref()) {
-            (Some(q), Some(d)) => format!(
-                "pump station is not simulated yet: {q:.3} L/s ADWF reaching wet well {} is not passed on to {d}; flows downstream of {d} are too low",
-                ps.wet_well_node_id.as_deref().unwrap_or("")
-            ),
-            (Some(q), None) => format!(
-                "pump station is not simulated yet: {q:.3} L/s ADWF reaching wet well {} stops there",
-                ps.wet_well_node_id.as_deref().unwrap_or("")
-            ),
-            _ => "pump station is not simulated yet (no wet well node set)".to_string(),
-        };
-        out.push(Issue::new(
-            Severity::Warning,
-            "PUMP_STATION_NOT_SIMULATED",
-            "pump_station",
-            &ps.ps_id,
-            None,
-            msg,
-        ));
+            }
+        }
     }
-    if !model.rising_mains.is_empty() {
-        out.push(Issue::new(
-            Severity::Warning,
-            "RISING_MAIN_NOT_SIMULATED",
-            "model",
-            "",
-            None,
-            format!(
-                "{} rising main(s) are not simulated yet",
-                model.rising_mains.len()
-            ),
-        ));
-    }
-    out
+    Issue::new(Severity::Warning, "ENGINE", "model", "", None, w)
 }
 
 /// Peak d/D class used for the results layer: low < 0.5, medium < 0.75, high < 1.0, else (or any
@@ -451,7 +444,6 @@ pub fn simulate_file(
     let path = path.as_ref();
     let model = Model::load(path).map_err(|e| other(format!("loading {}: {e}", path.display())))?;
     let (mut inflows, total_adwf, mut issues) = build_inflows(&model);
-    issues.extend(pump_station_issues(&model, &inflows, opts.flow_scale));
     for f in &mut inflows {
         f.base_lps *= opts.flow_scale;
     }
@@ -469,6 +461,14 @@ pub fn simulate_file(
     let mut series_ids: Vec<String> = Vec::new();
     if write {
         series_ids = downstream_most(&model, 5);
+        // wet well level series of every pump station
+        for ps in &model.pump_stations {
+            if let Some(w) = &ps.wet_well_node_id {
+                if !series_ids.contains(w) {
+                    series_ids.push(w.clone());
+                }
+            }
+        }
         for s in &opts.series_ids {
             if !series_ids.contains(s) {
                 series_ids.push(s.clone());
@@ -483,17 +483,7 @@ pub fn simulate_file(
     })
     .map_err(|e| other(format!("simulation failed: {e}")))?;
     for w in &res.warnings {
-        if w.starts_with("pump stations and rising mains") {
-            continue; // replaced by the per-station issues above
-        }
-        issues.push(Issue::new(
-            Severity::Warning,
-            "ENGINE",
-            "model",
-            "",
-            None,
-            w.clone(),
-        ));
+        issues.push(engine_issue(w));
     }
     let warnings: Vec<String> = issues
         .iter()
@@ -580,6 +570,43 @@ pub fn simulate_file(
         links,
         nodes,
         issues,
+        pumps: res
+            .pumps
+            .iter()
+            .map(|p| SimPumpOut {
+                pump_id: p.pump_id.clone(),
+                ps_id: p.ps_id.clone(),
+                role: p.role.clone(),
+                max_flow_lps: p.max_flow_lps,
+                starts: p.starts,
+                starts_per_hour: p.starts_per_hour,
+                run_time_pct: p.run_time_pct,
+            })
+            .collect(),
+        pump_stations: res
+            .pump_stations
+            .iter()
+            .map(|p| SimStationOut {
+                ps_id: p.ps_id.clone(),
+                wet_well_node_id: p.wet_well_node_id.clone(),
+                max_level_m: p.max_level_m,
+                max_depth_m: p.max_depth_m,
+                overflow_volume_m3: p.overflow_volume_m3,
+                time_of_max_level: hhmm(p.time_of_max_level_min),
+            })
+            .collect(),
+        rising_mains: res
+            .rising_mains
+            .iter()
+            .map(|m| SimRisingMainOut {
+                rm_id: m.rm_id.clone(),
+                ps_id: m.ps_id.clone(),
+                length_m: m.length_m,
+                diameter_mm: m.diameter_mm,
+                max_flow_lps: m.max_flow_lps,
+                max_velocity_mps: m.max_velocity_mps,
+            })
+            .collect(),
         warnings,
         series_ids: Vec::new(),
         inp_text: res.inp_text.clone(),
@@ -601,6 +628,7 @@ fn write_results(
     gpkg::ensure_current(path)?;
     let mut c = gpkg::open(path)?;
     let tx = c.transaction()?;
+    ensure_pump_tables(&tx)?;
     let base: String = tx.query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ','now')", [], |r| {
         r.get(0)
     })?;
@@ -635,6 +663,24 @@ fn write_results(
             params![run_id, n.node_id, n.max_hgl_m, n.max_depth_m, n.flood_volume_m3, n.surcharged_min],
         )?;
     }
+    for p in &out.pumps {
+        tx.execute(
+            "INSERT INTO wwn_sim_pumps (run_id,pump_id,ps_id,role,max_flow_lps,starts,starts_per_hour,run_time_pct) VALUES (?,?,?,?,?,?,?,?)",
+            params![run_id, p.pump_id, p.ps_id, p.role, p.max_flow_lps, p.starts, p.starts_per_hour, p.run_time_pct],
+        )?;
+    }
+    for p in &out.pump_stations {
+        tx.execute(
+            "INSERT INTO wwn_sim_pump_stations (run_id,ps_id,wet_well_node_id,max_level_m,max_depth_m,overflow_volume_m3,time_of_max_level) VALUES (?,?,?,?,?,?,?)",
+            params![run_id, p.ps_id, p.wet_well_node_id, p.max_level_m, p.max_depth_m, p.overflow_volume_m3, p.time_of_max_level],
+        )?;
+    }
+    for m in &out.rising_mains {
+        tx.execute(
+            "INSERT INTO wwn_sim_rising_mains (run_id,rm_id,ps_id,length_m,diameter_mm,max_flow_lps,max_velocity_mps) VALUES (?,?,?,?,?,?,?)",
+            params![run_id, m.rm_id, m.ps_id, m.length_m, m.diameter_mm, m.max_flow_lps, m.max_velocity_mps],
+        )?;
+    }
     if let Some(s) = &res.series {
         let warm_min = out.options.warmup_h * 60.0;
         let keep: Vec<usize> = s
@@ -664,7 +710,14 @@ fn write_results(
         }
     }
     // keep the most recent runs
-    for t in ["wwn_sim_links", "wwn_sim_nodes", "wwn_sim_series"] {
+    for t in [
+        "wwn_sim_links",
+        "wwn_sim_nodes",
+        "wwn_sim_series",
+        "wwn_sim_pumps",
+        "wwn_sim_pump_stations",
+        "wwn_sim_rising_mains",
+    ] {
         tx.execute(
             &format!("DELETE FROM {t} WHERE run_id NOT IN (SELECT run_id FROM wwn_sim_runs ORDER BY run_id DESC LIMIT {RUNS_KEPT})"),
             [],
@@ -1072,4 +1125,29 @@ pub fn simulate_json(out: &SimulateOutput) -> Result<String> {
 /// Pretty JSON of any serialisable service result.
 pub fn to_json<T: Serialize>(v: &T) -> Result<String> {
     serde_json::to_string_pretty(v).map_err(|e| other(e.to_string()))
+}
+
+/// Pump station result tables (created here, not in the template schema, so that older
+/// model files and `schema.sql` need no change). Statistics exclude the warm-up.
+fn ensure_pump_tables(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS wwn_sim_pumps (
+           run_id TEXT NOT NULL, pump_id TEXT NOT NULL, ps_id TEXT, role TEXT,
+           max_flow_lps REAL, starts INTEGER, starts_per_hour REAL, run_time_pct REAL,
+           PRIMARY KEY (run_id, pump_id));
+         CREATE TABLE IF NOT EXISTS wwn_sim_pump_stations (
+           run_id TEXT NOT NULL, ps_id TEXT NOT NULL, wet_well_node_id TEXT,
+           max_level_m REAL, max_depth_m REAL, overflow_volume_m3 REAL,
+           time_of_max_level TEXT,                 -- time of day (HH:MM)
+           PRIMARY KEY (run_id, ps_id));
+         CREATE TABLE IF NOT EXISTS wwn_sim_rising_mains (
+           run_id TEXT NOT NULL, rm_id TEXT NOT NULL, ps_id TEXT, length_m REAL,
+           diameter_mm REAL, max_flow_lps REAL, max_velocity_mps REAL,
+           PRIMARY KEY (run_id, rm_id));
+         INSERT OR IGNORE INTO gpkg_contents (table_name, data_type, identifier, srs_id) VALUES
+           ('wwn_sim_pumps','attributes','Simulation pump results',NULL),
+           ('wwn_sim_pump_stations','attributes','Simulation pump station results',NULL),
+           ('wwn_sim_rising_mains','attributes','Simulation rising main results',NULL);",
+    )?;
+    Ok(())
 }

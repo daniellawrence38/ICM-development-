@@ -260,8 +260,10 @@ def test_vendor_module_importable_after_pro_resets_sys_path(tmp_path, clean, mon
 
 def test_every_pyt_execute_reactivates_vendor():
     """Every tool runs through the base class execute(), which re-activates the vendor folder first
-    (Pro restores sys.path before each run); no tool overrides execute()."""
+    (Pro restores sys.path before each run) and reloads the modules; only Update WWNet overrides it."""
     src = (TOOLBOX / "WWNet.pyt").read_text()
-    assert src.count("def execute(self, parameters, messages):") == 1
-    assert "def execute(self, parameters, messages):\n        _vendor.activate(_HERE)" in src
-    assert src.count("class ") - src.count("class _") >= 17 and src.count("(_Tool):") == 17
+    assert src.count("def execute(self, parameters, messages):") == 2   # base class + Update WWNet
+    assert src.count("def execute(self, parameters, messages):\n        _vendor.activate(_HERE)") == 1
+    assert src.count('"""Not the base execute: the update must not import (and so lock) the modules it replaces."""\n'
+                     '        _vendor.activate(_HERE)') == 1
+    assert "impl = _impl()" in src and src.count("(_Tool):") == 23

@@ -144,6 +144,19 @@ CREATE TABLE IF NOT EXISTS wwn_sim_series (
   object_id TEXT NOT NULL, minute REAL NOT NULL,     -- minutes after the end of the warm-up
   flow_lps REAL, depth_m REAL,
   PRIMARY KEY (run_id, object_type, object_id, minute));
+CREATE TABLE IF NOT EXISTS wwn_sim_pumps (
+  run_id TEXT NOT NULL, pump_id TEXT NOT NULL, ps_id TEXT, role TEXT,
+  max_flow_lps REAL, starts INTEGER, starts_per_hour REAL, run_time_pct REAL,
+  PRIMARY KEY (run_id, pump_id));
+CREATE TABLE IF NOT EXISTS wwn_sim_pump_stations (
+  run_id TEXT NOT NULL, ps_id TEXT NOT NULL, wet_well_node_id TEXT,
+  max_level_m REAL, max_depth_m REAL, overflow_volume_m3 REAL,
+  time_of_max_level TEXT,                 -- time of day (HH:MM)
+  PRIMARY KEY (run_id, ps_id));
+CREATE TABLE IF NOT EXISTS wwn_sim_rising_mains (
+  run_id TEXT NOT NULL, rm_id TEXT NOT NULL, ps_id TEXT, length_m REAL,
+  diameter_mm REAL, max_flow_lps REAL, max_velocity_mps REAL,
+  PRIMARY KEY (run_id, rm_id));
 
 -- v3: map layers of one stored simulation run (the latest, or the one chosen with Show Simulation Run), and of a
 -- run comparison. Rewritten by `wwnet simulate` / show_sim_run / compare_sim_runs.
@@ -176,6 +189,8 @@ INSERT OR IGNORE INTO gpkg_contents (table_name, data_type, identifier, srs_id) 
  ('wwn_profile_info','attributes','Profiles',NULL),
  ('wwn_sim_runs','attributes','Simulation runs',NULL), ('wwn_sim_links','attributes','Simulation link results',NULL),
  ('wwn_sim_nodes','attributes','Simulation node results',NULL), ('wwn_sim_series','attributes','Simulation time series',NULL),
+ ('wwn_sim_pumps','attributes','Simulation pump results',NULL), ('wwn_sim_pump_stations','attributes','Simulation pump station results',NULL),
+ ('wwn_sim_rising_mains','attributes','Simulation rising main results',NULL),
  ('wwn_sim_conduit_results','features','Simulation results (conduits)',7850),
  ('wwn_sim_node_results','features','Simulation results (nodes)',7850),
  ('wwn_sim_compare','features','Simulation comparison',7850);

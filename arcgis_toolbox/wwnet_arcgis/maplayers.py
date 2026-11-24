@@ -233,22 +233,27 @@ def _upgrade(gpkg_path, msgs):
         msgs.warn(f"Could not upgrade the model ({exc}); newer layers may be missing.")
 
 
-def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True) -> list:
-    """Add the model's wwn_* feature tables (and the result layers that hold data). Returns the layers."""
+def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True, only=None, skip_existing: bool = True) -> list:
+    """Add the model's wwn_* feature tables and the result layers that hold data (or just `only`); tables
+    the active map already shows are skipped. Returns the added layers."""
     present = gpkg.contents(gpkg_path)
     if "wwn_subcatchments" in present:
         _upgrade(gpkg_path, msgs)
         present = gpkg.contents(gpkg_path)
-    tables = [t for t in gpkg.FEATURE_ORDER if t in present]
-    if not tables:
+    if not any(t in present for t in gpkg.FEATURE_ORDER):
         raise RuntimeError(f"{gpkg_path} contains no WWNet feature tables (wwn_nodes, wwn_conduits, ...).")
-    tables = [t for t in gpkg.RESULT_ORDER if t in present and gpkg.row_count(gpkg_path, t)] + tables
+
+    def wanted(t):
+        if only is not None and t not in only:
+            return False
+        return not (skip_existing and find_layer_for(arcpy, gpkg_path, t) is not None)
+
+    tables = [t for t in gpkg.RESULT_ORDER if t in present and gpkg.row_count(gpkg_path, t) and wanted(t)] + \
+        [t for t in gpkg.FEATURE_ORDER if t in present and wanted(t)]
     m = active_map(arcpy)
-    group = _ensure_group(m, msgs)
+    group = _ensure_group(m, msgs) if tables else None
     added = []
     for t in tables:
-        if find_layer_for(arcpy, gpkg_path, t) is not None:
-            continue
         try:
             name = present[t][0] or t
             lyr = _add_table_layer(m, group, gpkg_path, t, name, msgs)
@@ -260,7 +265,7 @@ def add_model(arcpy, gpkg_path: str, msgs, symbolize: bool = True) -> list:
         for t, lyr in added:
             symbology.apply(t, lyr, msgs)
     for t in gpkg.ATTRIBUTE_ORDER:
-        if t in present and find_layer_for(arcpy, gpkg_path, t) is None:
+        if t in present and wanted(t):
             try:
                 m.addDataFromPath(gpkg.table_path(gpkg_path, t))
                 msgs.info(f"Added table {present[t][0] or t}")
@@ -287,9 +292,39 @@ def ensure_layer(arcpy, gpkg_path: str, table: str, msgs, definition_query: str 
     return lyr
 
 
+def remove_item(m, item, is_table: bool):
+    """Remove a layer or a standalone table from map `m`. Real ArcGIS Pro only removes tables via
+    removeTable(); removeLayer() on a table fails."""
+    if is_table:
+        m.removeTable(item)
+    else:
+        m.removeLayer(item)
+
+
+def remove_layers_named(arcpy, name: str) -> int:
+    """Remove every map layer / table called `name` (also inside groups). Returns how many were removed.
+    Failures propagate, so only successful removals are counted."""
+    m = active_map(arcpy)
+    n = 0
+    for is_table, items in ((False, list(m.listLayers())), (True, list(m.listTables()))):
+        for item in [x for x in items if layer_name(x) == name]:
+            remove_item(m, item, is_table)
+            n += 1
+    return n
+
+
+def add_results_layer(arcpy, fc_path: str, name: str, msgs):
+    """Add a temporary (memory) results feature class to the active map, in the WWNet group if present
+    (used for the pump station results; the conduit / node results are GeoPackage layers)."""
+    m = active_map(arcpy)
+    lyr = m.addDataFromPath(fc_path)
+    set_layer_name(lyr, name, msgs)
+    return _add_to_group(m, _find_group(m), lyr, name, msgs)
+
+
 def select(arcpy, layer, ids, field):
     """New selection of `ids` (by `field`) on `layer`; an empty list clears the selection."""
-    where = gpkg.in_clause(arcpy.AddFieldDelimiters(layer_source(layer), field), ids)
+    where = gpkg.in_clause(arcpy.AddFieldDelimiters(gpkg.dataset_path(layer_source(layer)), field), ids)
     arcpy.management.SelectLayerByAttribute(layer, "NEW_SELECTION" if ids else "CLEAR_SELECTION",
                                             where if ids else "")
 

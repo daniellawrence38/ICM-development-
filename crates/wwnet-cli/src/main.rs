@@ -437,6 +437,35 @@ fn simulate(
         "{} conduit(s): {} surcharged; {} node(s): {} flooded ({:.2} m3)",
         s.conduits, s.surcharged_conduits, s.nodes, s.flooded_nodes, s.total_flood_volume_m3
     );
+    if !out.pump_stations.is_empty() {
+        println!(
+            "{:<10} {:<10} {:>10} {:>9} {:>10} {:>9} {:>8}",
+            "PUMP STN", "PUMP", "Qmax L/s", "starts/h", "run %", "max m AHD", "ovfl m3"
+        );
+        for st in &out.pump_stations {
+            let pumps: Vec<_> = out.pumps.iter().filter(|p| p.ps_id == st.ps_id).collect();
+            for (i, p) in pumps.iter().enumerate() {
+                let (lvl, ov) = if i == 0 {
+                    (
+                        format!("{:.2}", st.max_level_m),
+                        format!("{:.2}", st.overflow_volume_m3),
+                    )
+                } else {
+                    (String::new(), String::new())
+                };
+                println!(
+                    "{:<10} {:<10} {:>10.1} {:>9.2} {:>10.1} {:>9} {:>8}",
+                    st.ps_id, p.pump_id, p.max_flow_lps, p.starts_per_hour, p.run_time_pct, lvl, ov
+                );
+            }
+        }
+        for m in &out.rising_mains {
+            println!(
+                "rising main {} (station {}): DN{:.0}, {:.0} m, Qmax {:.1} L/s, vmax {:.2} m/s",
+                m.rm_id, m.ps_id, m.diameter_mm, m.length_m, m.max_flow_lps, m.max_velocity_mps
+            );
+        }
+    }
     if let Some(r) = &out.run_id {
         println!("results stored in wwn_sim_* (run {r})");
     }

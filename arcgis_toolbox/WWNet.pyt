@@ -12,9 +12,10 @@ if _HERE not in sys.path:
 from wwnet_arcgis import vendor as _vendor  # noqa: E402
 _vendor.activate(_HERE)  # no-install bundle: <toolbox>/vendor first on sys.path (before wwnet_native / anthropic)
 
+from wwnet_arcgis import updater as _updater  # noqa: E402
 from wwnet_arcgis import settings as _settings  # noqa: E402
 from wwnet_arcgis import tools_impl as impl  # noqa: E402
-from wwnet_arcgis.messages import Messages  # noqa: E402
+from wwnet_arcgis import pumpdata as _pumpdata  # noqa: E402  (stdlib only; used by getParameterInfo / updateParameters)
 
 try:  # one model list for both front ends (the shared assistant client)
     from wwnet_arcgis import shared as _shared  # noqa: E402
@@ -25,6 +26,16 @@ except Exception:  # noqa: BLE001 - the toolbox must still open
     MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
     EFFORTS = ["low", "medium", "high"]
 MULTILINE = "{E5456E51-0C41-4797-9EE4-5269820C6F0E}"
+
+
+def _impl():
+    """Fresh ``wwnet_arcgis.tools_impl`` for this tool run (drops cached WWNet modules first), so files
+    updated by *Update WWNet* take effect without restarting ArcGIS Pro."""
+    return _updater.fresh_impl()
+
+
+def _text(p):
+    return p.valueAsText if p.value is not None else None
 
 
 def _p(name, label, datatype, direction="Input", required=True, multi=False, default=None,
@@ -135,8 +146,10 @@ class _Tool(object):
 
     def execute(self, parameters, messages):
         _vendor.activate(_HERE)  # Pro restores sys.path before each tool run
+        global impl
+        impl = _impl()           # fresh modules: files changed by Update WWNet apply without a restart
         p = _Params(parameters)
-        out = self.run(p, Messages(arcpy))
+        out = self.run(p, impl.Messages(arcpy))
         if "out_gpkg" in p and out:
             p["out_gpkg"].value = out
 
@@ -254,7 +267,9 @@ class ImportSewerData(_Tool):
                      category="Connection point loads"),
                   _p("snap", "Snap tolerance (m)", "GPDouble", required=False, default=0.5, category="Options"),
                   _p("grade_source", "Grade source", "GPString", required=False, default="levels",
-                     values=["levels", "field"], category="Options")]
+                     values=["levels", "field"], category="Options"),
+                  _p("tee_join", "Tee join distance (m)", "GPDouble", required=False, default=0.5,
+                     category="Options")]
         for role, layer_key, label, required in si.FIELD_ROLES:
             f = _p("f_" + role, label, "Field", required=required, category="Source fields")
             f.parameterDependencies = [self._LAYER_NAME[layer_key]]  # Pro requires parameter NAMES
@@ -280,7 +295,8 @@ class ImportSewerData(_Tool):
         impl.import_sewer_data(arcpy, msgs, _source(p["ac_layer"]), _source(p["cp_layer"]),
                                _source(p["sewer_layer"]), p.text("out_gpkg"), fields, p.num("snap", 0.5),
                                p.text("grade_source", "levels"), p.flag("use_selected"), p.flag("add_to_map", True),
-                               load_connection_points=p.flag("load_cps", True), cp_load_search_m=p.num("cp_radius"))
+                               load_connection_points=p.flag("load_cps", True), cp_load_search_m=p.num("cp_radius"),
+                               tee_tolerance=p.num("tee_join"))
 
 
 class ImportDiurnalProfile(_Tool):
@@ -327,6 +343,198 @@ class AssignProfile(_Tool):
     def run(self, p, msgs):
         path = p.text("gpkg")
         impl.assign_profile(arcpy, msgs, path, p.text("target"), p.text("profile"))
+        return path
+
+
+class ImportPressureData(_Tool):
+    label = "Import Pressure Data"
+    description = ("Add Water Corporation (WA) sewer pump stations and pressure mains (rising mains) to an existing "
+                   "WWNet model made by Import Sewer Data: chains the main segments, links wet wells and discharge "
+                   "nodes. Pump hydraulics are not in the GIS: enter them with Set Pump Station Data.")
+    category = "Data"
+    _LAYER_NAME = {"ps": "ps_layer", "main": "main_layer"}
+
+    def getParameterInfo(self):
+        from wwnet_arcgis import pressure_import as pi
+        ps = _p("ps_layer", "Sewer pump stations", "GPFeatureLayer")
+        ps.filter.list = ["Point"]
+        mn = _p("main_layer", "Sewer pressure mains", "GPFeatureLayer")
+        mn.filter.list = ["Polyline"]
+        params = [_model_param("WWNet model (existing GeoPackage)"), ps, mn,
+                  _p("use_selected", "Use selected features only", "GPBoolean", required=False, default=True),
+                  _p("add_to_map", "Add / refresh layers on map", "GPBoolean", required=False, default=True),
+                  _p("search", "Search distance pump station to main end / wet well (m)", "GPDouble",
+                     required=False, default=30.0, category="Options"),
+                  _p("snap", "Snap tolerance between main segments (m)", "GPDouble", required=False, default=1.0,
+                     category="Options"),
+                  _p("discharge", "Discharge search distance main end to gravity node (m)", "GPDouble",
+                     required=False, default=10.0, category="Options"),
+                  _p("include_n", "Include not-in-use (N) pump stations and mains", "GPBoolean", required=False,
+                     default=False, category="Options")]
+        for role, layer_key, label, required in pi.FIELD_ROLES:
+            f = _p("f_" + role, label, "Field", required=required, category="Source fields")
+            f.parameterDependencies = [self._LAYER_NAME[layer_key]]  # Pro requires parameter NAMES
+            params.append(f)
+        return params + [_model_out()]
+
+    def update(self, p):
+        from wwnet_arcgis import pressure_import as pi
+        for layer_key, pname in self._LAYER_NAME.items():
+            if not p.fresh(pname):
+                continue
+            try:
+                found = impl.pressure_field_defaults(arcpy, _source(p[pname]), layer_key)
+            except Exception:  # noqa: BLE001
+                continue
+            for role, k, _l, _q in pi.FIELD_ROLES:
+                if k == layer_key:
+                    p["f_" + role].value = found.get(role) or None
+
+    def run(self, p, msgs):
+        from wwnet_arcgis import pressure_import as pi
+        path = p.text("gpkg")
+        fields = {role: (p.text("f_" + role) or "") for role, _k, _l, _q in pi.FIELD_ROLES}
+        impl.import_pressure_data(arcpy, msgs, path, _source(p["ps_layer"]), _source(p["main_layer"]), fields,
+                                  p.flag("use_selected", True), p.val("search"), p.val("snap"), p.val("discharge"),
+                                  p.flag("include_n"), p.flag("add_to_map", True))
+        return path
+
+
+PS_SEP = " \u2014 "
+LEVEL_MODES = {"AHD": "AHD", "Depth above wet well invert": "depth"}
+CURVE_ORDERS = {"flow,head": "flow_head", "head,flow": "head_flow"}
+FLOW_UNITS = ["L/s", "m3/h", "m3/s"]
+
+
+def _station_label(s):
+    return f"{s['ps_id']}{PS_SEP}{s['notes']}" if s.get("notes") else str(s["ps_id"])
+
+
+def _station_id(text):
+    return None if not text else str(text).split(PS_SEP)[0].strip()
+
+
+def _curve_text(curve):
+    return "\n".join(f"{q:g}\t{h:g}" for q, h in curve) if curve else None
+
+
+class SetPumpStationData(_Tool):
+    label = "Set Pump Station Data"
+    description = ("Enter the hydraulic data of a pump station from its data sheet (wet well size, stop / start / "
+                   "overflow levels, pumps and pump curve), which the GIS does not hold. Choose a station created "
+                   "by Import Pressure Data; its current values are filled in. The pump curve can be pasted from "
+                   "the data sheet, Excel or InfoWorks ICM.")
+    category = "Data"
+
+    def getParameterInfo(self):
+        curve = _p("pump_curve", "Pump curve (paste: flow and head, one point per line)", "GPString", required=False)
+        curve.controlCLSID = MULTILINE
+        return [_model_param("WWNet model (existing GeoPackage)"),
+                _p("station", "Pump station", "GPString", values=[]),
+                _p("diameter_m", "Wet well diameter (m)", "GPDouble", required=False),
+                _p("area_m2", "Wet well area (m2)", "GPDouble", required=False),
+                _p("level_mode", "Levels are", "GPString", required=False, default="AHD", values=list(LEVEL_MODES)),
+                _p("stop_level", "Stop level", "GPDouble", required=False),
+                _p("start_level", "Start level", "GPDouble", required=False),
+                _p("overflow_level", "Overflow level", "GPDouble", required=False),
+                _p("emergency_m3", "Emergency storage (m3)", "GPDouble", required=False),
+                _p("n_duty", "Duty pumps", "GPLong", required=False, default=1),
+                _p("n_assist", "Assist pumps", "GPLong", required=False, default=0),
+                _p("n_standby", "Standby pumps", "GPLong", required=False, default=0),
+                _p("duty_rate", "Duty pump rate (L/s, used when no curve)", "GPDouble", required=False),
+                curve,
+                _p("curve_order", "Curve column order", "GPString", required=False, default="flow,head",
+                   values=list(CURVE_ORDERS)),
+                _p("flow_units", "Curve flow units", "GPString", required=False, default="L/s", values=FLOW_UNITS),
+                _p("speed_pct", "Pump speed (%)", "GPDouble", required=False, default=100.0),
+                _p("source_note", "Source note (e.g. Data sheet PS4 rev C)", "GPString", required=False),
+                _p("replace_pumps", "Replace the station's existing pumps", "GPBoolean", required=False, default=True),
+                _model_out()]
+
+    def update(self, p):
+        stations = []
+        if p.val("gpkg") is not None:
+            try:
+                stations = _pumpdata.list_stations(p.text("gpkg"))
+            except Exception:  # noqa: BLE001
+                stations = []
+        station = p["station"]
+        if p.fresh("gpkg") or (p.val("gpkg") and not station.filter.list):
+            station.filter.list = [_station_label(s) for s in stations]
+            if station.value is not None and _station_id(station.valueAsText) not in [s["ps_id"] for s in stations]:
+                station.value = None
+        if station.value is None or station.hasBeenValidated:
+            return
+        sel = next((s for s in stations if s["ps_id"] == _station_id(station.valueAsText)), None)
+        if sel is None:
+            return
+        p["diameter_m"].value = None                       # area is stored; the diameter is derived
+        p["area_m2"].value = sel["wet_well_area_m2"]
+        p["level_mode"].value = "AHD"                      # levels below are always AHD
+        p["stop_level"].value = sel["stop_level"]
+        p["start_level"].value = sel["start_level"]
+        p["overflow_level"].value = sel["overflow_level"]
+        p["emergency_m3"].value = sel["emergency_storage_m3"]
+        counts = sel["pumps"]
+        if sum(counts.values()):
+            p["n_duty"].value, p["n_assist"].value, p["n_standby"].value = (
+                counts.get("duty", 0), counts.get("assist", 0), counts.get("standby", 0))
+        else:
+            p["n_duty"].value, p["n_assist"].value, p["n_standby"].value = 1, 0, 0
+        p["duty_rate"].value = sel["pump_rate_lps"]
+        p["pump_curve"].value = _curve_text(sel["curve"])
+        p["curve_order"].value = "flow,head"               # the curve is shown as L/s and m
+        p["flow_units"].value = "L/s"
+
+    def updateMessages(self, parameters):
+        p = _Params(parameters)
+        curve = p["pump_curve"]
+        if curve.value is None or not str(curve.valueAsText).strip():
+            return
+        try:
+            _pts, warns = _pumpdata.parse_curve(
+                curve.valueAsText, order=CURVE_ORDERS.get(p.text("curve_order", "flow,head"), "flow_head"),
+                flow_units=p.text("flow_units", "L/s"))
+        except ValueError as exc:
+            curve.setErrorMessage(str(exc))
+            return
+        if warns:
+            curve.setWarningMessage(" ".join(warns))
+
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.set_pump_station_data(
+            arcpy, msgs, path, _station_id(p.text("station")),
+            wet_well_diameter_m=p.val("diameter_m"), wet_well_area_m2=p.val("area_m2"),
+            level_mode=LEVEL_MODES.get(p.text("level_mode", "AHD"), "AHD"),
+            stop=p.val("stop_level"), start=p.val("start_level"), overflow=p.val("overflow_level"),
+            emergency_storage_m3=p.val("emergency_m3"),
+            n_duty=int(p.val("n_duty", 1)), n_assist=int(p.val("n_assist", 0)), n_standby=int(p.val("n_standby", 0)),
+            duty_rate_lps=p.val("duty_rate"), curve_text=p.text("pump_curve"),
+            curve_order=CURVE_ORDERS.get(p.text("curve_order", "flow,head"), "flow_head"),
+            flow_units=p.text("flow_units", "L/s"), speed_pct=float(p.val("speed_pct", 100.0)),
+            source_note=p.text("source_note"), replace_pumps=p.flag("replace_pumps", True))
+        return path
+
+
+class JoinDanglingEnds(_Tool):
+    label = "Join Dangling Sewer Ends"
+    description = ("Repair dangling downstream ends (junction / inspection shaft / inspection opening nodes that "
+                   "receive a sewer but have no outgoing sewer, which InfoWorks ICM and SWMM treat wrongly): each "
+                   "is joined to the nearest sewer within the maximum distance, splitting that sewer at a new tee "
+                   "node (inverts by grade, surface level interpolated). Preview first, then untick 'Preview only'. "
+                   "Edits the GeoPackage: close attribute tables and remove its layers from the map first.")
+    category = "Model"
+
+    def getParameterInfo(self):
+        return [_model_param("WWNet model (existing GeoPackage)"),
+                _p("max_distance", "Maximum join distance (m)", "GPDouble", required=False, default=5.0),
+                _p("preview", "Preview only (do not change the model)", "GPBoolean", required=False, default=True),
+                _model_out()]
+
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.join_dangling_ends(arcpy, msgs, path, p.num("max_distance", 5.0), p.flag("preview", True))
         return path
 
 
@@ -491,6 +699,28 @@ class PlotHydrograph(_Tool):
                              p.flag("chart", True))
 
 
+class ExportToICM(_Tool):
+    label = "Export To ICM"
+    description = ("Write the model's nodes, gravity sewers, rising mains and pumps with InfoWorks ICM field names "
+                   "(file geodatabase + CSV + field-mapping notes) for ICM's Open Data Import Centre.")
+    category = "Data"
+
+    def getParameterInfo(self):
+        from wwnet_arcgis import icm_export as ie
+        labels = list(ie.OUT_SR)
+        return [_model_param(), _p("out_folder", "Output folder", "DEFolder"),
+                _p("out_sr", "Coordinate system (match your ICM network)", "GPString", required=False,
+                   default=labels[0], values=labels),
+                _p("dem", "DEM to fill missing ground levels (optional)", ["GPRasterLayer", "DERasterDataset"],
+                   required=False), _model_out()]
+
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.export_icm(arcpy, msgs, path, p.text("out_folder"),
+                        p.text("out_sr") or "GDA2020 / MGA zone 50 (EPSG:7850)", dem=p.text("dem"))
+        return path
+
+
 # ---------------------------------------------------------------------- Calculators
 
 class PipeCapacity(_Tool):
@@ -579,13 +809,67 @@ class VerifySetup(_Tool):
         impl.verify_setup(msgs, p.flag("live"))
 
 
+class SelfTest(_Tool):
+    label = "Self Test"
+    description = ("Run every WWNet tool against the bundled demo model in a scratch folder and write one report "
+                   "file to paste back when something does not work.")
+    category = "Setup"
+
+    def getParameterInfo(self):
+        return [_p("include_map", "Also test map steps (adds and removes layers in the active map)", "GPBoolean",
+                   required=False, default=False),
+                _p("out_folder", "Output folder (optional; default: a temp folder)", "DEFolder", required=False)]
+
+    def run(self, p, msgs):
+        from wwnet_arcgis import selftest  # after _impl(): the module cache was purged, so this is fresh
+        selftest.run(arcpy, msgs, _HERE, out_dir=p.text("out_folder"), include_map=p.flag("include_map"))
+
+
+class UpdateWWNet(_Tool):
+    label = "Update WWNet"
+    description = ("Apply a downloaded WWNet update zip (the CI artifact wwnet-arcgis-update) in place: no "
+                   "extracting, no Unblock, and no restart of ArcGIS Pro for Python changes.")
+    category = "Setup"
+
+    def getParameterInfo(self):
+        return [_p("zip_file", "Downloaded update zip", "DEFile", filetype=["zip"])]
+
+    def updateParameters(self, parameters):
+        return
+
+    def execute(self, parameters, messages):
+        """Not the base execute: the update must not import (and so lock) the modules it replaces."""
+        _vendor.activate(_HERE)
+        p = _Params(parameters)
+        res = _updater.apply_update(p.text("zip_file"), _HERE, log=arcpy.AddMessage)
+        arcpy.AddMessage(f"Update version: {res['version'] or 'unknown'}")
+        upd = res["updated"]
+        arcpy.AddMessage(f"{len(upd)} file(s) updated, {res['unchanged']} unchanged.")
+        for rel in upd[:30]:
+            arcpy.AddMessage(f"  updated: {rel}")
+        if len(upd) > 30:
+            arcpy.AddMessage(f"  ... and {len(upd) - 30} more")
+        for rel in res["pending"]:
+            arcpy.AddWarning(f"{rel}: file is locked. Native module staged; it will be swapped in the next "
+                             "time ArcGIS Pro starts \u2014 restart Pro once to use it")
+        for rel in res["skipped"]:
+            arcpy.AddWarning(f"Skipped: {rel}")
+        if res["backup"]:
+            arcpy.AddMessage(f"Previous versions of changed files saved in: {res['backup']}")
+        if "WWNet.pyt" in upd:
+            arcpy.AddMessage("WWNet.pyt changed: right-click the WWNet toolbox in the Catalog pane > Refresh "
+                             "to see new or changed tool parameters")
+        arcpy.AddMessage("Python code changes take effect on the next tool run (no restart needed)")
+
+
 class Toolbox(object):
     def __init__(self):
         self.label = "WWNet"
         self.alias = "wwnet"
-        self.tools = [NewModel, AddModelToMap, ModelSettings,
-                      ImportSewerData, ImportDiurnalProfile, AssignProfile,
+        self.tools = [NewModel, AddModelToMap, ModelSettings, JoinDanglingEnds,
+                      ImportSewerData, ImportPressureData, SetPumpStationData, ImportDiurnalProfile, AssignProfile,
+                      ExportToICM,
                       CheckModel, RunDesign, RunSimulation, Trace,
                       ShowSimulationRun, CompareSimulationRuns, PlotHydrograph,
                       PipeCapacity,
-                      AskWWNetAssistant, SetAssistantApiKey, VerifySetup]
+                      AskWWNetAssistant, SetAssistantApiKey, VerifySetup, SelfTest, UpdateWWNet]

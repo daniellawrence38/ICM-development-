@@ -88,7 +88,8 @@ pub struct NodeInflow {
     pub profile: Option<Vec<(u32, f64)>>,
 }
 
-/// Only `model.nodes` and `model.conduits` are used.
+/// Uses `nodes`, `conduits`, and the pump station tables (`pump_stations`, `pumps`,
+/// `rising_mains`).
 #[derive(Debug, Clone)]
 pub struct SimInput<'a> {
     pub model: &'a Model,
@@ -156,9 +157,51 @@ pub struct SimSeries {
     pub nodes: BTreeMap<String, NodeSeries>,
 }
 
+/// Statistics of one pump after the warm-up.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PumpResult {
+    pub pump_id: String,
+    pub ps_id: String,
+    /// `duty` or `assist`.
+    pub role: String,
+    pub max_flow_lps: f64,
+    /// Off-to-on transitions of the pump flow (a pump running at the end of the warm-up is
+    /// not counted as a start).
+    pub starts: u32,
+    pub starts_per_hour: f64,
+    /// Percentage of the reporting period the pump was running.
+    pub run_time_pct: f64,
+}
+
+/// Statistics of one pump station's wet well after the warm-up.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PumpStationResult {
+    pub ps_id: String,
+    pub wet_well_node_id: String,
+    /// Maximum water level, m AHD.
+    pub max_level_m: f64,
+    /// Maximum depth above the wet-well invert, m.
+    pub max_depth_m: f64,
+    /// Volume lost as overflow (flooding) from the wet well, m3.
+    pub overflow_volume_m3: f64,
+    /// Minutes since simulation start (including the warm-up) of the maximum level.
+    pub time_of_max_level_min: f64,
+}
+
+/// Maximum flow and velocity in a rising main (over all its SWMM segments).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RisingMainResult {
+    pub rm_id: String,
+    pub ps_id: String,
+    pub length_m: f64,
+    pub diameter_mm: f64,
+    pub max_flow_lps: f64,
+    pub max_velocity_mps: f64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IdMapEntry {
-    /// "node" or "conduit".
+    /// "node", "conduit", "pump" or "force_main".
     pub kind: String,
     pub original: String,
     pub swmm: String,
@@ -169,6 +212,9 @@ pub struct SimResult {
     pub swmm_version: i32,
     pub links: Vec<LinkResult>,
     pub nodes: Vec<NodeResult>,
+    pub pumps: Vec<PumpResult>,
+    pub pump_stations: Vec<PumpStationResult>,
+    pub rising_mains: Vec<RisingMainResult>,
     /// Runoff continuity error, % (0 here: no hydrology).
     pub continuity_runoff_error_pct: f64,
     /// Flow-routing continuity error, %.

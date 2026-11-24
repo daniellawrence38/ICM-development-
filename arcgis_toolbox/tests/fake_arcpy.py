@@ -30,6 +30,33 @@ def gpkg_line_length(blob: bytes):
     return sum(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2) ** 0.5 for a, b in zip(pts, pts[1:]))
 
 
+def gpkg_point_xy(blob: bytes):
+    if blob is None:
+        return None
+    env = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}[(blob[3] >> 1) & 7]
+    wkb = blob[8 + env:]
+    bo = "<" if wkb[0] == 1 else ">"
+    assert struct.unpack(bo + "I", wkb[1:5])[0] == 1
+    return struct.unpack(bo + "dd", wkb[5:21])
+
+
+def gpkg_shape(blob: bytes):
+    """GeoPackage POINT / LINESTRING blob -> FakePointGeometry / FakePolyline (None for NULL)."""
+    if blob is None:
+        return None
+    env = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}[(blob[3] >> 1) & 7]
+    wkb = blob[8 + env:]
+    bo = "<" if wkb[0] == 1 else ">"
+    gtype = struct.unpack(bo + "I", wkb[1:5])[0]
+    if gtype == 1:
+        x, y = struct.unpack(bo + "dd", wkb[5:21])
+        return FakePointGeometry(NS(X=x, Y=y))
+    assert gtype == 2, f"fake arcpy: geometry type {gtype} not supported"
+    n = struct.unpack(bo + "I", wkb[5:9])[0]
+    pts = [NS(X=x, Y=y) for x, y in (struct.unpack(bo + "dd", wkb[9 + 16 * i:25 + 16 * i]) for i in range(n))]
+    return FakePolyline(pts)
+
+
 class _Cursor:
     def __init__(self, arcpy, ds, fields, where_clause=None, writable=False):
         self.arcpy, self.writable = arcpy, writable
@@ -45,7 +72,19 @@ class _Cursor:
         self.i = -1
 
     def _convert(self, raw):
-        return [gpkg_line_length(v) if f == "SHAPE@LENGTH" else v for f, v in zip(self.fields, raw)]
+        # Like real arcpy: SHAPE@XY of a NULL geometry is (None, None), not None; SHAPE@ is a geometry
+        # object (None for NULL).
+        out = []
+        for f, v in zip(self.fields, raw):
+            if f == "SHAPE@LENGTH":
+                out.append(gpkg_line_length(v))
+            elif f == "SHAPE@XY":
+                out.append((None, None) if v is None else gpkg_point_xy(v))
+            elif f == "SHAPE@":
+                out.append(gpkg_shape(v))
+            else:
+                out.append(v)
+        return out
 
     def __iter__(self):
         for i, r in enumerate(self.rows):
@@ -96,6 +135,27 @@ class FakeShape:
 
     def getPart(self, i):
         return _Part(NS(X=x, Y=y) for x, y in self.coords)
+
+
+class FakePointGeometry:
+    """arcpy.PointGeometry stand-in (strict: needs a Point with X / Y)."""
+
+    def __init__(self, pt, spatial_reference=None):
+        assert hasattr(pt, "X") and hasattr(pt, "Y"), "fake arcpy: PointGeometry needs an arcpy.Point"
+        self.firstPoint, self.spatialReference = pt, spatial_reference
+
+
+class FakePolyline:
+    """arcpy.Polyline stand-in (strict: an Array of 2+ Points)."""
+
+    def __init__(self, arr, spatial_reference=None):
+        pts = list(arr)
+        assert len(pts) >= 2 and all(hasattr(p, "X") for p in pts), "fake arcpy: Polyline needs 2+ Points"
+        self.points, self.spatialReference, self.partCount = pts, spatial_reference, 1
+        self.firstPoint, self.lastPoint = pts[0], pts[-1]
+
+    def getPart(self, i):
+        return _Part(self.points)
 
 
 class _SrcCursor(_MemCursor):
@@ -156,6 +216,7 @@ class FakeParameter:
         self.value, self.filter = None, _Filter()
         self.controlCLSID = None
         self.hasBeenValidated = False
+        self.message, self.message_level = None, None
         self._deps = []
 
     @property
@@ -169,6 +230,15 @@ class FakeParameter:
         if not all(isinstance(d, str) for d in deps):
             raise ValueError(f"parameterDependencies must be parameter names, got {deps!r}")
         self._deps = list(deps)
+
+    def setErrorMessage(self, text):
+        self.message, self.message_level = text, "error"
+
+    def setWarningMessage(self, text):
+        self.message, self.message_level = text, "warning"
+
+    def clearMessage(self):
+        self.message, self.message_level = None, None
 
     @property
     def valueAsText(self):
@@ -192,9 +262,26 @@ def make_fake(layers=None, map_name="Map"):
     a.Point = lambda x, y: NS(X=x, Y=y)
     a.Array = lambda pts=None: list(pts or [])
     a.Polygon = FakePolygon
+    a.PointGeometry = FakePointGeometry
+    a.Polyline = FakePolyline
 
     a.sources = {}   # data source path -> {"fields": [(name, type)], "rows": [dict], "sr": NS(...)}
     a.env = NS(overwriteOutput=False, geographicTransformations=None)
+
+    a.log_history, a.log_metadata = True, True   # geoprocessing log settings (export disables, restores)
+    a.log_settings = []                          # ("history" | "metadata", value) per Set call
+    a.GetLogHistory = lambda: a.log_history
+    a.GetLogMetadata = lambda: a.log_metadata
+
+    def set_log_history(v):
+        a.log_settings.append(("history", v))
+        a.log_history = bool(v)
+
+    def set_log_metadata(v):
+        a.log_settings.append(("metadata", v))
+        a.log_metadata = bool(v)
+
+    a.SetLogHistory, a.SetLogMetadata = set_log_history, set_log_metadata
 
     def src_of(ds):
         return a.sources.get(getattr(ds, "dataSource", ds))
@@ -225,7 +312,7 @@ def make_fake(layers=None, map_name="Map"):
     a.cursor_calls = []
     a.memory = {}   # "memory\\name" -> {"fields": [(name, type)], "rows": [row], "sr": ..., "geom": ...}
     a.deleted = []
-    a.Exists = lambda p: p in a.memory
+    a.Exists = lambda p: p in a.memory or p in a.gdbs
     a.SpatialReference = lambda code: NS(factoryCode=code, name=f"EPSG:{code}")
     a.transformations = ["GDA_1994_To_GDA2020_1", "GDA_1994_To_GDA2020_NTv2_Conformal",
                          "GDA_1994_To_GDA2020_NTv2_Conformal_and_Distortion"]
@@ -288,14 +375,55 @@ def make_fake(layers=None, map_name="Map"):
               Editor=FakeEditor, InsertCursor=Insert)
     def create_fc(workspace, name, geometry_type="POLYLINE", template=None, has_m=None, has_z=None,
                   spatial_reference=None):
-        assert workspace == "memory", "fake arcpy: only the memory workspace is supported"
-        a.memory["memory\\" + name] = {"fields": [], "rows": [], "sr": spatial_reference, "geom": geometry_type}
+        key = "memory\\" + name if workspace == "memory" else os.path.join(workspace, name)
+        if workspace != "memory":
+            assert workspace in a.gdbs, f"fake arcpy: workspace {workspace!r} does not exist"
+        a.memory[key] = {"fields": [], "rows": [], "sr": spatial_reference, "geom": geometry_type}
 
     def add_field(table, name, ftype=None, *args, **kw):
         if table in a.memory:
+            low = name.lower()
+            if low in ("shape", "objectid", "shape_length", "shape_area") or \
+                    low in [f.lower() for f, _ in a.memory[table]["fields"]]:
+                raise RuntimeError(f"ERROR 000012: {name} already exists  Failed to execute (AddField)")
             a.memory[table]["fields"].append((name, ftype))
         else:
             a.added.append(("field", name))
+
+    a.addfields_calls = 0
+
+    def add_fields(table, desc, *args, **kw):
+        a.addfields_calls += 1
+        for ent in desc:
+            add_field(table, ent[0], ent[1])
+
+    a.dem_fn = lambda x, y: "NoData"
+    a.cell_calls = []
+
+    def get_cell(raster, xy):
+        x, y = (float(v) for v in xy.split())
+        a.cell_calls.append((raster, x, y))
+        return NS(getOutput=lambda i: a.dem_fn(x, y))
+
+    a.dem_numpy = True        # False: RasterToNumPyArray raises -> code must fall back to GetCellValue
+    a.array_calls = []
+
+    def raster_to_numpy(raster, lower_left=None, ncols=None, nrows=None, nodata_to_value=None):
+        if not a.dem_numpy:
+            raise RuntimeError("fake arcpy: RasterToNumPyArray unsupported for this source")
+        assert (ncols, nrows) == (1, 1)
+        a.array_calls.append((raster, lower_left.X, lower_left.Y))
+        txt = a.dem_fn(lower_left.X, lower_left.Y)
+        v = nodata_to_value if txt.lower() == "nodata" else float(txt.replace(",", "."))
+        return NS(flat=[v])
+
+    a.RasterToNumPyArray = raster_to_numpy
+
+    a.gdbs = set()
+
+    def create_gdb(folder, name):
+        assert os.path.isdir(folder), f"fake arcpy: folder {folder!r} does not exist"
+        a.gdbs.add(os.path.join(folder, name))
 
     def delete_fc(path):
         a.deleted.append(path)
@@ -305,9 +433,33 @@ def make_fake(layers=None, map_name="Map"):
         SelectLayerByAttribute=lambda lyr, mode, where="": a.selections.append((lyr.name, mode, where)),
         AddJoin=lambda *args: a.joins.append(args),
         CreateTable=lambda folder, name: a.added.append(("table", folder, name)),
-        AddField=add_field, Delete=delete_fc, CreateFeatureclass=create_fc)
+        AddField=add_field, AddFields=add_fields, GetCellValue=get_cell, Delete=delete_fc, CreateFeatureclass=create_fc, CreateFileGDB=create_gdb)
 
     layers = layers if layers is not None else []
+    tables = []                 # standalone (non-spatial) tables in the map
+    a.tables = tables
+    TABLE_NAMES = ("wwn_node_loads", "wwn_pumps")   # fallback when the file cannot be read
+
+    def _is_table(path):
+        """Like Pro: a GeoPackage 'attributes' table is added as a standalone table, 'features' as a layer."""
+        m = _SPLIT.match(path)
+        if m:
+            try:
+                con = sqlite3.connect(m.group(1))
+                try:
+                    row = con.execute("SELECT data_type FROM gpkg_contents WHERE table_name=?",
+                                      (m.group(2),)).fetchone()
+                finally:
+                    con.close()
+                if row:
+                    return row[0] == "attributes"
+            except sqlite3.Error:
+                pass
+        table = path.rsplit("main.", 1)[-1] if "main." in path else ""
+        return table in TABLE_NAMES
+
+    def _is(item, seq):
+        return any(item is x for x in seq)
 
     class Map:
         name = map_name
@@ -316,17 +468,29 @@ def make_fake(layers=None, map_name="Map"):
             return list(layers)
 
         def listTables(self):
-            return []
+            return list(tables)
 
         def addDataFromPath(self, path):
-            lyr = make_layer(os.path.basename(path), path)
             a.added.append(("data", path))
+            if _is_table(path):
+                tbl = make_layer(os.path.basename(path), path, feature=False)
+                tables.append(tbl)
+                return tbl
+            lyr = make_layer(os.path.basename(path), path)
             layers.append(lyr)
             return lyr
 
         def removeLayer(self, lyr):
+            if _is(lyr, tables):
+                raise ValueError("removeLayer: not a layer")
             layers.remove(lyr)
             a.removed.append(lyr.name)
+
+        def removeTable(self, tbl):
+            if not _is(tbl, tables):
+                raise ValueError("removeTable: not a table")
+            tables.pop(next(i for i, x in enumerate(tables) if x is tbl))
+            a.removed.append(tbl.name)
 
     m = Map()
     a.mp = NS(ArcGISProject=lambda _x: NS(activeMap=m, filePath="C:/p/test.aprx"))

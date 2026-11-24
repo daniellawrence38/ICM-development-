@@ -11,16 +11,57 @@ Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the 
 |---|---|
 | Import Diurnal Profile | (category Data) Imports a diurnal profile (CSV / TXT file or text pasted from ICM: `Time<TAB>Factor`; hh:mm or minutes; any interval) into a model, optionally as the default profile; warns if the mean is not 1 (tick *Normalise* to divide by the mean). Example: `templates/profiles/example_residential.csv` (APPROXIMATE, digitised from a screenshot) |
 | Import Sewer Data | (category Data) Converts Water Corporation gravity-sewer layers into a new WWNet GeoPackage, checks it and adds it to the map; see [Import Sewer Data](#import-sewer-data) |
+| Import Pressure Data | (category Data) Adds Water Corporation pump stations and pressure mains (rising mains) to an EXISTING model made by Import Sewer Data: chains main segments from each pump station, links wet wells and discharge nodes; see [Import Pressure Data](#import-pressure-data) |
+| Set Pump Station Data | (category Data) Enter a pump station's hydraulics from its data sheet (the GIS does not hold them): wet well diameter or area, stop / start / overflow levels (AHD, or depth above the wet well invert), emergency storage, duty / assist / standby pump counts (1/0/0), duty rate L/s, pump curve pasted as text (flow and head per line, e.g. from Excel or ICM; column order flow,head or head,flow; flow units L/s, m3/h or m3/s), speed %, source note (e.g. `Data sheet PS4 rev C`) and *Replace existing pumps*. Choosing a station fills the other parameters from the model; a curve mistake (non-numeric, head not falling, fewer than 2 points) is shown as an error on the curve box before running. Data errors print as `ERROR: ...` warnings (the tool is not failed); a GeoPackage locked by Pro asks you to close attribute tables / remove the layers. Prints the summary and one line per station naming data still missing (Check Model prints the same lines) |
 | New Model | Creates a GeoPackage from `schema.sql` (sqlite3, schema v2) and adds the layers to the active map in a `WWNet` group layer |
 | Add Model To Map | Adds the `wwn_*` layers (`<file>.gpkg\main.<table>`) of an existing model and applies symbology: nodes by `node_type`, conduits by DN with an Arcade label `DN225 1:300`. Symbology failures only warn |
 | Check Model | `wwnet_native.check` (same output as `wwnet check --json`); messages via AddMessage/AddWarning/AddError; optional output issues table |
+| Join Dangling Sewer Ends | (category Model) Repairs dangling downstream ends (junction / inspection shaft / inspection opening nodes with an incoming sewer and no outgoing one, which ICM and SWMM treat wrongly): joins each to the nearest sewer within the maximum distance (5 m), splitting it at a new tee node; *Preview only* (default on) just lists what would change; see [Join Dangling Sewer Ends](#join-dangling-sewer-ends) |
 | Run Design | `wwnet_native.design` (same output as `wwnet design --json`); prints the pass/warn/fail summary, a per-conduit table (DN, grade, GSDF / pumped / total / governing capacity (Cap = lesser of Table 4.4 and hydraulic) / T4.4 / Hyd L/s, d/D, velocity, result, worst message) and failing/warning checks with DS 50 clauses (max 5 per rule; info such as "cover not checked" is summarised in one line). By default adds a temporary in-memory layer `Design results — <model>` (polylines coloured pass/warn/fail, labelled with flow/capacity and d/D) to the active map and selects failed conduits on it and on the model's conduit layer. The layer lives in `memory\` and is not saved: re-run Run Design after restarting Pro. "Add results table to map" (off by default) also adds the standalone `wwn_results_conduits` table |
 | Trace | Upstream / downstream from a node (value list filled from the Nodes layer); selects traced nodes and conduits |
-| Run Simulation | `wwnet_native.simulate` (SWMM dynamic wave; needs a wheel built with the simulation service, else the `wwnet simulate` CLI fallback). Parameters: duration h (48), warm-up h (24), roughness manning/ks, Manning n (0.013), flow scale (1.0), show results layer, optional `.inp` export. Messages: summary (inflow ADWF, peak outlet flow, continuity error, surcharged / flooded counts), top-20 conduits by max d/D, warnings. Adds the temporary layer `Simulation results — <model>` (conduits green < 0.5, yellow 0.5-0.75, orange 0.75-1.0 d/D, red surcharged; labelled `<flow> L/s d/D <x>`; fields `max_flow_lps`, `max_d_over_d`, `max_velocity_mps`, `surcharged_min`) and, only if a node floods, `Simulation nodes — <model>` (red points). Full results are stored in the model's `wwn_sim_*` tables |
+| Run Simulation | `wwnet_native.simulate` (SWMM dynamic wave; needs a wheel built with the simulation service, else the `wwnet simulate` CLI fallback). Parameters: duration h (48), warm-up h (24), roughness manning/ks, Manning n (0.013), flow scale (1.0), show results layer, optional `.inp` export. Messages: summary (inflow ADWF, peak outlet flow, continuity error, surcharged / flooded counts), top-20 conduits by max d/D, warnings. Adds the temporary layer `Simulation results — <model>` (conduits green < 0.5, yellow 0.5-0.75, orange 0.75-1.0 d/D, red surcharged; labelled `<flow> L/s d/D <x>`; fields `max_flow_lps`, `max_d_over_d`, `max_velocity_mps`, `surcharged_min`) and, only if a node floods, `Simulation nodes — <model>` (red points). Full results are stored in the model's `wwn_sim_*` tables. With pump stations in the model it also prints, after the conduit table, **Pump stations** (max level, start / stop / overflow levels m AHD, overflow m3, time of max), **Pumps** (starts, starts/h, run %, Qmax) and **Rising mains** (ID mm, length, Qmax, vmax) tables and warns for: wet well overflow > 0; a pump above 10 starts/h (`MAX_STARTS_PER_HOUR`; the right limit depends on motor size, check the station's spec); rising main peak velocity below 0.7 m/s (`MIN_RM_VELOCITY`, sediment) or above 2.0 m/s (`MAX_RM_VELOCITY`, headloss / surge). The thresholds are constants at the top of `tools_impl.py` and are printed with the tables. The temporary layer `Simulation pump stations — <model>` (points; fields `ps_id`, `max_level_m`, `overflow_m3`, `starts_per_hour` and `run_time_pct` = worst pump, `rm_max_velocity_mps`, `flag`; red if flagged, green if `ok`) is added when the run has pump stations and replaced on re-run. Results are also in `wwn_sim_pumps`, `wwn_sim_pump_stations`, `wwn_sim_rising_mains` |
 | Pipe Capacity | Colebrook-White calculator (DN, grade, ks, flow) + DS 50 checks; uses `wwnet_native` if importable, else the shared Python fallback |
+| Export To ICM | (category Data) Writes the model's nodes, gravity sewers, **rising mains and pumps** with InfoWorks ICM field names to `<model>_ICM.gdb` (`ICM_Nodes`, `ICM_Conduits`, `ICM_Pumps`; keeps blanks and vertices) plus `<model>_ICM_nodes.csv` (x / y) / `_conduits.csv` / `_pumps.csv` / `_head_discharge.csv` and `<model>_ICM_import_notes.txt` (Open Data Import Centre field mapping; import nodes, then conduits, then pumps). Output in GDA2020 or GDA94 MGA 50. Node types: chambers → Manhole, tees / IS ends → Break, outfall → Outfall; chamber/shaft area from `chamber_diameter_mm`; chamber floor falls back to the lowest connected invert. Conduits: unique single-character `link_suffix` per US node (shared with pumps), CIRC, width = height = internal diameter (else DN), Colebrook-White ks (default 1.0 mm), `solution_model` = Full. **Pressure side** (same network as Run Simulation): wet well (Manhole, chamber/shaft area = station wet well area, default 7.07 m²) → pumps (`Rotpmp` with a head-discharge table `HD_<pump_id>` from the curve, else `Fixpmp` at the station rate; switch on/off = start/stop levels, defaults floor + 1.0 / + 0.3 m; assist +0.2 / +0.1 m; standby not exported) → `<ps_id>_DEL` delivery node (Break, flood type Sealed, at the wet well floor) → rising main conduit (`solution_model` = ForceMain, wet well floor → discharge chamber floor, CW ks default 1.5 mm or Hazen-Williams C as `HW`) → discharge node (Outfall if nothing is downstream of it). `wwn_link_kind` = gravity / rising_main. Optional DEM parameter fills blank ground levels (`GetCellValue`, no Spatial Analyst; `wwn_ground_source` = `model` / `DEM` / `wet well`; warns if the DEM ground is < 0.3 m above the chamber floor). A timing line is logged. Abandoned conduits / rising mains and sub-catchments are not exported |
 | Set Assistant API Key | Stores the Anthropic key (`GPEncryptedString`) with Windows DPAPI; default model / effort; optional fallback CLI path |
 | Verify Setup | Prints where `wwnet_native` / `anthropic` / dependencies are loaded from and whether they import; optional live API test (tiny request, key never shown) |
+| Self Test | (category Assistant) Runs every tool against the bundled demo model in a scratch folder (optionally also the map steps) and writes one report file to paste back |
+| Update WWNet | (category Assistant) Applies a downloaded update zip (CI artifact `wwnet-arcgis-update`) to the installed toolbox: no extracting, no Unblock, no restart for Python changes; locked native files are staged and swapped in at the next Pro start. Backs up changed files to `.update_backup/` |
 | Ask WWNet Assistant | DS 50 assistant with tools `list_layers`, `get_selected_features`, `query_features`, `get_feature`, `pipe_capacity`, `check_conduit`, `residential_gsdf`, `lookup_ds50`, `propose_edits` |
+
+## Import Pressure Data
+
+Adds the Water Corporation (WA) layers *Sewer Pump Station* (points) and *Sewer Pressure Main* (polylines, segmented) to an
+**existing** WWNet GeoPackage (run Import Sewer Data first). Logic: `wwnet_arcgis/pressure_import.py`; field defaults in the
+`[pressure]` section of `templates/import/watercorp_sewer.toml` (materials reuse `[codes.material]`).
+
+**Parameters**: model `.gpkg`, pump stations, pressure mains, *Use selected features only* (on; a layer with nothing
+selected is read by spatial filter on the model extent, never in full), search distance pump station -> main end / gravity
+terminal node (30 m), snap tolerance between main segments (1 m), discharge search distance main end -> gravity node (10 m),
+*Include not-in-use* (off; only STATUS `A` is imported, `N` too when ticked, never `R` / others), *Add / refresh layers on map*,
+then one **Field** parameter per role (ps id / fallback id / names / status; main id / status / diameter / internal diameter /
+material / length / name).
+
+**Rules**
+- `ps_id` = `SAP_ID`, else the integer `ID`. A pump station is imported even when no main is found (warning).
+- Segments are chained by an endpoint graph (ends within the snap tolerance are one point). A rising main starts at a
+  segment end within the search distance of a pump station (dead ends preferred; an end belongs to its nearest station) and
+  continues through degree-2 joins to a dead end or a junction (3 or more segments: the chain stops and warns). It is oriented
+  from the pump station end; `rm_id` = `RM_<ps_id>` (`_2`, `_3` for more mains), `dn` = most common valid DIAMETER (warns if
+  they differ), `internal_diameter_mm` = INDIAM1, `length_m` = sum of LENGTH (geometry length where LENGTH is 0 / unknown),
+  `roughness_type` `ks` with NULL roughness (engine default).
+- The mains' UPSTREAM / DOWNSTREAM levels are **not used** (unreliable): `profile_json` stays NULL.
+- Discharge: nearest existing node within the discharge distance of the main's far end, else a new `junction` node
+  `D_<rm_id>` (warning: not connected to the gravity model).
+- Wet well: the nearest gravity terminal node (no outgoing conduit) within the search distance becomes `wet_well`
+  (`wet_well_node_id`); otherwise a `wet_well` node `WW_<ps_id>` is created at the station (no levels, warning).
+- Sentinels (-99.9 levels, -9996 / -9998, zero diameters / lengths) are treated as NULL. Re-running replaces the
+  rows and tool-created nodes of the same `ps_id`s; hydraulic values and `wwn_pumps` rows already entered are kept.
+
+**Pump hydraulics are not in the GIS.** After the import fill in, per pump station, in the `wwn_pump_stations` attribute table
+`wet_well_area_m2`, `start_level`, `stop_level` and `pump_rate_lps` (and optionally `overflow_level`, `emergency_storage_m3`),
+or add `wwn_pumps` rows (`pump_id`, `ps_id`, `role` duty / assist / standby, `curve_json` `[[q_lps, head_m], ...]`). The tool
+lists the stations still missing them. The layers `wwn_pump_stations`, `wwn_rising_mains` and the `wwn_pumps` table are added
+to the map (Add Model To Map also shows `wwn_pumps`).
 
 ## Import Sewer Data
 
@@ -73,7 +114,7 @@ its fields with the Water Corporation names that exist in it; change any of them
   "split at tee for <branch>"; lengths are split by chainage and inverts interpolated linearly along the oriented
   main; a junction node `T<n>` ("tee (mid-line junction)", invert = interpolated main invert) is created and the
   branch end attaches to it (warning `tee_joined`; `tee_adverse` when the branch ds invert is >0.01 m below the
-  main's invert). Points within the snap tolerance of the main's own ends are endpoint cases, not tees. Any other
+  main's invert). Points within the snap tolerance of the main's own ends are endpoint cases, not tees. Any other The tolerance is the *Tee join distance (m)* parameter (Advanced, last). Lone ends within 5 m of another sewer's mid-line but beyond it are listed in the report as `possible missed tee` (fix with Join Dangling Sewer Ends).
   lone end becomes a dangling end node `E<n>`. No per-sewer placeholders are created.
 - Direction: for each (US id, DS id) run the chain of segments is oriented from the end at the US chamber (or the
   DS chamber) through the shared junctions; leftovers take the direction of already oriented neighbours, else the
@@ -126,6 +167,34 @@ its fields with the Water Corporation names that exist in it; change any of them
   `ERROR:`; `AddError` is only for real failures (exceptions). The same applies to Check Model.
 - After writing, `wwnet_native.check` runs; counts and the first 50 issues are printed, then the layers are added.
 
+## Join Dangling Sewer Ends
+
+The importer joins a lone sewer end to another sewer's mid-line only within its *Tee join distance* (0.5 m). A sewer end a
+little further away stays a dangling node (`junction` / `is_end` / `io_end` that receives a sewer and has no outgoing one),
+which InfoWorks ICM and the SWMM engine treat wrongly. Import Sewer Data now lists these near misses in its report
+(`possible missed tee: E4 1.3 m from P123 ...`) and takes an *Advanced* parameter **Tee join distance (m)** (last
+parameter; default 0.5). This tool repairs an existing model without re-importing. Logic: `wwnet_shared/core/repair.py`
+(sqlite3 only, shared with QGIS); the tool body is `tools_impl.join_dangling_ends`.
+
+**Parameters**: model `.gpkg`, *Maximum join distance (m)* (5), *Preview only* (on: first run prints the table, nothing is
+changed). Close attribute tables and remove the model's layers from the map before applying (a locked file gives a clear
+message); afterwards re-add the layers and re-run Check Model / Export To ICM.
+
+**Rules**
+- Dangling node: >= 1 incoming non-abandoned sewer, none outgoing, `node_type` junction / is_end / io_end. Real terminal
+  chambers (ac, ms, drop_ac, outfall, wet_well) are never touched.
+- Main: nearest other sewer (not touching the node) by perpendicular distance to its polyline, within the maximum
+  distance. Beyond it the node is listed as not joined with the nearest sewer and its distance.
+- Projection within 0.5 m of an end node of the main: the branch is re-pointed to that node (no split).
+- Otherwise the main is split at the projected point (chainage measured from its upstream node, whichever way it is
+  digitised). Tee node `T_<node>` (junction, status / data source of the main): invert = us invert - fall x chainage / length,
+  surface level interpolated when both ends have one. The upstream piece keeps the sewer id, the new downstream piece is
+  `<id>~t` (geometry cut, lengths split in proportion, all other attributes copied, notes `split at tee for <branch>`).
+- Branch sewers are re-pointed to the tee and their end vertex moved onto it (`length_m` grows by the gap when set). The
+  branch invert is kept; one arriving below the main invert is warned (`check levels`). The dangling node is deleted once
+  nothing refers to it (loads / pump station links are moved to the tee).
+- One transaction; rolled back on any error. A GeoPackage with R-tree spatial index tables is refused.
+
 ## Install
 
 ### Recommended: the no-install bundle (no pip, no environment clone, no `.exe`)
@@ -155,6 +224,17 @@ skips those four if still present).
 Behind a TLS-inspecting proxy the assistant trusts the Windows certificate store (httpx2 uses `truststore` on
 Windows; for older SDKs the toolbox calls `truststore.inject_into_ssl()` only during an assistant run). If
 `SSL_CERT_FILE` / `SSL_CERT_DIR` is set, httpx2 uses that instead.
+
+### Quick updates (no restart)
+1. Download the artifact `wwnet-arcgis-update` from the latest green CI run (leave it as a `.zip`; do not extract it
+   and no Windows *Unblock* is needed).
+2. In ArcGIS Pro run **Update WWNet** and pick the downloaded zip. Changed files are written in place (old copies go
+   to `.update_backup/<timestamp>/`); the new Python code is used from the next tool run, no restart. After an update, run Self Test and paste the report.
+3. If the tool says `WWNet.pyt` changed, right-click the toolbox in the Catalog pane > Refresh.
+
+When the native module (`wwnet_native`) changes you still need the full bundle `wwnet-arcgis-bundle-win-py311`
+once; Update WWNet stages a locked native file as `*.pending` and swaps it in the next time Pro starts (restart
+Pro once).
 
 ### Alternative: clone Pro's environment and pip install (if you may)
 1. Extract `wwnet-arcgis-<ver>.zip` (build it with `python package.py`, or use the repo checkout directly) and add

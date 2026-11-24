@@ -9,7 +9,9 @@ Layout inside the zip (extract anywhere, then add WWNet.pyt as a toolbox in Pro)
     WWNet-ArcGIS/templates/schema.sql
     WWNet-ArcGIS/templates/import/*.toml       import templates (Import Sewer Data)
     WWNet-ArcGIS/templates/profiles/*.csv      example diurnal profile (APPROXIMATE)
+    WWNet-ArcGIS/templates/demo/demo.gpkg      demo model used by the Self Test tool
     WWNet-ArcGIS/rulesets/*.toml
+    WWNet-ArcGIS/bin/wwnet.exe                only with --cli <path>
     WWNet-ArcGIS/vendor/...                   only with --vendor-dir <path> (no-install bundle: anthropic,
                                               pydantic, httpx2, jiter, truststore, typing_extensions,
                                               wwnet_native ...; wwnet_arcgis/vendor.py puts it first on sys.path)
@@ -19,12 +21,20 @@ Layout inside the zip (extract anywhere, then add WWNet.pyt as a toolbox in Pro)
 (for Pro's Python: 3.11 win_amd64). anyio*, sniffio*, idna* and certifi* are never copied, even if present:
 Pro's own versions must stay in use (see wwnet_arcgis/vendor.py).
 
-Usage: python package.py [--vendor-dir vendor] [--out dist]
+Usage: python package.py [--cli path/to/wwnet.exe] [--vendor-dir vendor] [--out dist]
+                         [--python-only] [--unzipped DIR]
+
+--python-only   pure-Python update bundle: the same tree minus bin/ and vendor/ (--cli and --vendor-dir are
+                ignored with a warning). Written as dist/wwnet-arcgis-update-<version>.zip. This is what the
+                toolbox's "Update WWNet" tool consumes.
+--unzipped DIR  also writes the same tree on disk to DIR/WWNet-ArcGIS/... (CI uploads this folder so the
+                artifact zip is the only zip layer). The zip in --out is still written.
 """
 from __future__ import annotations
 
 import argparse
 import re
+import shutil
 import sys
 import zipfile
 from pathlib import Path
@@ -65,8 +75,11 @@ def vendor_files(vendor_dir: Path) -> dict:
     return out
 
 
-def collect(vendor_dir: Path | None = None) -> dict:
-    """Return {archive path inside TOP: bytes or Path}."""
+def collect(cli: Path | None = None, vendor_dir: Path | None = None, python_only: bool = False) -> dict:
+    """Return {archive path inside TOP: bytes or Path}. Shared by the zip and unzipped writers.
+
+    python_only drops bin/ and vendor/ regardless of cli / vendor_dir.
+    """
     files: dict = {}
     files["WWNet.pyt"] = HERE / "WWNet.pyt"
     files["README.md"] = HERE / "README.md"
@@ -82,29 +95,63 @@ def collect(vendor_dir: Path | None = None) -> dict:
         files[f"templates/import/{p.name}"] = p
     for p in sorted((REPO / "templates" / "profiles").glob("*.*")):
         files[f"templates/profiles/{p.name}"] = p
+    files["templates/demo/demo.gpkg"] = REPO / "examples" / "demo" / "demo.gpkg"
     for p in sorted((REPO / "rulesets").glob("*.toml")):
         files[f"rulesets/{p.name}"] = p
-    if vendor_dir:
-        files.update(vendor_files(vendor_dir))
+    if not python_only:
+        if cli:
+            files[f"bin/{cli.name}"] = cli
+        if vendor_dir:
+            files.update(vendor_files(vendor_dir))
     return files
 
 
-def build(out_dir: Path | None = None, vendor_dir: Path | None = None) -> Path:
+def _data(src) -> bytes:
+    return src if isinstance(src, bytes) else Path(src).read_bytes()
+
+
+def build(out_dir: Path | None = None, cli: Path | None = None, vendor_dir: Path | None = None,
+          python_only: bool = False) -> Path:
     out_dir = out_dir or HERE / "dist"
     out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"wwnet-arcgis-{version()}.zip"
+    kind = "wwnet-arcgis-update" if python_only else "wwnet-arcgis"
+    out = out_dir / f"{kind}-{version()}.zip"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-        for arc, src in collect(vendor_dir).items():
-            data = src if isinstance(src, bytes) else Path(src).read_bytes()
-            z.writestr(f"{TOP}/{arc}", data)
+        for arc, src in collect(cli, vendor_dir, python_only).items():
+            z.writestr(f"{TOP}/{arc}", _data(src))
     return out
+
+
+def write_unzipped(dest: Path, cli: Path | None = None, vendor_dir: Path | None = None,
+                   python_only: bool = False) -> Path:
+    """Write the same tree as build() to dest/TOP/... on disk. Replaces any previous dest/TOP folder."""
+    root = dest / TOP
+    if root.exists():
+        shutil.rmtree(root)
+    for arc, src in collect(cli, vendor_dir, python_only).items():
+        target = root / arc
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_data(src))
+    return root
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
+    ap.add_argument("--cli", type=Path, help="wwnet.exe to bundle under bin/")
     ap.add_argument("--vendor-dir", type=Path, help="prepared vendor folder to copy to vendor/")
     ap.add_argument("--out", type=Path)
+    ap.add_argument("--python-only", action="store_true",
+                    help="pure-Python update bundle (no bin/ or vendor/); writes wwnet-arcgis-update-<version>.zip")
+    ap.add_argument("--unzipped", type=Path, metavar="DIR",
+                    help="also write the same tree on disk under DIR/WWNet-ArcGIS/")
     a = ap.parse_args()
+    if a.python_only and (a.cli or a.vendor_dir):
+        print("warning: --python-only ignores --cli and --vendor-dir", file=sys.stderr)
+        a.cli = a.vendor_dir = None
+    if a.cli and not a.cli.is_file():
+        sys.exit(f"--cli {a.cli} not found")
     if a.vendor_dir and not a.vendor_dir.is_dir():
         sys.exit(f"--vendor-dir {a.vendor_dir} not found")
-    print(f"wrote {build(a.out, a.vendor_dir)}")
+    if a.unzipped:
+        print(f"wrote {write_unzipped(a.unzipped, a.cli, a.vendor_dir, a.python_only)}")
+    print(f"wrote {build(a.out, a.cli, a.vendor_dir, a.python_only)}")
