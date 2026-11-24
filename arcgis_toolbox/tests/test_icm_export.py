@@ -300,6 +300,9 @@ def test_rising_main_exported_as_force_main_conduit(demo_gpkg):
     rm = next(c for c in d["conduits"] if c["wwn_conduit_id"] == "RM1")
     assert (rm["us_node_id"], rm["link_suffix"], rm["ds_node_id"]) == ("PS1_DEL", "1", "D")
     assert rm["solution_model"] == "ForceMain" and rm["wwn_link_kind"] == "rising_main"
+    assert rm["us_headloss_type"] == rm["ds_headloss_type"] == "None"     # ICM E2075 with ForceMain
+    assert all(c["us_headloss_type"] == c["ds_headloss_type"] == "Normal"
+               for c in d["conduits"] if c["wwn_link_kind"] == "gravity")
     assert (rm["us_invert"], rm["ds_invert"]) == (22.2, 25.0)          # wet well floor -> discharge floor
     assert rm["conduit_width"] == rm["conduit_height"] == 150 and rm["conduit_length"] == 200.0
     assert rm["roughness_type"] == "CW" and rm["bottom_roughness_CW"] == rm["top_roughness_CW"] == 1.0

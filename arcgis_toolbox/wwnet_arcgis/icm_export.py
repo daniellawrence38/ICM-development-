@@ -35,6 +35,8 @@ MIN_STOP_ABOVE_FLOOR_M = 0.05
 ASSIST_START_OFFSET_M = 0.2
 ASSIST_STOP_OFFSET_M = 0.1
 RM_SOLUTION_MODEL = "ForceMain"     # ICM solution model of a rising main (recommended over "Pressure")
+RM_HEADLOSS_TYPE = "None"           # ICM E2075: Normal / High headloss not allowed with ForceMain
+GRAVITY_HEADLOSS_TYPE = "Normal"    # ICM default for conduits
 DELIVERY_SUFFIX = "_DEL"            # pump delivery node id = <ps_id>_DEL
 DELIVERY_OFFSET_M = 1.0             # delivery node moved this far east when it would sit on the wet well
 
@@ -53,7 +55,8 @@ NODE_FIELDS = [("node_id", "TEXT"), ("node_type", "TEXT"), ("ground_level", "DOU
 CONDUIT_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "TEXT"),
                   ("us_invert", "DOUBLE"), ("ds_invert", "DOUBLE"), ("conduit_length", "DOUBLE"),
                   ("conduit_shape", "TEXT"), ("conduit_width", "DOUBLE"), ("conduit_height", "DOUBLE"),
-                  ("solution_model", "TEXT"), ("roughness_type", "TEXT"), ("bottom_roughness_CW", "DOUBLE"),
+                  ("solution_model", "TEXT"), ("us_headloss_type", "TEXT"), ("ds_headloss_type", "TEXT"),
+                  ("roughness_type", "TEXT"), ("bottom_roughness_CW", "DOUBLE"),
                   ("top_roughness_CW", "DOUBLE"), ("bottom_roughness_HW", "DOUBLE"), ("top_roughness_HW", "DOUBLE"),
                   ("material", "TEXT"), ("wwn_conduit_id", "TEXT"), ("wwn_link_kind", "TEXT"),
                   ("asset_id", "TEXT"), ("status", "TEXT"), ("notes", "TEXT")]
@@ -234,7 +237,8 @@ def build(gpkg_path: str) -> dict:
             "us_node_id": c["us_node_id"], "link_suffix": suffix, "ds_node_id": c["ds_node_id"],
             "us_invert": _r(c["us_invert"]), "ds_invert": _r(c["ds_invert"]), "conduit_length": _r(length, 2),
             "conduit_shape": "CIRC", "conduit_width": _r(dia, 1), "conduit_height": _r(dia, 1),
-            "solution_model": "Full", "roughness_type": "CW", "bottom_roughness_CW": ks, "top_roughness_CW": ks,
+            "solution_model": "Full", "us_headloss_type": GRAVITY_HEADLOSS_TYPE,
+            "ds_headloss_type": GRAVITY_HEADLOSS_TYPE, "roughness_type": "CW", "bottom_roughness_CW": ks, "top_roughness_CW": ks,
             "bottom_roughness_HW": None, "top_roughness_HW": None,
             "material": (c["material"] or "").upper() or None, "wwn_conduit_id": c["conduit_id"],
             "wwn_link_kind": "gravity", "asset_id": c["asset_id"], "status": c["status"], "notes": c["notes"]})
@@ -419,7 +423,8 @@ def _pressure(out_nodes: list, stations: list, mains: list, pumps: list, next_su
             "us_node_id": us["node_id"], "link_suffix": next_suffix(us["node_id"]), "ds_node_id": ds,
             "us_invert": _r(us_inv), "ds_invert": _r(ds_inv), "conduit_length": _r(length, 2),
             "conduit_shape": "CIRC", "conduit_width": _r(dia, 1), "conduit_height": _r(dia, 1),
-            "solution_model": RM_SOLUTION_MODEL, "roughness_type": rt, "bottom_roughness_CW": cw,
+            "solution_model": RM_SOLUTION_MODEL, "us_headloss_type": RM_HEADLOSS_TYPE,
+            "ds_headloss_type": RM_HEADLOSS_TYPE, "roughness_type": rt, "bottom_roughness_CW": cw,
             "top_roughness_CW": cw, "bottom_roughness_HW": hw, "top_roughness_HW": hw,
             "material": (rm["material"] or "").upper() or None, "wwn_conduit_id": rid,
             "wwn_link_kind": "rising_main", "asset_id": None, "status": rm["status"], "notes": rm["notes"],
@@ -599,6 +604,8 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
         "  conduit_shape = CIRC -> Shape | conduit_width / conduit_height -> Width / Height (mm; internal diameter, else DN)",
         f"  solution_model -> Solution model (Full for gravity sewers, {RM_SOLUTION_MODEL} for rising mains).",
         "    MAP THIS FIELD: without it the rising mains import as Full (gravity) conduits",
+        f"  us_headloss_type / ds_headloss_type -> US / DS headloss type (Normal for gravity sewers, {RM_HEADLOSS_TYPE}",
+        "    for rising mains: ICM error E2075 'Normal or high headlosses are not allowed for ForceMain')",
         "  roughness_type = CW or HW | bottom/top_roughness_CW -> Colebrook-White ks (mm) |",
         "    bottom/top_roughness_HW -> Hazen-Williams C (rising mains with a C value)",
         "  wwn_conduit_id / asset_id -> a user text field or Asset ID (optional)",
