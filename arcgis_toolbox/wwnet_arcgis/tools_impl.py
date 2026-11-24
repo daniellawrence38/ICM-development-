@@ -996,7 +996,8 @@ def ask_assistant(arcpy, msgs: Messages, question: str, layer_name: str | None =
 
 def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
                out_sr_label: str = "GDA2020 / MGA zone 50 (EPSG:7850)", dem: str | None = None) -> dict:
-    """Write <stem>_ICM.gdb (ICM_Nodes, ICM_Conduits), two CSVs and an import-notes file to out_folder."""
+    """Write <stem>_ICM.gdb (ICM_Nodes, ICM_Conduits incl. rising mains, ICM_Pumps when there are pumps),
+    the same tables as CSV (+ pump head-discharge tables) and an import-notes file to out_folder."""
     import time
     from . import icm_export, sewer_import
     t0 = t = time.perf_counter()
@@ -1018,7 +1019,7 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
     if dem:
         filled, nodata = icm_export.fill_ground_from_dem(arcpy, msgs, data["nodes"],
                                                          gpkg.table_path(gpkg_path, "wwn_nodes"), dem)
-        blank = [n["node_id"] for n in data["nodes"] if n["ground_level"] is None]
+        blank = [n["node_id"] for n in data["nodes"] if n["ground_level"] is None and not n.get("_extra")]
         data["warnings"] = [w for w in data["warnings"] if "node(s) have no surface level" not in w]
         if filled or blank:
             data["warnings"].append(
@@ -1038,7 +1039,8 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
             msgs.info(f"Projecting GDA2020 -> GDA94 with {name}.")
         else:
             msgs.warn("No GDA94 <-> GDA2020 transformation is listed by ArcGIS; coordinates may be ~1.5 m out.")
-    node_tm, conduit_tm, gdb_s = {}, {}, 0.0
+    node_tm, conduit_tm, pump_tm, gdb_s = {}, {}, {}, 0.0
+    pumps_csv = hd_csv = None
     with gpenv.quiet(arcpy):
         stem = icm_export.safe_stem(gpkg_path)
         gdb = os.path.join(out_folder, f"{stem}_ICM.gdb")
@@ -1047,28 +1049,51 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
             arcpy.management.CreateFileGDB(out_folder, f"{stem}_ICM.gdb")
             gdb_s = time.perf_counter() - t_gdb
         else:
-            msgs.info(f"Replacing ICM_Nodes / ICM_Conduits in the existing {gdb}")
+            msgs.info(f"Replacing the ICM tables in the existing {gdb}")
+        geo = icm_export.read_pressure_geometry(arcpy, gpkg_path, data, sr) \
+            if any(r.get("_extra") for r in data["nodes"] + data["conduits"]) else {"ps": {}, "rm": {}}
         xy = icm_export.write_gdb(arcpy, gdb, "ICM_Nodes", "POINT", icm_export.NODE_FIELDS, data["nodes"],
                                   "node_id", gpkg.table_path(gpkg_path, "wwn_nodes"), "node_id", sr,
-                                  timings=node_tm)
+                                  timings=node_tm, extra_geom=icm_export.node_geometry_fn(arcpy, sr, geo))
         lap("nodes")
+        link_geom = icm_export.link_geometry_fn(arcpy, sr, geo, xy)
         icm_export.write_gdb(arcpy, gdb, "ICM_Conduits", "POLYLINE", icm_export.CONDUIT_FIELDS, data["conduits"],
                              "wwn_conduit_id", gpkg.table_path(gpkg_path, "wwn_conduits"), "conduit_id", sr,
-                             timings=conduit_tm)
+                             timings=conduit_tm, extra_geom=link_geom)
         lap("conduits")
+        pumps_fc = os.path.join(gdb, "ICM_Pumps")
+        if data["pumps"]:
+            icm_export.write_gdb(arcpy, gdb, "ICM_Pumps", "POLYLINE", icm_export.PUMP_FIELDS, data["pumps"],
+                                 "wwn_pump_id", None, None, sr, timings=pump_tm, extra_geom=link_geom)
+            lap("pumps")
+        elif arcpy.Exists(pumps_fc):            # stale table from an earlier export of this model
+            arcpy.management.Delete(pumps_fc)
         nodes_csv = os.path.join(out_folder, f"{stem}_ICM_nodes.csv")
         conduits_csv = os.path.join(out_folder, f"{stem}_ICM_conduits.csv")
         icm_export.write_csv(nodes_csv, icm_export.NODE_FIELDS, data["nodes"], xy=xy)
         icm_export.write_csv(conduits_csv, icm_export.CONDUIT_FIELDS, data["conduits"])
+        for name in ("pumps", "head_discharge"):
+            path = os.path.join(out_folder, f"{stem}_ICM_{name}.csv")
+            if data[name]:
+                fields = icm_export.PUMP_FIELDS if name == "pumps" else icm_export.HEAD_DISCHARGE_FIELDS
+                icm_export.write_csv(path, fields, data[name])
+                if name == "pumps":
+                    pumps_csv = path
+                else:
+                    hd_csv = path
+            elif os.path.isfile(path):
+                os.remove(path)
         notes = os.path.join(out_folder, f"{stem}_ICM_import_notes.txt")
         with open(notes, "w", encoding="utf-8") as fh:
-            fh.write(icm_export.notes_text(gpkg_path, out_sr_label, gdb, nodes_csv, conduits_csv, data["warnings"]))
-        msgs.info(f"Exported {len(data['nodes'])} node(s) and {len(data['conduits'])} conduit(s) "
-                  f"in {out_sr_label}.")
+            fh.write(icm_export.notes_text(gpkg_path, out_sr_label, gdb, nodes_csv, conduits_csv, data["warnings"],
+                                           pumps_csv=pumps_csv, hd_csv=hd_csv, head_discharge=data["head_discharge"]))
+        k = data["counts"]
+        msgs.info(f"Exported {k['nodes']} node(s), {k['conduits']} gravity sewer(s), {k['rising_mains']} rising "
+                  f"main(s) and {k['pumps']} pump(s) in {out_sr_label}.")
         for w in data["warnings"]:
             msgs.warn(w)
         msgs.info(f"Geodatabase: {gdb}")
-        msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}")
+        msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}" + "".join(f" ; {x}" for x in (pumps_csv, hd_csv) if x))
         msgs.info(f"Import notes (field mapping for ICM's Open Data Import Centre): {notes}")
         lap("CSV/notes")
     msgs.info("Timing: " + ", ".join(f"{k} {v:.1f} s" for k, v in tm.items())
@@ -1077,4 +1102,7 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
     msgs.info("Timing ICM_Nodes: " + ", ".join([f"create gdb {gdb_s:.1f} s"]
                                               + [f"{k} {node_tm.get(k, 0.0):.1f} s" for k in tkeys]))
     msgs.info("Timing ICM_Conduits: " + ", ".join(f"{k} {conduit_tm.get(k, 0.0):.1f} s" for k in tkeys))
-    return {"gdb": gdb, "nodes_csv": nodes_csv, "conduits_csv": conduits_csv, "notes": notes, **data}
+    if pump_tm:
+        msgs.info("Timing ICM_Pumps: " + ", ".join(f"{k} {pump_tm.get(k, 0.0):.1f} s" for k in tkeys))
+    return {"gdb": gdb, "nodes_csv": nodes_csv, "conduits_csv": conduits_csv, "pumps_csv": pumps_csv,
+            "head_discharge_csv": hd_csv, "notes": notes, **data}

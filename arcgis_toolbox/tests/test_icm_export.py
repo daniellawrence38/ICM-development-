@@ -264,5 +264,202 @@ def test_terminal_wet_well_stays_manhole(demo_gpkg, how):
     d = icm_export.build(demo_gpkg)
     out1 = next(n for n in d["nodes"] if n["node_id"] == "OUT1")
     assert out1["node_type"] == "Manhole" and out1["wwn_outfall_reason"] == ""
-    assert "OUT1: wet well exported as Manhole (pumps not exported to ICM yet)" in d["warnings"]
+    assert any(w.startswith("OUT1: wet well exported as Manhole with no pump out of it") for w in d["warnings"])
     assert not any("terminal node" in w for w in d["warnings"])
+    if how == "pump_station":
+        assert "Pump station PS9: no rising main exported, so its pumps are NOT exported." in d["warnings"]
+    assert d["pumps"] == [] and not any(c["wwn_link_kind"] == "rising_main" for c in d["conduits"])
+
+
+# ------------------------------------------------------------------ pressure side (rising mains, pumps)
+
+def _pump_model(demo_gpkg, curve=True, rm_sql=None):
+    """The Self Test pump scenario: P08 ends in wet well WW; PS1 pumps through rising main RM1 to D, and a
+    gravity sewer D -> OUT1 (WW and D share OUT1's position)."""
+    from wwnet_arcgis import pumpdata
+    _edit(demo_gpkg,
+          "INSERT INTO wwn_nodes (geom, node_id, node_type, invert_level, surface_level) "
+          "SELECT geom, 'WW', 'wet_well', 22.2, 25.5 FROM wwn_nodes WHERE node_id='OUT1'",
+          "INSERT INTO wwn_nodes (geom, node_id, node_type, invert_level, surface_level) "
+          "SELECT geom, 'D', 'ac', 25.0, 28.0 FROM wwn_nodes WHERE node_id='OUT1'",
+          "UPDATE wwn_conduits SET ds_node_id='WW' WHERE conduit_id='P08'",
+          "INSERT INTO wwn_conduits (conduit_id, us_node_id, ds_node_id, dn, length_m, us_invert, ds_invert) "
+          "VALUES ('PSG1','D','OUT1',225,50.0,25.0,22.2)",
+          "INSERT INTO wwn_pump_stations (ps_id, wet_well_node_id, discharge_node_id, rising_main_id) "
+          "VALUES ('PS1','WW','D','RM1')",
+          rm_sql or "INSERT INTO wwn_rising_mains (rm_id, ps_id, discharge_node_id, dn, length_m, roughness_type, "
+                    "roughness, material) VALUES ('RM1','PS1','D',150,200.0,'ks',1.0,'pvc')")
+    pumpdata.set_station(demo_gpkg, "PS1", wet_well_area_m2=1.0, stop=22.6, start=23.0, overflow=25.0, n_duty=1,
+                         n_assist=1, n_standby=1, duty_rate_lps=None if curve else 12.5,
+                         curve=[(0, 20), (10, 16.5), (20, 11.5), (30, 5)] if curve else None)
+
+
+def test_rising_main_exported_as_force_main_conduit(demo_gpkg):
+    _pump_model(demo_gpkg)
+    d = icm_export.build(demo_gpkg)
+    rm = next(c for c in d["conduits"] if c["wwn_conduit_id"] == "RM1")
+    assert (rm["us_node_id"], rm["link_suffix"], rm["ds_node_id"]) == ("PS1_DEL", "1", "D")
+    assert rm["solution_model"] == "ForceMain" and rm["wwn_link_kind"] == "rising_main"
+    assert (rm["us_invert"], rm["ds_invert"]) == (22.2, 25.0)          # wet well floor -> discharge floor
+    assert rm["conduit_width"] == rm["conduit_height"] == 150 and rm["conduit_length"] == 200.0
+    assert rm["roughness_type"] == "CW" and rm["bottom_roughness_CW"] == rm["top_roughness_CW"] == 1.0
+    assert rm["material"] == "PVC"
+    assert all(c["solution_model"] == "Full" for c in d["conduits"] if c["wwn_link_kind"] == "gravity")
+    nodes = {n["node_id"]: n for n in d["nodes"]}
+    dn = nodes["PS1_DEL"]
+    assert dn["node_type"] == "Break" and dn["flood_type"] == "Sealed" and dn["wwn_node_type"] == "pump_delivery"
+    assert dn["chamber_floor"] == 22.2 and dn["ground_level"] == 25.5
+    assert nodes["WW"]["node_type"] == "Manhole" and nodes["WW"]["chamber_area"] == nodes["WW"]["shaft_area"] == 1.0
+    assert nodes["D"]["node_type"] == "Manhole" and nodes["D"]["wwn_outfall_reason"] == ""
+    assert "wwn_rising_mains" not in d["skipped"] and "wwn_pump_stations" not in d["skipped"]
+    assert not any("wet well exported as Manhole" in w or "NOT exported" in w and "Rising" in w
+                   for w in d["warnings"])
+    assert d["counts"]["rising_mains"] == 1 and d["counts"]["delivery_nodes"] == 1
+    keys = [(c["us_node_id"], c["link_suffix"]) for c in d["conduits"] + d["pumps"]]
+    assert len(keys) == len(set(keys))                                  # ICM link ids unique across tables
+
+
+def test_pumps_exported_with_head_discharge_tables(demo_gpkg):
+    _pump_model(demo_gpkg)
+    d = icm_export.build(demo_gpkg)
+    pumps = {p["wwn_pump_id"]: p for p in d["pumps"]}
+    assert set(pumps) == {"PS1_P1", "PS1_P2"}                           # duty + assist; standby P3 skipped
+    duty, assist = pumps["PS1_P1"], pumps["PS1_P2"]
+    assert (duty["us_node_id"], duty["ds_node_id"]) == ("WW", "PS1_DEL")
+    assert {duty["link_suffix"], assist["link_suffix"]} == {"1", "2"}
+    assert duty["link_type"] == "Rotpmp" and duty["head_discharge_id"] == "HD_PS1_P1" and duty["discharge"] is None
+    assert (duty["switch_on_level"], duty["switch_off_level"]) == (23.0, 22.6)
+    assert (assist["switch_on_level"], assist["switch_off_level"]) == (23.2, 22.7)
+    hd = [(r["head"], r["discharge"]) for r in d["head_discharge"] if r["head_discharge_id"] == "HD_PS1_P1"]
+    assert hd == [(20.0, 0.0), (16.5, 10.0), (11.5, 20.0), (5.0, 30.0)]  # decreasing head, closed valve first
+    assert any("standby pump(s) not exported" in w and "PS1_P3" in w for w in d["warnings"])
+    assert not any(n["node_id"] == "WW" and n["node_type"] == "Outfall" for n in d["nodes"])
+
+
+def test_fixed_rate_pump_and_hazen_williams_main(demo_gpkg):
+    _pump_model(demo_gpkg, curve=False,
+                rm_sql="INSERT INTO wwn_rising_mains (rm_id, ps_id, discharge_node_id, dn, internal_diameter_mm, "
+                       "length_m, roughness_type, roughness) VALUES ('RM1','PS1','D',150,141.0,NULL,'hw_c',120)")
+    d = icm_export.build(demo_gpkg)
+    rm = next(c for c in d["conduits"] if c["wwn_conduit_id"] == "RM1")
+    assert rm["roughness_type"] == "HW" and rm["bottom_roughness_HW"] == rm["top_roughness_HW"] == 120
+    assert rm["bottom_roughness_CW"] is None and rm["conduit_width"] == 141.0
+    assert rm["conduit_length"] is None and any("RM1: no length" in w for w in d["warnings"])
+    duty = next(p for p in d["pumps"] if p["wwn_role"] == "duty")
+    assert duty["link_type"] == "Fixpmp" and duty["discharge"] == 12.5 and duty["head_discharge_id"] is None
+    assert d["head_discharge"] == []
+
+
+def test_rising_main_defaults_and_unconnected_discharge(demo_gpkg):
+    # station without hydraulics, a main without roughness discharging to a junction with nothing downstream
+    _edit(demo_gpkg,
+          "INSERT INTO wwn_nodes (geom, node_id, node_type, invert_level, surface_level) "
+          "SELECT geom, 'D_RM_PS2', 'junction', 30.0, 31.0 FROM wwn_nodes WHERE node_id='N01'",
+          "UPDATE wwn_nodes SET node_type='wet_well' WHERE node_id='OUT1'",
+          "INSERT INTO wwn_pump_stations (ps_id, wet_well_node_id, discharge_node_id, rising_main_id, pump_rate_lps) "
+          "VALUES ('PS2','OUT1','D_RM_PS2','RM_PS2', 8.0)",
+          "INSERT INTO wwn_rising_mains (rm_id, ps_id, discharge_node_id, dn, length_m) "
+          "VALUES ('RM_PS2','PS2','D_RM_PS2',100,80.0)")
+    d = icm_export.build(demo_gpkg)
+    nodes = {n["node_id"]: n for n in d["nodes"]}
+    assert nodes["D_RM_PS2"]["node_type"] == "Outfall"
+    assert nodes["D_RM_PS2"]["wwn_outfall_reason"] == "rising main discharge"
+    assert nodes["OUT1"]["chamber_area"] == icm_export.DEFAULT_WET_WELL_AREA_M2
+    rm = next(c for c in d["conduits"] if c["wwn_conduit_id"] == "RM_PS2")
+    assert rm["bottom_roughness_CW"] == icm_export.DEFAULT_RM_KS_MM
+    (p,) = d["pumps"]
+    assert p["wwn_pump_id"] == "PS2_P1" and p["link_type"] == "Fixpmp" and p["discharge"] == 8.0
+    floor = nodes["OUT1"]["chamber_floor"]
+    assert p["switch_off_level"] == pytest.approx(floor + 0.3) and p["switch_on_level"] == pytest.approx(floor + 1.0)
+    text = " ".join(d["warnings"])
+    for frag in ("no roughness", "no wet well area", "no stop level", "no start level", "no pumps listed",
+                 "rising main discharge node(s) have no downstream pipe"):
+        assert frag in text, frag
+    assert "dangling" not in text
+
+
+def test_rising_main_with_unknown_discharge_not_exported(demo_gpkg):
+    _edit(demo_gpkg,
+          "INSERT INTO wwn_pump_stations (ps_id, wet_well_node_id, rising_main_id, pump_rate_lps) "
+          "VALUES ('PS3','OUT1','RM3', 5.0)",
+          "INSERT INTO wwn_rising_mains (rm_id, ps_id, discharge_node_id, dn, length_m) "
+          "VALUES ('RM3','PS3','NOPE',100,50.0)")
+    d = icm_export.build(demo_gpkg)
+    assert d["skipped"]["wwn_rising_mains"] == 1 and d["pumps"] == []
+    assert any(w.startswith("Rising main RM3: discharge node NOPE is not in the model; NOT exported")
+               for w in d["warnings"])
+    assert not any(n["node_id"].startswith("PS3") for n in d["nodes"])
+
+
+def test_export_icm_writes_pumps_and_rising_mains(fake_arcpy, demo_gpkg, tmp_path):
+    from fake_arcpy import gpkg_point_xy
+    _pump_model(demo_gpkg)
+    con = sqlite3.connect(demo_gpkg)
+    ww = gpkg_point_xy(con.execute("SELECT geom FROM wwn_nodes WHERE node_id='WW'").fetchone()[0])
+    con.close()
+    a = fake_arcpy([])
+    out = tmp_path / "icm"
+    r = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(out))
+    gdb = str(out / "demo_ICM.gdb")
+    nodes = {x["node_id"]: x for x in a.memory[os.path.join(gdb, "ICM_Nodes")]["rows"]}
+    links = {x["wwn_conduit_id"]: x for x in a.memory[os.path.join(gdb, "ICM_Conduits")]["rows"]}
+    pumps_fc = a.memory[os.path.join(gdb, "ICM_Pumps")]
+    assert pumps_fc["geom"] == "POLYLINE" and [f for f, _ in pumps_fc["fields"]] == \
+        [f for f, _ in icm_export.PUMP_FIELDS]
+    assert len(pumps_fc["rows"]) == 2 and all(x["SHAPE@"] is not None for x in pumps_fc["rows"])
+    # no PS / main geometry here: the delivery node sits 1 m east of the wet well, the main runs from it to D
+    pt = nodes["PS1_DEL"]["SHAPE@"].firstPoint
+    assert (pt.X, pt.Y) == pytest.approx((ww[0] + icm_export.DELIVERY_OFFSET_M, ww[1]))
+    line = links["RM1"]["SHAPE@"]
+    assert (line.firstPoint.X, line.lastPoint.X) == pytest.approx((ww[0] + 1.0, ww[0]))
+    assert links["RM1"]["solution_model"] == "ForceMain"
+    with open(r["pumps_csv"], newline="") as fh:
+        assert {x["link_type"] for x in csv.DictReader(fh)} == {"Rotpmp"}
+    with open(r["head_discharge_csv"], newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert len(rows) == 8 and rows[0] == {"head_discharge_id": "HD_PS1_P1", "head": "20.0", "discharge": "0.0"}
+    with open(r["nodes_csv"], newline="") as fh:
+        dn = next(x for x in csv.DictReader(fh) if x["node_id"] == "PS1_DEL")
+    assert dn["x"] and dn["flood_type"] == "Sealed"
+    notes = open(r["notes"], encoding="utf-8").read()
+    for frag in ("then pumps", "ForceMain", "MAP THIS FIELD", "Rotpmp", "HD_PS1_P1", "ICM_Pumps"):
+        assert frag in notes, frag
+    assert "Not exported: pump stations" not in notes
+    info = " ".join(t for k, t in a.log if k == "info")
+    assert "1 rising main(s) and 2 pump(s)" in info and "Timing ICM_Pumps:" in info
+    assert a.addfields_calls == 3
+
+    # re-export after the station is removed: stale pump table and CSVs go
+    _edit(demo_gpkg, "DELETE FROM wwn_pumps", "DELETE FROM wwn_pump_stations", "DELETE FROM wwn_rising_mains")
+    r2 = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(out))
+    assert os.path.join(gdb, "ICM_Pumps") not in a.memory
+    assert r2["pumps_csv"] is None and not os.path.exists(r["pumps_csv"])
+    assert not os.path.exists(r["head_discharge_csv"])
+
+
+def test_delivery_node_geometry_prefers_rising_main_start(fake_arcpy):
+    from fake_arcpy import FakePolyline
+    a = fake_arcpy([])
+    rm = FakePolyline([a.Point(10.0, 20.0), a.Point(50.0, 20.0)])
+    fn = icm_export.node_geometry_fn(a, None, {"rm": {"RM1": rm}, "ps": {"PS1": (11.0, 21.0)}})
+    row = {"_geom": [("rm_start", "RM1"), ("ps", "PS1"), ("node", "WW")], "_offset_from": "WW"}
+    g = fn(row, {"WW": (0.0, 0.0)})
+    assert (g.firstPoint.X, g.firstPoint.Y) == (10.0, 20.0)
+    g = icm_export.node_geometry_fn(a, None, {"rm": {}, "ps": {"PS1": (11.0, 21.0)}})(row, {"WW": (0.0, 0.0)})
+    assert (g.firstPoint.X, g.firstPoint.Y) == (11.0, 21.0)
+    g = icm_export.node_geometry_fn(a, None, {"rm": {}, "ps": {}})(row, {"WW": (5.0, 5.0)})
+    assert (g.firstPoint.X, g.firstPoint.Y) == (6.0, 5.0)                 # moved off the wet well
+    assert icm_export.line_geometry(a, [(1.0, 1.0), (1.0, 1.0)], None) is None
+
+
+def test_dem_fill_skips_delivery_nodes_and_copies_wet_well_ground(fake_arcpy, demo_gpkg, tmp_path):
+    _pump_model(demo_gpkg)
+    _edit(demo_gpkg, "UPDATE wwn_nodes SET surface_level=NULL WHERE node_id='WW'")
+    a = fake_arcpy([])
+    a.dem_fn = lambda x, y: "26.0"
+    r = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path), dem="C:/dem.tif")
+    rows = _icm_nodes(a, tmp_path)
+    assert rows["WW"]["ground_level"] == 26.0 and rows["WW"]["wwn_ground_source"] == "DEM"
+    assert rows["PS1_DEL"]["ground_level"] == 26.0 and rows["PS1_DEL"]["wwn_ground_source"] == "wet well"
+    assert not any("outside the DEM" in w for w in r["warnings"])
+

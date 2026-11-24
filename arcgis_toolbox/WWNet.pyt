@@ -560,8 +560,9 @@ class PipeCapacity(object):
 class ExportToICM(object):
     def __init__(self):
         self.label = "Export To ICM"
-        self.description = ("Write the model's nodes and gravity sewers with InfoWorks ICM field names "
-                            "(file geodatabase + CSV + field-mapping notes) for ICM's Open Data Import Centre.")
+        self.description = ("Write the model's nodes, gravity sewers, rising mains and pumps with InfoWorks ICM "
+                            "field names (file geodatabase + CSV + field-mapping notes) for ICM's Open Data Import "
+                            "Centre.")
         self.category = "Data"
 
     def getParameterInfo(self):

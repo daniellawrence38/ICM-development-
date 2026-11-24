@@ -109,6 +109,27 @@ class FakeShape:
         return _Part(NS(X=x, Y=y) for x, y in self.coords)
 
 
+class FakePointGeometry:
+    """arcpy.PointGeometry stand-in (strict: needs a Point with X / Y)."""
+
+    def __init__(self, pt, spatial_reference=None):
+        assert hasattr(pt, "X") and hasattr(pt, "Y"), "fake arcpy: PointGeometry needs an arcpy.Point"
+        self.firstPoint, self.spatialReference = pt, spatial_reference
+
+
+class FakePolyline:
+    """arcpy.Polyline stand-in (strict: an Array of 2+ Points)."""
+
+    def __init__(self, arr, spatial_reference=None):
+        pts = list(arr)
+        assert len(pts) >= 2 and all(hasattr(p, "X") for p in pts), "fake arcpy: Polyline needs 2+ Points"
+        self.points, self.spatialReference, self.partCount = pts, spatial_reference, 1
+        self.firstPoint, self.lastPoint = pts[0], pts[-1]
+
+    def getPart(self, i):
+        return _Part(self.points)
+
+
 class _SrcCursor(_MemCursor):
     """Rows of dicts; 'SHAPE@XY' -> (x, y), 'SHAPE@' -> FakeShape built from the row's '_geom'."""
 
@@ -213,6 +234,8 @@ def make_fake(layers=None, map_name="Map"):
     a.Point = lambda x, y: NS(X=x, Y=y)
     a.Array = lambda pts=None: list(pts or [])
     a.Polygon = FakePolygon
+    a.PointGeometry = FakePointGeometry
+    a.Polyline = FakePolyline
 
     a.sources = {}   # data source path -> {"fields": [(name, type)], "rows": [dict], "sr": NS(...)}
     a.env = NS(overwriteOutput=False, geographicTransformations=None)

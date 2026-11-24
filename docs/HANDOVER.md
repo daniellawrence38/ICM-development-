@@ -1,6 +1,6 @@
 # WWNet — session handover (2026-11-23)
 
-Branch: `ccr-472a9a6a-he69zu` (all work pushed). Previous session's branch: `ccr-974cdaeb-c682le`.
+Branch: `ccr-54bf38a8-b92qd9` (2026-11-24: fast-forwarded from `ccr-472a9a6a-he69zu`, + pressure side in Export To ICM, §11). Earlier: `ccr-472a9a6a-he69zu`, `ccr-974cdaeb-c682le`. NOT merged: `ccr-7bd083b1-j0qlhq` (schema v3 / toolbox UX, diverged from `e107482`).
 Plan: `docs/PLAN.md`. OSS survey: `docs/reference-survey.md`. Function overview deck: `docs/WWNet_functions.pptx`.
 
 ## 1. User and working style
@@ -59,7 +59,7 @@ Key ArcGIS modules: `tools_impl.py` (tool logic), `gpkg.py` (`split_datasource` 
 | **Import Pressure Data** | Data | new, **not yet run on real data** |
 | **Set Pump Station Data** | Data | new, not yet run in Pro (manual entry: wet well dia/area, levels AHD or depth, duty/assist/standby, rate or pasted curve) |
 | Import Diurnal Profile | Data | fake-tested; Self Test PASS in Pro |
-| **Export To ICM** | Data | **verified: gravity model loads into ICM 2024.5 and runs.** Terminal chambers → Outfall; dangling ends stay Break (warned); DEM fill of missing ground levels; GDA2020 or GDA94 output |
+| **Export To ICM** | Data | **verified: gravity model loads into ICM 2024.5 and runs.** Terminal chambers → Outfall; dangling ends stay Break (warned); DEM fill of missing ground levels; GDA2020 or GDA94 output. **2026-11-24: rising mains + pumps now exported (§11), not yet run in Pro / ICM** |
 | Run Design | Analysis | verified |
 | Run Simulation | Analysis | verified (gravity); **pump station results new, not yet seen in Pro** |
 | Trace | Analysis | verified (after dataSource fix) |
@@ -92,7 +92,7 @@ Key ArcGIS modules: `tools_impl.py` (tool logic), `gpkg.py` (`split_datasource` 
 
 1. **Verify the pressure side on real data**, one step at a time: (a) select a PS + its pressure main inside a gravity model's area, remove model layers from the map, run Import Pressure Data (use selected) and check wet well / chaining / discharge messages; (b) Set Pump Station Data from a data sheet; (c) Run Simulation → pump tables, flags, pump station layer. Fix what real data breaks (assumptions listed in the importer: mains join end to end within 1 m; main starts within 30 m of the PS; wet well = terminal gravity node; GeoPackage without R-tree tables).
 2. **Sub-catchments** (user's stated next item): export `wwn_subcatchments` to ICM (polygons, outlet node, manual ADWF / population, profile) and check ICM's subcatchment import fields; possibly an import tool for catchment polygons.
-3. Export pump stations / rising mains to ICM (pumps, wet wells, force mains) — currently a wet well exports as Manhole with a warning.
+3. ~~Export pump stations / rising mains to ICM~~ done 2026-11-24 (§11); verify in ICM (ODIC mapping of `solution_model`, `flood_type`, pump table, head-discharge tables).
 4. Real ICM diurnal profile ("1 Dunkley Ave Applecross PS4", 5-min, 288 rows) → compare simulated peaks with ICM.
 5. Write the user's saved ODIC `.cfg` files out with Export To ICM (needs the files from the user).
 6. R-tree handling in sqlite writers (repair / pressure import refuse or may fail if Pro adds spatial indexes).
@@ -124,3 +124,25 @@ python -m pyflakes arcgis_toolbox/WWNet.pyt arcgis_toolbox/wwnet_arcgis qgis_plu
 /usr/bin/python3.11 -c "import ast; ast.parse(open('arcgis_toolbox/WWNet.pyt').read())"
 ```
 CI jobs: rust (ubuntu + windows), plugin, arcgis-toolbox (pyflakes + pytest), wheel, **arcgis-bundle** (full bundle + Pro-like smoke test), **arcgis-update** (Python-only zip). Check runs with GitHub MCP `actions_list` (owner `daniellawrence38`, repo `icm-development-`, branch filter).
+
+## 11. 2026-11-24: pressure pipes in Export To ICM
+
+User report: "Pressure pipes are not being included in the export to ICM". Cause: `icm_export.build` never read
+`wwn_rising_mains` / `wwn_pump_stations` / `wwn_pumps` (it only warned "NOT exported"). Fix (Python only →
+`wwnet-arcgis-update` artifact), mirroring the engine's network (`crates/wwnet-sim/src/pumps.rs`):
+
+- Rising main → row in `ICM_Conduits`: `<ps_id>_DEL` → discharge node, `solution_model` = `ForceMain` (gravity rows
+  `Full`), wet well floor → discharge chamber floor (first/last `profile_json` level if present), CW ks (default 1.5 mm)
+  or `HW` C, `wwn_link_kind` = gravity / rising_main. Unknown discharge node → not exported (warned, `skipped`).
+- `<ps_id>_DEL` pump delivery node: Break, `flood_type` = Sealed, floor = wet well floor, ground = wet well ground;
+  placed at the rising main's first vertex, else the PS point, else 1 m east of the wet well.
+- `ICM_Pumps` (+ `_pumps.csv`): wet well → `_DEL`; `Rotpmp` + `HD_<pump_id>` head-discharge table (`_head_discharge.csv`
+  and listed in the notes; decreasing head, speed by affinity laws) or `Fixpmp` (`discharge` L/s = station rate);
+  switch on/off = start/stop (engine defaults if missing); assist +0.2/+0.1 m; standby skipped.
+- Wet well chamber/shaft area = `wet_well_area_m2` (default 7.07 m²). A rising-main discharge node with nothing
+  downstream → Outfall (`wwn_outfall_reason` = rising main discharge).
+- New fields: nodes `flood_type`; conduits `solution_model`, `bottom/top_roughness_HW`, `wwn_link_kind`. The user's
+  saved ODIC configs need these mapped (else rising mains import as Full conduits).
+- Self Test step "export to ICM (pump station)". Unverified in ICM: link_type spelling (`Rotpmp`/`Fixpmp`), whether
+  ODIC can import the head-discharge CSV directly, `discharge` units (L/s vs ICM's flow unit).
+

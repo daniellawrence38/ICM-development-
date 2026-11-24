@@ -214,6 +214,17 @@ def run(arcpy, msgs, root, out_dir=None, include_map=False, exe=None) -> dict:
         need_model()
         tools_impl.export_icm(arcpy, c, copy, os.path.join(out_dir, "icm"))
 
+    def step_pump_export(c):
+        pgp = os.path.join(out_dir, "selftest_pumps.gpkg")
+        if not os.path.isfile(pgp):
+            raise Skip("no pump station model (the pump station simulation step did not create it)")
+        r = tools_impl.export_icm(arcpy, c, pgp, os.path.join(out_dir, "icm_pumps"))
+        mains = [x["wwn_conduit_id"] for x in r["conduits"] if x["wwn_link_kind"] == "rising_main"]
+        if not r["pumps"] or not mains:
+            raise RuntimeError("the rising main or the pumps are missing from the ICM export")
+        c.info(f"ICM export of the pump station model: rising main(s) {', '.join(mains)}, "
+               f"{len(r['pumps'])} pump(s) ({', '.join(x['link_type'] for x in r['pumps'])})")
+
     def step_map_add(c):
         need_model()
         state["snapshot"] = _map_snapshot(arcpy)
@@ -236,7 +247,7 @@ def run(arcpy, msgs, root, out_dir=None, include_map=False, exe=None) -> dict:
              ("check model", step_check), ("run design", step_design), ("trace", step_trace),
              ("pipe capacity", step_capacity), ("import diurnal profile", step_profile),
              ("run simulation (2 h, 1 h warm-up)", step_simulation), ("pump station simulation", step_pump_simulation),
-             ("export to ICM", step_export)]
+             ("export to ICM", step_export), ("export to ICM (pump station)", step_pump_export)]
     if include_map:
         steps += [("map: add model to map", step_map_add), ("map: trace with selection", step_map_trace),
                   ("map: remove added layers", step_map_remove)]
