@@ -4,7 +4,7 @@ Branch: **`ccr-7bd083b1-j0qlhq`**. It now holds BOTH lines of work: the 2026-11-
 (`ccr-54bf38a8-b92qd9`: pressure side, Export To ICM, Self Test, Update WWNet; sections 2-11 below) and the
 2026-11-23 review session (schema v3 / toolbox UX; **section 12**), merged on 2026-11-24. Older branches
 (`ccr-54bf38a8-b92qd9`, `ccr-472a9a6a-he69zu`, `ccr-974cdaeb-c682le`) are superseded: continue on this one.
-**Start here: section 12 (what the merge changed for the user), then section 11 'Where we stopped'.**
+**Start here: section 13 (antivirus, assistant removed), section 12 (what the merge changed), then section 11 'Where we stopped'.**
 Plan: `docs/PLAN.md`. Review: `docs/REVIEW-2026-11.md`. OSS survey: `docs/reference-survey.md`. Deck: `docs/WWNet_functions.pptx`.
 
 ## 1. User and working style
@@ -236,3 +236,27 @@ Next steps after the merge (before section 11's list):
    pastes the report. Expect FAIL/WARN only where Pro behaves differently from the fake (layer refresh after a re-run,
    `definitionQuery`, charts).
 2. Then continue section 11 "Where we stopped" (ICM pump run results) and section 8.
+
+## 13. 2026-11-24: antivirus detection, assistant removed
+
+The user reported the merged build "trips the malware detection system" (no detection name / file available).
+No new suspicious behaviour had been added; likely causes were the rebuilt, unsigned `wwnet_native.pyd`
+(reputation / ML detection) or long-standing code that looks like malware patterns. The user asked to remove the
+assistant ("won't be able to use that at work anyway"). Done:
+- **ArcGIS assistant removed**: tools Ask WWNet Assistant and Set Assistant API Key; `dpapi.py` (ctypes
+  CryptProtect/UnprotectData), `settings.py`, `assistant_run.py`, `arcpy_tools.py`; the bundle no longer ships
+  `wwnet_shared/assistant/` (incl. `install.py`, which ran pip in a subprocess) nor the vendored anthropic /
+  pydantic / httpx2 / jiter / truststore / typing_extensions. `vendor/` now holds only `wwnet_native`.
+  `vendor.py` no longer swaps `typing_extensions`. Verify Setup: engine only (no live API test).
+- **Update WWNet never writes binaries** (`.pyd/.dll/.exe/...` in an update zip are listed and skipped; no
+  `.pending` staging, no swap at Pro start) and deletes known-obsolete files of earlier versions
+  (`updater.OBSOLETE_FILES` / `OBSOLETE_DIRS`).
+- **`wwnet_native.pyd` has a Windows version resource** (`crates/wwnet-py/build.rs`, crate `winresource`;
+  ProductName WWNet, FileDescription, CompanyName "WWNet developers", version from Cargo). CI checks it
+  (`arcgis-bundle` job, PowerShell VersionInfo step). The build fails rather than ship without it.
+- Tests: a packaging test asserts no shipped Python contains CryptUnprotectData / windll / subprocess / anthropic.
+- The QGIS plugin keeps its assistant (frozen, not shipped to ArcGIS).
+- Install for the user: **delete the old WWNet-ArcGIS folder** before extracting (old vendor packages and
+  assistant files would otherwise stay and may still be flagged).
+- If it is still flagged: ask IT security to treat it as a false positive / allowlist by SHA-256; code signing
+  is the permanent fix (needs a certificate from IT). Do not try to evade detection.

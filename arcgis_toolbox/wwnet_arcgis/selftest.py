@@ -137,7 +137,7 @@ def run(arcpy, msgs, root, out_dir=None, include_map=False, exe=None) -> dict:
         c.info(f"ArcGIS: {pro['text']}")
         c.info(f"WWNet toolbox version {__version__}")
         rep = vendor.report()
-        for key, label in (("_import_wwnet_native", "wwnet_native"), ("_import_anthropic", "anthropic")):
+        for key, label in (("_import_wwnet_native", "wwnet_native"),):
             ok, err = rep[key]
             (c.info if ok else c.warn)(f"import {label}: " + ("OK" if ok else f"FAILED - {err}"))
         try:

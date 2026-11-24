@@ -1,4 +1,4 @@
-"""updater: zip apply (flat / nested), backups, zip-slip, locked files -> .pending, purge_modules."""
+"""updater: zip apply (flat / nested), backups, zip-slip, binaries never written, obsolete files removed, purge_modules."""
 import io
 import pathlib
 import sys
@@ -36,7 +36,7 @@ def test_flat_zip(tmp_path):
     z = make_zip(tmp_path / "u.zip", FILES)
     res = updater.apply_update(z, root, log=lambda m: None)
     assert sorted(res["updated"]) == ["WWNet.pyt", "wwnet_arcgis/__init__.py", "wwnet_arcgis/a.py"]
-    assert res["unchanged"] == 0 and res["pending"] == [] and res["backup"] is None
+    assert res["unchanged"] == 0 and res["binaries"] == [] and res["backup"] is None
     assert res["version"] == "9.9.1"
     assert (root / "wwnet_arcgis" / "a.py").read_text() == "A = 1\n"
     assert not (root / "wwnet_arcgis" / "__pycache__").exists()
@@ -80,39 +80,29 @@ def test_zip_slip_rejected(tmp_path):
     assert not (root / "abs.py").exists()
 
 
-def test_locked_file_staged_as_pending_and_applied(tmp_path, monkeypatch):
+def test_binaries_are_never_written_or_staged(tmp_path):
+    """Engine binaries change only with the full bundle: an update never writes, stages or swaps them."""
     root = tmp_path / "root"
-    files = dict(FILES, **{"vendor/wwnet_native/wwnet_native.pyd": "new-binary"})
+    files = dict(FILES, **{"vendor/wwnet_native/wwnet_native.pyd": "new-binary", "bin/x.exe": "MZ",
+                           "vendor/a.dll": "dll"})
     (root / "vendor" / "wwnet_native").mkdir(parents=True)
     old = root / "vendor" / "wwnet_native" / "wwnet_native.pyd"
     old.write_text("old-binary")
-    real = pathlib.Path.write_bytes
-
-    def locked(self, data):
-        if self.name == "wwnet_native.pyd":
-            raise PermissionError("locked")
-        return real(self, data)
-    monkeypatch.setattr(pathlib.Path, "write_bytes", locked)
     res = updater.apply_update(make_zip(tmp_path / "u.zip", files), root, log=lambda m: None)
-    monkeypatch.undo()
-    assert res["pending"] == ["vendor/wwnet_native/wwnet_native.pyd"]
+    assert sorted(res["binaries"]) == ["bin/x.exe", "vendor/a.dll", "vendor/wwnet_native/wwnet_native.pyd"]
     assert old.read_text() == "old-binary"
-    assert (old.with_name("wwnet_native.pyd.pending")).read_text() == "new-binary"
-    assert updater.apply_pending(root) == ["vendor/wwnet_native/wwnet_native.pyd"]
-    assert old.read_text() == "new-binary" and not old.with_name("wwnet_native.pyd.pending").exists()
-    assert updater.apply_pending(root) == []
+    assert not list(root.rglob("*.pending")) and not (root / "bin").exists() and not (root / "vendor" / "a.dll").exists()
+    assert not hasattr(updater, "apply_pending")
 
 
-def test_apply_pending_leaves_locked_file(tmp_path, monkeypatch):
-    (tmp_path / "vendor").mkdir()
-    (tmp_path / "vendor" / "x.pyd").write_text("old")
-    (tmp_path / "vendor" / "x.pyd.pending").write_text("new")
-
-    def boom(a, b):
-        raise PermissionError("locked")
-    monkeypatch.setattr(updater.os, "replace", boom)
-    assert updater.apply_pending(tmp_path) == []
-    assert (tmp_path / "vendor" / "x.pyd.pending").exists()
+def test_obsolete_files_removed(tmp_path):
+    root = tmp_path / "root"
+    for rel in ("wwnet_arcgis/dpapi.py", "wwnet_arcgis/settings.py", "wwnet_shared/assistant/engine.py"):
+        (root / rel).parent.mkdir(parents=True, exist_ok=True)
+        (root / rel).write_text("old")
+    res = updater.apply_update(make_zip(tmp_path / "u.zip", FILES), root, log=lambda m: None)
+    assert {"wwnet_arcgis/dpapi.py", "wwnet_arcgis/settings.py", "wwnet_shared/assistant/"} <= set(res["removed"])
+    assert not (root / "wwnet_arcgis" / "dpapi.py").exists() and not (root / "wwnet_shared" / "assistant").exists()
 
 
 def test_wrong_zip_raises(tmp_path):

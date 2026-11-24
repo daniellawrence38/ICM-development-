@@ -5,7 +5,7 @@ Layout inside the zip (extract anywhere, then add WWNet.pyt as a toolbox in Pro)
 
     WWNet-ArcGIS/WWNet.pyt
     WWNet-ArcGIS/wwnet_arcgis/*.py            toolbox modules
-    WWNet-ArcGIS/wwnet_shared/{core,assistant}/*.py   copy of the shared QGIS-free modules
+    WWNet-ArcGIS/wwnet_shared/core/*.py            copy of the shared QGIS-free modules (no assistant)
     WWNet-ArcGIS/templates/schema.sql
     WWNet-ArcGIS/templates/import/*.toml       import templates (Import Sewer Data)
     WWNet-ArcGIS/templates/profiles/*.csv      example diurnal profile (APPROXIMATE)
@@ -44,8 +44,6 @@ REPO = HERE.parent
 PLUGIN = REPO / "qgis_plugin" / "wwnet"
 TOP = "WWNet-ArcGIS"
 
-# Shared modules that must stay free of qgis / Qt imports.
-SHARED_ASSISTANT = ("__init__.py", "engine.py", "client.py", "prompt.py", "tools.py", "install.py")
 SHARED_STUB = '"""WWNet shared pure-Python modules (copied from qgis_plugin/wwnet by package.py)."""\n'
 
 
@@ -88,8 +86,6 @@ def collect(cli: Path | None = None, vendor_dir: Path | None = None, python_only
     files["wwnet_shared/__init__.py"] = SHARED_STUB.encode()
     for p in sorted((PLUGIN / "core").glob("*.py")):
         files[f"wwnet_shared/core/{p.name}"] = p
-    for name in SHARED_ASSISTANT:
-        files[f"wwnet_shared/assistant/{name}"] = PLUGIN / "assistant" / name
     files["templates/schema.sql"] = REPO / "templates" / "schema.sql"
     for p in sorted((REPO / "templates" / "import").glob("*.toml")):
         files[f"templates/import/{p.name}"] = p

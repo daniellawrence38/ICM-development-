@@ -12,8 +12,8 @@ import os
 
 import sqlite3
 
-from . import (arcpy_tools, assistant_run, capacity, dpapi, engine, gpenv, gpkg, maplayers, pressure_import, pumpdata,
-               settings, shared, sewer_import, symbology, vendor)
+from . import (capacity, engine, gpenv, gpkg, maplayers, pressure_import, pumpdata, shared, sewer_import, symbology,
+               vendor)
 from .messages import Messages
 
 MAX_LINES = 300
@@ -895,164 +895,25 @@ def pipe_capacity(msgs: Messages, dn, grade, ks=None, flow=None) -> dict:
     return res
 
 
-# ------------------------------------------------------------------ settings
-
-def set_settings(msgs: Messages, key: str | None, clear: bool, model: str | None, effort: str | None):
-    if clear:
-        msgs.info("Stored API key removed." if dpapi.clear_key() else "No stored API key to remove.")
-    elif key and key.strip():
-        dpapi.save_key(key)       # never echoed
-        msgs.info(f"API key stored encrypted for this Windows user ({dpapi.key_path()}).")
-    cur = settings.save(model=model or None, effort=effort or None)
-    k, src = dpapi.get_api_key()
-    msgs.info(f"Model: {cur['model']}, effort: {cur['effort']}")
-    msgs.info("API key available: " + ({"env": "yes (ANTHROPIC_API_KEY environment variable)",
-                                        "dpapi": "yes (stored, DPAPI)"}.get(src, "NO")))
-    if clear and src == "env":
-        msgs.warn("ANTHROPIC_API_KEY is still set in the environment and takes precedence.")
-
-
 # -------------------------------------------------------------- verify setup
 
-def verify_setup(msgs: Messages, live: bool = False, model: str | None = None, client_factory=None) -> bool:
-    """Print the vendor/package report and the engine functions; with `live` make one tiny API call.
-    Never prints the key. Returns True when imports (and the live call, if requested) succeeded."""
+def verify_setup(msgs: Messages) -> bool:
+    """Print where the engine (wwnet_native) is loaded from, whether it imports and whether it provides every
+    function this toolbox uses. Returns True when it does."""
     rep = vendor.report()
     for line in vendor.format_report(rep):
         msgs.info(line)
-    ok = rep["_import_anthropic"][0] and rep["_import_wwnet_native"][0]
-    if not rep["_import_anthropic"][0]:
-        msgs.warn("anthropic is not importable: the assistant will not work (check/design/simulate do not need it).")
     if not rep["_import_wwnet_native"][0]:
-        msgs.warn("wwnet_native is not importable: no WWNet tool except the assistant settings can run.")
-    else:
-        nat = shared.core("native")
-        lacking = nat.missing_functions()
-        if lacking:
-            ok = False
-            msgs.warn(f"wwnet_native is too old for this toolbox: missing {', '.join(lacking)}. Install the "
-                      "current bundle.")
-        else:
-            msgs.info("wwnet_native provides every engine function this toolbox uses.")
-    if not live:
-        msgs.info("Live API test skipped (tick 'Live API test' to run it).")
-        return ok
-    key, src = dpapi.get_api_key()
-    if not key:
-        msgs.error("No Anthropic API key: run 'Set Assistant API Key' first (or set ANTHROPIC_API_KEY).")
+        msgs.warn("wwnet_native is not importable: no WWNet tool can run. Install the full bundle "
+                  "(wwnet-arcgis-bundle-win-py311).")
         return False
-    if not rep["_import_anthropic"][0]:
+    lacking = shared.core("native").missing_functions()
+    if lacking:
+        msgs.warn(f"wwnet_native is too old for this toolbox: missing {', '.join(lacking)}. Install the current "
+                  "full bundle.")
         return False
-    client_mod = shared.assistant("client")
-    model = model or settings.load()["model"]
-    try:
-        note = vendor.inject_truststore()
-        if note:
-            msgs.info(note)
-        client = (client_factory or client_mod.make_client)(key)
-        res = client.messages.create(model=model, max_tokens=16,
-                                     messages=[{"role": "user", "content": "Reply with the word: ok"}])
-        msgs.info(f"Live API test OK: model {getattr(res, 'model', model)} responded "
-                  f"(key from {'environment variable' if src == 'env' else 'stored DPAPI file'}).")
-        return ok
-    except Exception as exc:  # noqa: BLE001 - mapped to friendly text; the key is never part of it
-        msgs.error("Live API test FAILED: " + client_mod.friendly_error(exc))
-        return False
-
-
-# ----------------------------------------------------------------- assistant
-
-def map_key(arcpy) -> str:
-    try:
-        aprx = arcpy.mp.ArcGISProject("CURRENT")
-        return f"{getattr(aprx, 'filePath', '')}|{aprx.activeMap.name}"
-    except Exception:  # noqa: BLE001
-        return "default"
-
-
-def selection_context(tools: arcpy_tools.ArcpyTools, layer_name: str | None, use_selected: bool) -> str:
-    if not layer_name:
-        return ""
-    lyr = tools.find_layer(layer_name)
-    tbl = tools.table_of(lyr)
-    if not use_selected:
-        return f"Context: the engineer is working with layer '{lyr.name}' ({tbl})."
-    sel = tools.get_selected_features({"layer": layer_name})
-    idf = shared.core("schema").ID_FIELDS.get(tbl or "")
-    ids = [f.get(idf) for f in sel["features"] if idf and f.get(idf)]
-    if not sel["selected_count"]:
-        return f"Context: layer '{lyr.name}' ({tbl}) has no features selected."
-    return (f"Context: {sel['selected_count']} feature(s) are selected in layer '{lyr.name}' ({tbl}); "
-            f"{idf} values: {ids}. Use get_selected_features for their attributes.")
-
-
-def apply_last_proposals(arcpy, msgs: Messages, layers_fn=None) -> int:
-    """Write exactly the edits the assistant proposed in the last run (for this project + map), after
-    checking that every current value still equals the value seen when it was proposed."""
-    key = map_key(arcpy)
-    saved = assistant_run.load_proposals(key)
-    if not saved:
-        raise RuntimeError("No saved proposals: the last assistant run proposed no edits (or they were applied).")
-    tools = arcpy_tools.ArcpyTools(arcpy, apply=True, layers_fn=layers_fn, emit=msgs.info)
-    ok, conflicts = tools.adopt_saved(saved)
-    if conflicts:
-        for c in conflicts:
-            msgs.warn(c)
-        raise RuntimeError(f"Nothing applied: {len(conflicts)} of {len(saved)} proposal(s) no longer match the "
-                           "data. Ask the assistant again.")
-    n = tools.apply_proposals(ok)
-    assistant_run.save_proposals(key, [])
-    msgs.info(f"Applied {n} saved proposal(s).")
-    return n
-
-
-def ask_assistant(arcpy, msgs: Messages, question: str, layer_name: str | None = None,
-                  use_selected: bool = False, model: str | None = None, effort: str | None = None,
-                  apply: bool = False, reset: bool = False, client_factory=None, layers_fn=None,
-                  apply_last: bool = False):
-    if apply_last:
-        return apply_last_proposals(arcpy, msgs, layers_fn=layers_fn)
-    assistant_run.check_prereqs()
-    key, src = dpapi.get_api_key()
-    if not key:
-        raise RuntimeError("No Anthropic API key. Run 'Set Assistant API Key' first (or set the "
-                           "ANTHROPIC_API_KEY environment variable).")
-    cfg = settings.load()
-    model = model or cfg["model"]
-    effort = effort or cfg["effort"]
-    if not (question or "").strip():
-        raise RuntimeError("Enter a question.")
-    tools = arcpy_tools.ArcpyTools(arcpy, apply=apply, layers_fn=layers_fn, emit=msgs.info)
-    if layer_name:
-        try:
-            path, table = gpkg.split_datasource(maplayers.layer_source(tools.find_layer(layer_name)))
-            if path and table and table.startswith("wwn_"):
-                tools.model = path
-        except Exception:  # noqa: BLE001 - selection_context reports a bad layer below
-            pass
-    context = selection_context(tools, layer_name, use_selected)
-    msgs.info(f"Asking {model} (effort {effort}); edits will be "
-              + ("APPLIED if proposed." if apply else "proposed only (nothing is written).")
-              + " Tool results (attribute values) are sent to Anthropic.")
-    hkey = map_key(arcpy)
-    res = assistant_run.run(question, api_key=key, model=model, effort=effort, tools=tools, msgs=msgs,
-                            history_key=hkey, reset=reset, context=context,
-                            client_factory=client_factory)
-    if res.error:
-        msgs.error(res.error)
-    pending = [p for p in res.proposals if not p.applied]
-    if res.proposals and not apply:
-        msgs.info("")
-        msgs.info(f"PROPOSED EDITS ({len(res.proposals)}) - NOT applied:")
-        for line in arcpy_tools.proposal_lines(res.proposals):
-            msgs.info("  " + line)
-        msgs.info("To write exactly these edits, run this tool again with 'Apply the proposals from the last "
-                  "run' ticked (no new question is sent).")
-    elif res.proposals:
-        msgs.info(f"{sum(p.applied for p in res.proposals)} of {len(res.proposals)} proposed edit(s) applied.")
-    assistant_run.save_proposals(hkey, arcpy_tools.proposal_dicts(pending))
-    msgs.info(f"Done ({res.stop_reason}); tokens in/out: {res.tokens_in}/{res.tokens_out}.")
-    return res
+    msgs.info("wwnet_native provides every engine function this toolbox uses.")
+    return True
 
 
 # ------------------------------------------------------------- ICM export

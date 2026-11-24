@@ -1,32 +1,39 @@
 # WWNet ArcGIS Pro toolbox
 
-Python toolbox (`WWNet.pyt`) for **ArcGIS Pro 3.3+** that fronts the WWNet wastewater design tool
-(Water Corporation WA, DS 50 gravity sewers). The design engine stays in the `wwnet` command-line tool;
-the toolbox creates and maps models, runs checks / design / traces, and hosts the optional
-Claude-powered assistant. Models are the same EPSG:7850 GeoPackages used by the QGIS plugin.
+Python toolbox (`WWNet.pyt`) for **ArcGIS Pro 3.3+** that fronts the WWNet wastewater network engine
+(`wwnet_native`, Rust, with the EPA SWMM 5.2 dynamic-wave engine built in). Models are EPSG:7850 GeoPackages
+(schema v3). There is no AI assistant in the ArcGIS toolbox (removed 2026-11-24).
+
+Every tool's *WWNet model* parameter is filled with the model shown in the active map; browse to another `.gpkg`
+to override. Results are stored in the model and shown as layers that stay after Pro restarts: **Design results**,
+**Simulation results (conduits / nodes)**, **Simulation comparison** and **Issues** (one point per finding of the
+last Check / Design / Import / Simulation, column `source`).
 
 ## Tools
 
-| Tool | What it does |
-|---|---|
-| Import Diurnal Profile | (category Data) Imports a diurnal profile (CSV / TXT file or text pasted from ICM: `Time<TAB>Factor`; hh:mm or minutes; any interval) into a model, optionally as the default profile; warns if the mean is not 1 (tick *Normalise* to divide by the mean). Example: `templates/profiles/example_residential.csv` (APPROXIMATE, digitised from a screenshot) |
-| Import Sewer Data | (category Data) Converts Water Corporation gravity-sewer layers into a new WWNet GeoPackage, checks it and adds it to the map; see [Import Sewer Data](#import-sewer-data) |
-| Import Pressure Data | (category Data) Adds Water Corporation pump stations and pressure mains (rising mains) to an EXISTING model made by Import Sewer Data: chains main segments from each pump station, links wet wells and discharge nodes; see [Import Pressure Data](#import-pressure-data) |
-| Set Pump Station Data | (category Data) Enter a pump station's hydraulics from its data sheet (the GIS does not hold them): wet well diameter or area, stop / start / overflow levels (AHD, or depth above the wet well invert), emergency storage, duty / assist / standby pump counts (1/0/0), duty rate L/s, pump curve pasted as text (flow and head per line, e.g. from Excel or ICM; column order flow,head or head,flow; flow units L/s, m3/h or m3/s), speed %, source note (e.g. `Data sheet PS4 rev C`) and *Replace existing pumps*. Choosing a station fills the other parameters from the model; a curve mistake (non-numeric, head not falling, fewer than 2 points) is shown as an error on the curve box before running. Data errors print as `ERROR: ...` warnings (the tool is not failed); a GeoPackage locked by Pro asks you to close attribute tables / remove the layers. Prints the summary and one line per station naming data still missing (Check Model prints the same lines) |
-| New Model | Creates a GeoPackage from `schema.sql` (sqlite3, schema v2) and adds the layers to the active map in a `WWNet` group layer |
-| Add Model To Map | Adds the `wwn_*` layers (`<file>.gpkg\main.<table>`) of an existing model and applies symbology: nodes by `node_type`, conduits by DN with an Arcade label `DN225 1:300`. Symbology failures only warn |
-| Check Model | `wwnet_native.check` (same output as `wwnet check --json`); messages via AddMessage/AddWarning/AddError; optional output issues table |
-| Join Dangling Sewer Ends | (category Model) Repairs dangling downstream ends (junction / inspection shaft / inspection opening nodes with an incoming sewer and no outgoing one, which ICM and SWMM treat wrongly): joins each to the nearest sewer within the maximum distance (5 m), splitting it at a new tee node; *Preview only* (default on) just lists what would change; see [Join Dangling Sewer Ends](#join-dangling-sewer-ends) |
-| Run Design | `wwnet_native.design` (same output as `wwnet design --json`); prints the pass/warn/fail summary, a per-conduit table (DN, grade, GSDF / pumped / total / governing capacity (Cap = lesser of Table 4.4 and hydraulic) / T4.4 / Hyd L/s, d/D, velocity, result, worst message) and failing/warning checks with DS 50 clauses (max 5 per rule; info such as "cover not checked" is summarised in one line). By default adds a temporary in-memory layer `Design results — <model>` (polylines coloured pass/warn/fail, labelled with flow/capacity and d/D) to the active map and selects failed conduits on it and on the model's conduit layer. The layer lives in `memory\` and is not saved: re-run Run Design after restarting Pro. "Add results table to map" (off by default) also adds the standalone `wwn_results_conduits` table |
-| Trace | Upstream / downstream from a node (value list filled from the Nodes layer); selects traced nodes and conduits |
-| Run Simulation | `wwnet_native.simulate` (SWMM dynamic wave; needs a wheel built with the simulation service, else the `wwnet simulate` CLI fallback). Parameters: duration h (48), warm-up h (24), roughness manning/ks, Manning n (0.013), flow scale (1.0), show results layer, optional `.inp` export. Messages: summary (inflow ADWF, peak outlet flow, continuity error, surcharged / flooded counts), top-20 conduits by max d/D, warnings. Adds the temporary layer `Simulation results — <model>` (conduits green < 0.5, yellow 0.5-0.75, orange 0.75-1.0 d/D, red surcharged; labelled `<flow> L/s d/D <x>`; fields `max_flow_lps`, `max_d_over_d`, `max_velocity_mps`, `surcharged_min`) and, only if a node floods, `Simulation nodes — <model>` (red points). Full results are stored in the model's `wwn_sim_*` tables. With pump stations in the model it also prints, after the conduit table, **Pump stations** (max level, start / stop / overflow levels m AHD, overflow m3, time of max), **Pumps** (starts, starts/h, run %, Qmax) and **Rising mains** (ID mm, length, Qmax, vmax) tables and warns for: wet well overflow > 0; a pump above 10 starts/h (`MAX_STARTS_PER_HOUR`; the right limit depends on motor size, check the station's spec); rising main peak velocity below 0.7 m/s (`MIN_RM_VELOCITY`, sediment) or above 2.0 m/s (`MAX_RM_VELOCITY`, headloss / surge). The thresholds are constants at the top of `tools_impl.py` and are printed with the tables. The temporary layer `Simulation pump stations — <model>` (points; fields `ps_id`, `max_level_m`, `overflow_m3`, `starts_per_hour` and `run_time_pct` = worst pump, `rm_max_velocity_mps`, `flag`; red if flagged, green if `ok`) is added when the run has pump stations and replaced on re-run. Results are also in `wwn_sim_pumps`, `wwn_sim_pump_stations`, `wwn_sim_rising_mains` |
-| Pipe Capacity | Colebrook-White calculator (DN, grade, ks, flow) + DS 50 checks; uses `wwnet_native` if importable, else the shared Python fallback |
-| Export To ICM | (category Data) Writes the model's nodes, gravity sewers, **rising mains and pumps** with InfoWorks ICM field names to `<model>_ICM.gdb` (`ICM_Nodes`, `ICM_Conduits`, `ICM_Pumps`; keeps blanks and vertices) plus `<model>_ICM_nodes.csv` (x / y) / `_conduits.csv` / `_pumps.csv` / `_head_discharge.csv` and `<model>_ICM_import_notes.txt` (Open Data Import Centre field mapping; import nodes, then conduits, then pumps). Output in GDA2020 or GDA94 MGA 50. Node types: chambers → Manhole, tees / IS ends → Break, outfall → Outfall; chamber/shaft area from `chamber_diameter_mm`; chamber floor falls back to the lowest connected invert. Conduits: unique single-character `link_suffix` per US node (shared with pumps), CIRC, width = height = internal diameter (else DN), Colebrook-White ks (default 1.0 mm), `solution_model` = Full. **Pressure side** (same network as Run Simulation): wet well (Manhole, chamber/shaft area = station wet well area, default 7.07 m²) → pumps (`Rotpmp` with a head-discharge table `HD_<pump_id>` from the curve, else `Fixpmp` at the station rate; switch on/off = start/stop levels, defaults floor + 1.0 / + 0.3 m; assist +0.2 / +0.1 m; standby not exported) → `<ps_id>_DEL` delivery node (Break, flood type Sealed, at the wet well floor) → rising main conduit (`solution_model` = ForceMain, wet well floor → discharge chamber floor, CW ks default 1.5 mm or Hazen-Williams C as `HW`) → discharge node (Outfall if nothing is downstream of it). `wwn_link_kind` = gravity / rising_main. Optional DEM parameter fills blank ground levels (`GetCellValue`, no Spatial Analyst; `wwn_ground_source` = `model` / `DEM` / `wet well`; warns if the DEM ground is < 0.3 m above the chamber floor). A timing line is logged. Abandoned conduits / rising mains and sub-catchments are not exported |
-| Set Assistant API Key | Stores the Anthropic key (`GPEncryptedString`) with Windows DPAPI; default model / effort; optional fallback CLI path |
-| Verify Setup | Prints where `wwnet_native` / `anthropic` / dependencies are loaded from and whether they import; optional live API test (tiny request, key never shown) |
-| Self Test | (category Assistant) Runs every tool against the bundled demo model in a scratch folder (optionally also the map steps) and writes one report file to paste back |
-| Update WWNet | (category Assistant) Applies a downloaded update zip (CI artifact `wwnet-arcgis-update`) to the installed toolbox: no extracting, no Unblock, no restart for Python changes; locked native files are staged and swapped in at the next Pro start. Backs up changed files to `.update_backup/` |
-| Ask WWNet Assistant | DS 50 assistant with tools `list_layers`, `get_selected_features`, `query_features`, `get_feature`, `pipe_capacity`, `check_conduit`, `residential_gsdf`, `lookup_ds50`, `propose_edits` |
+| Tool | Category | What it does |
+|---|---|---|
+| New Model | Model | Creates an empty model GeoPackage and adds its layers to the map (WWNet group) |
+| Add Model To Map | Model | Adds a model's layers (and result / issue layers that hold data); upgrades older models to schema v3 |
+| Model Settings | Model | Shows / sets ADWF per connection (L/day), peaking factor (GSDF = ADWF x factor) and the default diurnal profile; lists the profiles |
+| Join Dangling Sewer Ends | Model | Joins dangling downstream ends to the nearest sewer (splits it at a new tee); preview first |
+| Import Sewer Data | Data | Water Corporation gravity sewer layers -> new model with connection point loads (see below) |
+| Import Pressure Data | Data | Pump stations + pressure mains into an existing model (see below) |
+| Set Pump Station Data | Data | Wet well, levels, pumps and pump curve from the data sheet |
+| Import Diurnal Profile | Data | Profile from CSV / TXT or text pasted from ICM (Time / Factor); mean checked, not changed |
+| Assign Profile | Data | Sets the profile of the node loads of the selected nodes, selected node loads / sub-catchments, or all |
+| Export To ICM | Data | Nodes, gravity sewers, rising mains and pumps with InfoWorks ICM field names (file gdb + CSV + mapping notes) |
+| Check Model | Analysis | Topology / data checks, plus missing pump station data; results in the Issues layer |
+| Run Design | Analysis | Steady DS 50 design; Design results layer; selects failed conduits |
+| Run Simulation | Analysis | SWMM dry weather run with a run label; roughness `ks` (Colebrook, as the design) by default or Manning n; series stored for the 5 conduits nearest the outlet and the conduits selected in the map; pump station tables / flags and a temporary pump station layer |
+| Trace | Analysis | Upstream / downstream from a node or conduit id (blank = the one selected in the map); selects the path; reports upstream connections, ADWF and design GSDF |
+| Show Simulation Run | Results | Shows a stored run (the latest 10 are kept) in the Simulation results layers |
+| Compare Simulation Runs | Results | Run B minus run A per conduit: worse / better / newly surcharged / relieved, Simulation comparison layer |
+| Plot Hydrograph | Results | Flow against time for stored series: peaks in the messages, optional CSV, chart on the series table (best effort) |
+| Pipe Capacity | Calculators | Colebrook-White capacity of any DN; with a flow, d/D and (DN150-DN600) the DS 50 checks |
+| Verify Setup | Setup | Where `wwnet_native` is loaded from and whether it has every function the toolbox needs |
+| Self Test | Setup | Runs every tool on the bundled demo model in a scratch folder and writes one report file to paste back |
+| Update WWNet | Setup | Applies a Python-only update zip (`wwnet-arcgis-update`) in place; never writes engine binaries; removes obsolete files |
 
 ## Import Pressure Data
 
@@ -197,122 +204,49 @@ message); afterwards re-add the layers and re-run Check Model / Export To ICM.
 
 ## Install
 
-### Recommended: the no-install bundle (no pip, no environment clone, no `.exe`)
-1. Download the CI artifact **`wwnet-arcgis-bundle-win-py311`** (GitHub Actions > CI run > Artifacts) and extract the
-   zip to a **local, non-OneDrive** folder you can write to, e.g. `C:\Tools\WWNet-ArcGIS` (OneDrive sync can lock
-   `.pyd` files and Pro caches modules).
-2. In ArcGIS Pro: Catalog pane > Toolboxes > right-click > **Add Toolbox** > select `WWNet.pyt`.
-   After updating files, right-click the toolbox > Refresh (or restart Pro).
-3. Run **Verify Setup**. It lists the Python version and where `wwnet_native`, `anthropic`, `pydantic`, `httpx2`,
-   `jiter`, `typing_extensions`, `anyio`, `truststore`, `certifi` are loaded from, and whether `import anthropic` /
-   `import wwnet_native` work. Tick *Live API test* (after step 4) for one tiny request with your stored key.
-4. Run **Set Assistant API Key**. The key is encrypted with DPAPI (current Windows user) in
-   `%APPDATA%\WWNet\anthropic_key.bin`; model / effort / CLI path go in `%APPDATA%\WWNet\settings.json`.
-   Lookup order when running: `ANTHROPIC_API_KEY` environment variable, then the DPAPI file. The key is never printed.
+### The no-install bundle (no pip, no environment clone, no `.exe`)
+1. Close ArcGIS Pro. Download the CI artifact **`wwnet-arcgis-bundle-win-py311`** from the latest green run.
+2. **Delete the old `WWNet-ArcGIS` folder** (so no file of an earlier version is left behind), then extract the new
+   one to a local, non-OneDrive folder.
+3. In ArcGIS Pro: Catalog pane > Toolboxes > Add Toolbox > `WWNet.pyt` (or right-click the toolbox > Refresh).
+4. Run **Verify Setup**, then **Self Test** (tick the map steps) and send the report.
 
-How it works: the zip carries `vendor/` (anthropic, pydantic, pydantic_core, httpx2, httpcore2, jiter, truststore,
-typing_extensions, `wwnet_native` ... built for Python 3.11 win_amd64, the version in ArcGIS Pro 3.3). The toolbox puts
-`vendor/` at the front of `sys.path` when it loads (`wwnet_arcgis/vendor.py`); nothing is installed into Pro's Python.
-`anyio`, `sniffio`, `idna` and `certifi` are deliberately **not** shipped: Pro's own copies are used, so Pro's
-Jupyter and other tools are unaffected. `anthropic` needs `typing_extensions >= 4.14` whereas Pro ships 4.9 (and has
-usually imported it already); the toolbox then swaps in the vendored copy for the running session (backward
-compatible; Verify Setup prints a note when it does). Python in Pro other than 3.11 needs a rebuilt bundle.
-Build one yourself: `pip install --target vendor --only-binary=:all: anthropic <wwnet_native wheel>`, delete the
-`anyio*`, `sniffio*`, `idna*`, `certifi*` folders, then `python package.py --vendor-dir vendor` (package.py also
-skips those four if still present).
+What is in it: the toolbox Python files, `wwnet_shared/` (the shared engine-facing Python), templates, rule sets,
+the demo model, and `vendor/wwnet_native/` with the one compiled file, `wwnet_native.pyd` (Windows version
+information: product WWNet, description "WWNet wastewater network engine (Python extension module)"). Nothing is
+installed into Pro's Python; the toolbox puts `vendor/` first on `sys.path` when a tool runs.
 
-Behind a TLS-inspecting proxy the assistant trusts the Windows certificate store (httpx2 uses `truststore` on
-Windows; for older SDKs the toolbox calls `truststore.inject_into_ssl()` only during an assistant run). If
-`SSL_CERT_FILE` / `SSL_CERT_DIR` is set, httpx2 uses that instead.
-
-### Quick updates (no restart)
-1. Download the artifact `wwnet-arcgis-update` from the latest green CI run (leave it as a `.zip`; do not extract it
-   and no Windows *Unblock* is needed).
-2. In ArcGIS Pro run **Update WWNet** and pick the downloaded zip. Changed files are written in place (old copies go
-   to `.update_backup/<timestamp>/`); the new Python code is used from the next tool run, no restart. After an update, run Self Test and paste the report.
-3. If the tool says `WWNet.pyt` changed, right-click the toolbox in the Catalog pane > Refresh.
-
-When the native module (`wwnet_native`) changes you still need the full bundle `wwnet-arcgis-bundle-win-py311`
-once; Update WWNet stages a locked native file as `*.pending` and swaps it in the next time Pro starts (restart
-Pro once).
-
-### Alternative: clone Pro's environment and pip install (if you may)
-1. Extract `wwnet-arcgis-<ver>.zip` (build it with `python package.py`, or use the repo checkout directly) and add
-   `WWNet.pyt` as above.
-2. `arcgispro-py3` is read-only: Pro > Settings > **Package Manager** > Environment Manager > *Clone Default*;
-   activate the clone and restart Pro. In *Python Command Prompt* run
-   `pip install wwnet_native-<ver>-cp39-abi3-win_amd64.whl` (CI artifact `wwnet_native-windows-abi3`, or build from
-   `crates/wwnet-py` with `maturin build --release`) and, for the assistant, `pip install anthropic`.
-3. The `wwnet` CLI is only an optional fallback (path in *Set Assistant API Key* > `PATH` >
-   `<toolbox>\bin\wwnet.exe`) when the module is missing; it is not needed.
-4. Run **Set Assistant API Key** and **Verify Setup**.
+### Quick updates (Python only)
+CI artifact **`wwnet-arcgis-update`** + the **Update WWNet** tool: no extract, no Unblock, no restart (modules are
+reloaded on every tool run). It writes only Python and data files, never binaries: a change to the engine always
+needs the full bundle above. If `WWNet.pyt` changed: right-click the toolbox > Refresh.
 
 ### Development (no packaging)
-Keep the toolbox inside the repository: `wwnet_arcgis/shared.py` then imports the shared modules straight from
-`../qgis_plugin/wwnet` (aliased as `wwnet_shared`). The packaged zip carries a copy under `wwnet_shared/`
-(`core/*` and `assistant/{engine,client,prompt,tools,install}.py`; QGIS-dependent files are never copied, and a
-test enforces that nothing shipped imports `qgis` / Qt).
+Keep the toolbox inside the repository: `wwnet_arcgis/shared.py` then imports `../qgis_plugin/wwnet/core` as
+`wwnet_shared`. The packaged zip carries a copy of `core/*` only (a test enforces that nothing shipped imports
+`qgis` / Qt or contains assistant / credential code).
 
-## Corporate IT caveats
-- The default environment (`arcgispro-py3`) is read-only for most users and cloning may be blocked by the proxy:
-  use the no-install bundle (above), which needs neither a clone nor pip.
-- The assistant needs outbound **HTTPS (443) to `api.anthropic.com`**; behind a TLS-inspecting proxy the corporate
-  root CA must be trusted by the cloned environment. Check, design, trace and capacity need no network.
-- No `.exe` is run: only the `wwnet_native` Python extension (`.pyd`) is loaded by Pro's own Python, so
-  application-control rules that block unsigned executables do not apply to the toolbox.
-- `%APPDATA%\WWNet` is per user (roaming); DPAPI blobs only decrypt for the same Windows user, so a copied key file
-  is useless on another account.
-
-## Data privacy
-When the assistant uses its tools, **attribute values of the features it reads** (IDs, levels, DN, grades, notes ...)
-and your question are sent to Anthropic's API, together with the DS 50 ruleset and schema summary. Geometry is not
-sent. Do not use the assistant on models containing data you may not disclose. Conversation history stored locally
-in `%APPDATA%\WWNet\history\<hash>.json` (one file per project + map) keeps only your questions and the
-assistant's final answers; tick **Reset conversation** to delete it.
-
-## The assistant and edits
-`propose_edits` never writes by itself. With **Apply proposed edits** unticked (default) the run prints the proposals
-as a table (layer, id, field, current, proposed) and a note to re-run with the box ticked. With it ticked, the
-proposals made *in that run* are validated against the schema (enums, types, no id/geometry edits, results/issues
-tables read-only) and written with `arcpy.da.Editor` + `UpdateCursor`; each change is reported (`old -> new`).
-Nothing else is ever written. Because each run is a fresh model call, a re-run may propose slightly different edits:
-review the messages afterwards.
+## Antivirus / corporate IT
+- The only compiled file is `vendor/wwnet_native/wwnet_native.pyd` (unsigned, rebuilt by CI for every engine
+  change, so each build is new to reputation-based scanners). If a scanner flags it, report it to IT security as a
+  false positive with the file's SHA-256 so it can be allowlisted; code signing would be the permanent fix.
+- The toolbox stores no credentials, makes no network connections, runs no `.exe` or subprocess, and never
+  renames or replaces binaries at start-up.
 
 ## Editing GeoPackages in Pro
-- Pro reads GeoPackage as a simple feature class (`file.gpkg\main.wwn_conduits`). Editing is supported; `fid` is the
-  ObjectID and tables need the `fid` primary key from `schema.sql`.
-- Do not have an open Pro **Edit** session with unsaved edits on the layer (or a join on it) when applying
-  assistant edits: the cursor will fail with a lock error. Save/discard first.
-- `wwnet_native` opens the file itself: save edits in Pro before Check/Design. Remove joins before editing.
-- `wwn_results_conduits` and `wwn_issues` are rewritten by Design; treat them as read-only.
-- Layers are added by catalog path (`main.<table>`); if a table is missing from `gpkg_contents` it is skipped.
-
-## Feature comparison with the QGIS plugin
-
-| Feature | QGIS plugin | ArcGIS toolbox |
-|---|---|---|
-| New / open model, grouped layers | yes (menu + toolbar) | yes (tools) |
-| Styling | nodes by type, conduits by DN + label, value-map widgets, defaults | nodes by type, conduits by DN + Arcade label; no form widgets/defaults |
-| Check model | dock with click-to-zoom list | geoprocessing messages + optional table (no dock) |
-| Design run | `wwnet design` result in layer | summary, results table/join, select failed |
-| Trace | `wwnet_native.trace` only | upstream/downstream tool with selection |
-| Pipe capacity | assistant tool only | dedicated calculator tool |
-| Assistant UI | chat dock, streaming, cancel | tool dialog, streamed to messages, no cancel mid-run |
-| Assistant tools / engine / prompt | shared | **same shared modules** |
-| Edit approval | per-edit dialog, selects features | tick-box up front; proposals table; applied only in that run |
-| Key storage | QGIS auth DB / QgsSettings | Windows DPAPI file / env var |
-| `anthropic` install | one-click pip | none: shipped in the bundle's `vendor/` (or manual pip in a cloned env) |
-| Conversation | live in dock | persisted per map, resettable |
-| Platforms | Windows/Linux/macOS | Windows (ArcGIS Pro) |
+- Pro reads GeoPackage tables as `file.gpkg\main.<table>`; `fid` is the ObjectID.
+- The engine opens the file itself: save edits in Pro before Check / Design / Simulate (each tool reminds you).
+- Tools that write with sqlite (Import Pressure Data, Set Pump Station Data, Join Dangling Sewer Ends) fail while
+  Pro holds a lock: close attribute tables / remove the model's layers first.
+- Result and issue layers are rewritten by the tools: treat them as read-only.
 
 ## Development
 
-    pip install pytest anthropic
-    # build + install the native wheel (native-dependent tests skip without it)
+    pip install pytest pyflakes
     cd crates/wwnet-py && maturin build --release && pip install --force-reinstall ../../target/wheels/wwnet_native-*.whl
-    cargo build -p wwnet-cli          # only for the CLI-fallback/parity tests (or set WWNET_EXE)
+    cargo build -p wwnet-cli          # only for the binding / CLI parity test (or set WWNET_EXE)
     pytest arcgis_toolbox/tests -q    # no ArcGIS needed: tests use a fake `arcpy` over sqlite3
-    python arcgis_toolbox/package.py  # dist/wwnet-arcgis-<ver>.zip (add --vendor-dir <folder> for the no-install bundle)
+    python arcgis_toolbox/package.py  # dist/wwnet-arcgis-<ver>.zip (add --vendor-dir <folder> for the bundle)
 
-Not verifiable outside ArcGIS Pro (see the final notes in the change description): real `arcpy` behaviour for
-layer/group creation, symbology, `Editor` on GeoPackage, joins and selections, parameter UI, and the real DPAPI calls.
+Not verifiable outside ArcGIS Pro: real `arcpy` behaviour for layer / group creation, symbology, selections,
+charts, parameter UI.

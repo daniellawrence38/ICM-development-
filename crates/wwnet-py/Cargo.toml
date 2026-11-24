@@ -23,3 +23,7 @@ wwnet-design = { path = "../wwnet-design" }
 wwnet-core = { path = "../wwnet-core" }
 wwnet-sim = { path = "../wwnet-sim" }
 serde_json.workspace = true
+
+[build-dependencies]
+# Windows version information on wwnet_native.pyd (no-op on other targets)
+winresource = { version = "0.1", default-features = false }

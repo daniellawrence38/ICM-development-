@@ -44,7 +44,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install pytest anthropic pyflakes
+      - run: pip install pytest pyflakes
       - run: pip install maturin
       - run: maturin build --release --manifest-path crates/wwnet-py/Cargo.toml --out wheels
       - run: pip install --force-reinstall --no-index --find-links wheels wwnet_native
@@ -75,8 +75,8 @@ jobs:
           path: crates/wwnet-py/dist
 
   arcgis-bundle:
-    # No-install bundle for ArcGIS Pro 3.x (Python 3.11 win_amd64): toolbox + vendor/ (anthropic, pydantic, httpx2,
-    # jiter, truststore, typing_extensions, wwnet_native). anyio/sniffio/idna/certifi are left to Pro's own copies.
+    # No-install bundle for ArcGIS Pro 3.x (Python 3.11 win_amd64): toolbox + vendor/ with only the wwnet_native
+    # engine (no assistant / third-party packages).
     runs-on: windows-latest
     defaults:
       run:
@@ -90,22 +90,25 @@ jobs:
       - run: maturin build --release --manifest-path crates/wwnet-py/Cargo.toml --out wheels
       - name: Build vendor folder
         run: |
-          pip install --target vendor --only-binary=:all: anthropic wheels/wwnet_native-*.whl
-          rm -rf vendor/anyio vendor/anyio-* vendor/sniffio vendor/sniffio-* vendor/idna vendor/idna-* \
-                 vendor/certifi vendor/certifi-* vendor/bin
-          ls vendor
+          pip install --target vendor --only-binary=:all: --no-deps wheels/wwnet_native-*.whl
+          rm -rf vendor/bin
+          ls -R vendor
       - run: python arcgis_toolbox/package.py --vendor-dir vendor --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wwnet-arcgis-bundle-win-py311
           path: dist/*.zip
-      - name: Smoke test in a Pro-like venv (old anyio / typing_extensions already loaded)
+      - name: Smoke test the extracted bundle (engine imports, no assistant shipped)
         run: |
-          python -m venv pro-like
-          pro-like/Scripts/python -m pip install anyio==4.2.0 typing_extensions==4.9.0 sniffio==1.3.0 idna==3.4 certifi==2024.2.2
           python -m zipfile -e dist/wwnet-arcgis-*.zip extracted
-          SITE=$(pro-like/Scripts/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-          pro-like/Scripts/python arcgis_toolbox/tests/bundle_smoke.py "$PWD/extracted/WWNet-ArcGIS" "$SITE" native
+          python arcgis_toolbox/tests/bundle_smoke.py "$PWD/extracted/WWNet-ArcGIS" native
+      - name: wwnet_native.pyd carries Windows version information
+        shell: pwsh
+        run: |
+          $f = Get-ChildItem -Recurse extracted/WWNet-ArcGIS/vendor -Filter *.pyd | Select-Object -First 1
+          $v = $f.VersionInfo
+          "$($f.Name): ProductName=$($v.ProductName) FileDescription=$($v.FileDescription) FileVersion=$($v.FileVersion)"
+          if ($v.ProductName -ne "WWNet" -or -not $v.FileVersion) { throw "version resource missing from $($f.Name)" }
 
   arcgis-update:
     # Small, fast artifact for the toolbox's "Update WWNet" tool: only the pure-Python parts (no vendor/, no bin/).

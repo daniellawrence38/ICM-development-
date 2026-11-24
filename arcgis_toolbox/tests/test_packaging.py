@@ -28,7 +28,7 @@ def test_dev_shared_resolves_to_plugin():
     from wwnet_arcgis import shared
     assert shared.shared_dir() == TOOLBOX.parent / "qgis_plugin" / "wwnet"
     assert shared.core("schema").FEATURE_TABLES
-    assert shared.assistant("engine").Engine
+    assert not hasattr(shared, "assistant")          # the assistant is not part of the ArcGIS toolbox
 
 
 def test_toolbox_modules_have_no_qgis_and_no_toplevel_arcpy():
@@ -47,10 +47,9 @@ def test_zip_contents_and_no_qgis(tmp_path):
         for must in ("WWNet.pyt", "README.md", "templates/schema.sql", "rulesets/ds50_v2r4.toml",
                      "templates/import/watercorp_sewer.toml", "templates/demo/demo.gpkg", "templates/profiles/example_residential.csv", "wwnet_shared/core/importer.py", "wwnet_shared/core/repair.py",
                      "wwnet_arcgis/sewer_import.py", "wwnet_shared/__init__.py", "wwnet_shared/core/schema.py",
-                     "wwnet_shared/core/native.py", "wwnet_shared/assistant/engine.py",
-                     "wwnet_shared/assistant/client.py", "wwnet_shared/assistant/prompt.py",
-                     "wwnet_shared/assistant/tools.py", "wwnet_arcgis/tools_impl.py",
-                     "wwnet_arcgis/dpapi.py"):
+                     "wwnet_shared/core/native.py", "wwnet_shared/core/calc.py",
+                     "wwnet_shared/core/summary.py", "wwnet_shared/core/style.py", "wwnet_arcgis/tools_impl.py",
+                     "wwnet_arcgis/engine.py"):
             assert top + must in names, must
         for forbidden_file in ("dock.py", "qgis_tools.py", "qt_bridge.py", "secrets.py",
                                "settings_dialog.py", "plugin.py"):
@@ -75,7 +74,7 @@ def test_no_cli_or_python_engine_copies_shipped(tmp_path):
 
 UPDATE_MUST = (
     "WWNet.pyt", "README.md", "wwnet_arcgis/tools_impl.py", "wwnet_arcgis/sewer_import.py",
-    "wwnet_shared/__init__.py", "wwnet_shared/core/schema.py", "wwnet_shared/assistant/engine.py",
+    "wwnet_shared/__init__.py", "wwnet_shared/core/schema.py", "wwnet_shared/core/summary.py",
     "templates/schema.sql", "rulesets/ds50_v2r4.toml",
 )
 
@@ -144,7 +143,7 @@ def test_extracted_zip_imports_standalone(tmp_path):
         "from wwnet_arcgis import shared, capacity, gpkg\n"
         "pkg = shared.ensure(); assert pkg.__file__.startswith(sys.argv[1]), pkg.__file__\n"
         "print(len(shared.core('schema').column_summary()))\n"
-        "print(shared.assistant('prompt').build_system_text()[:20])\n"
+        "print(shared.core('summary').issue_line({'code': 'X', 'object_type': 'node', 'object_id': 'N1', 'message': 'm'}))\n"
         "print(len(capacity.describe({'dn_mm': 225, 'grade_1in': 300, 'ks_mm': 1.0, 'full_flow_lps': 1.0,"
         " 'full_velocity_mps': 1.0})))\n"
         "assert not any(m.startswith('qgis') for m in sys.modules)\n"

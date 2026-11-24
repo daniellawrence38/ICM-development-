@@ -1,32 +1,19 @@
-"""Smoke test of an extracted bundle inside a "Pro-like" Python (used by CI and tests/test_vendor.py).
+"""Smoke test of an extracted bundle (used by CI): the vendor folder activates and wwnet_native imports.
 
-usage: python bundle_smoke.py <extracted WWNet-ArcGIS dir> <site-packages of this python> [native|no]
-The interpreter must already contain anyio 4.2.0, typing_extensions 4.9.0, sniffio, idna, certifi (Pro's set).
+usage: python bundle_smoke.py <extracted WWNet-ArcGIS dir> [native|no]
 """
 import os
 import sys
 
-BUNDLE, SITE = sys.argv[1], sys.argv[2]
-NATIVE = len(sys.argv) > 3 and sys.argv[3] == "native"
-
-
-def under(mod, root):
-    n = os.path.normcase
-    return n(os.path.abspath(mod.__file__)).startswith(n(os.path.abspath(root)))
-
-
-import typing_extensions                       # simulate Pro: the old copy is already loaded
-assert under(typing_extensions, SITE), typing_extensions.__file__
+BUNDLE = sys.argv[1]
+NATIVE = len(sys.argv) > 2 and sys.argv[2] == "native"
 sys.path.insert(0, BUNDLE)
-from wwnet_arcgis import vendor
+from wwnet_arcgis import vendor  # noqa: E402
 vendor.activate(BUNDLE)
-import anthropic, anyio, sniffio, idna, certifi
-client = anthropic.Anthropic(api_key="x")
-import typing_extensions as te
-assert under(te, os.path.join(BUNDLE, "vendor")), te.__file__
-assert hasattr(te, "Sentinel")
-for m in (anyio, sniffio, idna, certifi):       # Pro's copies must stay in use
-    assert under(m, SITE), (m.__name__, m.__file__)
+assert not os.path.isdir(os.path.join(BUNDLE, "vendor", "anthropic")), "assistant packages must not be shipped"
+assert not os.path.isdir(os.path.join(BUNDLE, "wwnet_shared", "assistant")), "assistant modules must not be shipped"
 if NATIVE:
-    import wwnet_native  # noqa: F401
-print("SMOKE-OK", anthropic.__version__)
+    import wwnet_native
+    assert wwnet_native.SCHEMA_VERSION >= 3, wwnet_native.SCHEMA_VERSION
+    print("wwnet_native", wwnet_native.version())
+print("SMOKE-OK")

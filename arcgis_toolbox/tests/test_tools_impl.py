@@ -344,20 +344,13 @@ def test_pyt_tools_parameters_and_categories(fake_arcpy):
                            "Import Sewer Data", "Import Pressure Data", "Set Pump Station Data",
                            "Import Diurnal Profile", "Assign Profile", "Export To ICM", "Check Model", "Run Design",
                            "Run Simulation", "Trace", "Show Simulation Run", "Compare Simulation Runs",
-                           "Plot Hydrograph", "Pipe Capacity", "Ask WWNet Assistant", "Set Assistant API Key",
-                           "Verify Setup", "Self Test", "Update WWNet"]
-    assert {t.category for t in tools.values()} == {"Model", "Data", "Analysis", "Results", "Calculators",
-                                                    "Assistant", "Setup"}
+                           "Plot Hydrograph", "Pipe Capacity", "Verify Setup", "Self Test", "Update WWNet"]
+    assert {t.category for t in tools.values()} == {"Model", "Data", "Analysis", "Results", "Calculators", "Setup"}
     for t in tools.values():
         params = t.getParameterInfo()
         assert all(p.name and p.datatype for p in params) and len({p.name for p in params}) == len(params)
         assert not any(" wwnet " in (t.description or "") or "`wwnet" in (t.description or "") for _ in [0])
-    key = {p.name: p for p in tools["Set Assistant API Key"].getParameterInfo()}
-    assert key["key"].datatype == "GPEncryptedString" and "exe" not in key
-    ask = {p.name: p for p in tools["Ask WWNet Assistant"].getParameterInfo()}
-    assert ask["model"].value == "claude-opus-5-5" and ask["model"].filter.list == mod.MODELS
-    assert ask["apply"].value is False and ask["apply_last"].value is False
-    assert ask["question"].controlCLSID and ask["layer"].datatype == "GPFeatureLayer"
+    assert not hasattr(mod, "AskWWNetAssistant") and not hasattr(mod, "SetAssistantApiKey")
     sim = {p.name: p for p in tools["Run Simulation"].getParameterInfo()}
     assert sim["roughness"].value == "ks" and sim["roughness"].filter.list == ["ks", "manning"]
     assert sim["export_inp"].direction == "Output" and sim["out_gpkg"].direction == "Output"

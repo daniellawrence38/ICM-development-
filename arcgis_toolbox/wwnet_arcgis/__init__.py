@@ -6,5 +6,5 @@ from pathlib import Path as _Path
 
 from . import vendor as _vendor
 
-# No-install bundle: put <toolbox>/vendor first on sys.path before anything imports wwnet_native / anthropic.
+# No-install bundle: put <toolbox>/vendor first on sys.path before anything imports wwnet_native.
 _vendor.activate(_Path(__file__).resolve().parent.parent)

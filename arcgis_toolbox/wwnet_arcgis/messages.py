@@ -39,32 +39,3 @@ class Messages:
             self.arcpy.SetProgressor("default", str(label))
         except Exception:  # noqa: BLE001
             pass
-
-
-class ChunkedWriter:
-    """Buffers streamed text and emits it as messages at line ends or every `chunk` chars."""
-
-    def __init__(self, emit, chunk: int = 240):
-        self.emit, self.chunk, self.buf = emit, chunk, ""
-
-    def write(self, text: str):
-        self.buf += text
-        while True:
-            nl = self.buf.find("\n")
-            if nl >= 0:
-                line, self.buf = self.buf[:nl], self.buf[nl + 1:]
-                if line.strip():
-                    self.emit(line)
-                continue
-            if len(self.buf) >= self.chunk:
-                cut = self.buf.rfind(" ", 0, self.chunk)
-                cut = cut if cut > 0 else self.chunk
-                self.emit(self.buf[:cut])
-                self.buf = self.buf[cut:].lstrip(" ")
-                continue
-            break
-
-    def flush(self):
-        if self.buf.strip():
-            self.emit(self.buf.strip())
-        self.buf = ""

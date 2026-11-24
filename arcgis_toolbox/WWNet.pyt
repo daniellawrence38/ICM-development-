@@ -10,21 +10,12 @@ if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
 
 from wwnet_arcgis import vendor as _vendor  # noqa: E402
-_vendor.activate(_HERE)  # no-install bundle: <toolbox>/vendor first on sys.path (before wwnet_native / anthropic)
+_vendor.activate(_HERE)  # no-install bundle: <toolbox>/vendor (wwnet_native) first on sys.path
 
 from wwnet_arcgis import updater as _updater  # noqa: E402
-from wwnet_arcgis import settings as _settings  # noqa: E402
 from wwnet_arcgis import tools_impl as impl  # noqa: E402
 from wwnet_arcgis import pumpdata as _pumpdata  # noqa: E402  (stdlib only; used by getParameterInfo / updateParameters)
 
-try:  # one model list for both front ends (the shared assistant client)
-    from wwnet_arcgis import shared as _shared  # noqa: E402
-    _client = _shared.assistant("client")
-    MODELS = [m for m, _ in _client.MODELS]
-    EFFORTS = list(_client.EFFORTS)
-except Exception:  # noqa: BLE001 - the toolbox must still open
-    MODELS = ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
-    EFFORTS = ["low", "medium", "high"]
 MULTILINE = "{E5456E51-0C41-4797-9EE4-5269820C6F0E}"
 
 
@@ -743,70 +734,17 @@ class PipeCapacity(_Tool):
 
 # ---------------------------------------------------------------------- Assistant / Setup
 
-class AskWWNetAssistant(_Tool):
-    label = "Ask WWNet Assistant"
-    description = ("Ask the Claude-powered assistant about the model: flows, simulation runs, design checks and "
-                   "data. Layer attribute data is sent to Anthropic when the assistant uses its tools.")
-    category = "Assistant"
-
-    def getParameterInfo(self):
-        cfg = _settings.load()
-        q = _p("question", "Question", "GPString", required=False)
-        q.controlCLSID = MULTILINE
-        return [q,
-                _p("layer", "Context layer (optional)", "GPFeatureLayer", required=False),
-                _p("use_selected", "Use selected features", "GPBoolean", required=False, default=False),
-                _p("apply", "Apply proposed edits during this run", "GPBoolean", required=False, default=False),
-                _p("apply_last", "Apply the proposals from the last run (no question is sent)", "GPBoolean",
-                   required=False, default=False),
-                _p("reset", "Reset conversation", "GPBoolean", required=False, default=False),
-                _p("model", "Model", "GPString", default=cfg["model"], values=MODELS, category="Options"),
-                _p("effort", "Effort", "GPString", default=cfg["effort"], values=EFFORTS, category="Options")]
-
-    def update(self, p):
-        p["question"].enabled = not p.flag("apply_last")
-
-    def run(self, p, msgs):
-        from wwnet_arcgis import maplayers
-        lyr = None
-        if p.val("layer") is not None:
-            v = p.val("layer")
-            found = v if maplayers.layer_source(v) else maplayers.find_layer(arcpy, p.text("layer"))
-            lyr = maplayers.layer_name(found) if found is not None else p.text("layer")
-        impl.ask_assistant(arcpy, msgs, p.text("question", ""), lyr, p.flag("use_selected"), p.text("model"),
-                           p.text("effort"), p.flag("apply"), p.flag("reset"), apply_last=p.flag("apply_last"))
-
-
-class SetAssistantApiKey(_Tool):
-    label = "Set Assistant API Key"
-    description = ("Store the Anthropic API key (Windows DPAPI, current user) and the assistant's default model "
-                   "and effort. The key is never shown in messages.")
-    category = "Setup"
-
-    def getParameterInfo(self):
-        cfg = _settings.load()
-        return [_p("key", "Anthropic API key", "GPEncryptedString", required=False),
-                _p("clear", "Remove stored key", "GPBoolean", required=False, default=False),
-                _p("model", "Default model", "GPString", required=False, default=cfg["model"], values=MODELS),
-                _p("effort", "Default effort", "GPString", required=False, default=cfg["effort"], values=EFFORTS)]
-
-    def run(self, p, msgs):
-        impl.set_settings(msgs, p.text("key"), p.flag("clear"), p.text("model"), p.text("effort"))
-
-
 class VerifySetup(_Tool):
     label = "Verify Setup"
-    description = ("Show which wwnet_native / anthropic / pydantic ... copies are loaded (and from where), whether "
-                   "they import and provide every function the toolbox uses, and optionally make one tiny live "
-                   "API call.")
+    description = ("Show where the WWNet engine (wwnet_native) is loaded from, whether it imports and whether it "
+                   "provides every function the toolbox uses.")
     category = "Setup"
 
     def getParameterInfo(self):
-        return [_p("live", "Live API test (one tiny request with the stored key)", "GPBoolean",
-                   required=False, default=False)]
+        return []
 
     def run(self, p, msgs):
-        impl.verify_setup(msgs, p.flag("live"))
+        impl.verify_setup(msgs)
 
 
 class SelfTest(_Tool):
@@ -849,11 +787,14 @@ class UpdateWWNet(_Tool):
             arcpy.AddMessage(f"  updated: {rel}")
         if len(upd) > 30:
             arcpy.AddMessage(f"  ... and {len(upd) - 30} more")
-        for rel in res["pending"]:
-            arcpy.AddWarning(f"{rel}: file is locked. Native module staged; it will be swapped in the next "
-                             "time ArcGIS Pro starts \u2014 restart Pro once to use it")
+        if res["binaries"]:
+            arcpy.AddWarning(f"{len(res['binaries'])} engine / binary file(s) in the zip were NOT installed "
+                             f"({', '.join(res['binaries'][:5])}): engine changes need the full bundle "
+                             "(wwnet-arcgis-bundle-win-py311).")
         for rel in res["skipped"]:
             arcpy.AddWarning(f"Skipped: {rel}")
+        for rel in res.get("removed", []):
+            arcpy.AddMessage(f"  removed obsolete: {rel}")
         if res["backup"]:
             arcpy.AddMessage(f"Previous versions of changed files saved in: {res['backup']}")
         if "WWNet.pyt" in upd:
@@ -872,4 +813,4 @@ class Toolbox(object):
                       CheckModel, RunDesign, RunSimulation, Trace,
                       ShowSimulationRun, CompareSimulationRuns, PlotHydrograph,
                       PipeCapacity,
-                      AskWWNetAssistant, SetAssistantApiKey, VerifySetup, SelfTest, UpdateWWNet]
+                      VerifySetup, SelfTest, UpdateWWNet]

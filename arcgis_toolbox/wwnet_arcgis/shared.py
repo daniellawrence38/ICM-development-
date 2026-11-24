@@ -2,8 +2,7 @@
 
 * Packaged mode: ``<toolbox>/wwnet_shared/`` is a real package (copied by package.py).
 * Dev mode: ``../qgis_plugin/wwnet`` is aliased as the package ``wwnet_shared`` without
-  executing its ``__init__`` (which belongs to the QGIS plugin). Only ``core`` and the
-  QGIS-free ``assistant`` modules are ever imported.
+  executing its ``__init__`` (which belongs to the QGIS plugin). Only ``core`` modules are ever imported.
 
 Either way the shared code's relative imports (``from ..core import schema``) work unchanged.
 """
@@ -57,6 +56,3 @@ def core(name: str):
     return _mod(f"core.{name}")
 
 
-def assistant(name: str):
-    """assistant('engine') -> wwnet_shared.assistant.engine"""
-    return _mod(f"assistant.{name}")
