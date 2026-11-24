@@ -1,6 +1,6 @@
-# WWNet — session handover (2026-11-23)
+# WWNet — session handover (2026-11-24; base 2026-11-23)
 
-Branch: `ccr-54bf38a8-b92qd9` (2026-11-24: fast-forwarded from `ccr-472a9a6a-he69zu`, + pressure side in Export To ICM, §11). Earlier: `ccr-472a9a6a-he69zu`, `ccr-974cdaeb-c682le`. NOT merged: `ccr-7bd083b1-j0qlhq` (schema v3 / toolbox UX, diverged from `e107482`).
+Branch: `ccr-54bf38a8-b92qd9` (all work pushed; last code commit `e25f28d`). 2026-11-24: fast-forwarded from `ccr-472a9a6a-he69zu`, then pressure side in Export To ICM (§11). **Start here: §11 'Where we stopped'.** Earlier: `ccr-472a9a6a-he69zu`, `ccr-974cdaeb-c682le`. NOT merged: `ccr-7bd083b1-j0qlhq` (schema v3 / toolbox UX, diverged from `e107482`).
 Plan: `docs/PLAN.md`. OSS survey: `docs/reference-survey.md`. Function overview deck: `docs/WWNet_functions.pptx`.
 
 ## 1. User and working style
@@ -25,7 +25,7 @@ Plan: `docs/PLAN.md`. OSS survey: `docs/reference-survey.md`. Function overview 
 - **Python-only change** → CI artifact **`wwnet-arcgis-update`** (~120 KB, one zip layer, job `arcgis-update`, < 1 min) → user runs **Update WWNet** on the downloaded zip. No extract, no Unblock, no restart (modules are purged and re-imported on every tool run via `_impl()` in `WWNet.pyt`). If `WWNet.pyt` changed: right-click toolbox › Refresh.
 - **Native (Rust) change** → full bundle **`wwnet-arcgis-bundle-win-py311`** (close Pro, Unblock, extract, replace folder). Update WWNet can stage a locked `.pyd` as `.pending`; `vendor.activate` swaps it at the next Pro start.
 - After every update ask the user to run **Self Test** (tick map steps) and paste `WWNet_selftest_report.txt`.
-- Last reviewed build installed by the user: **`c4e67cb`** (run #62). Everything after it is docs only.
+- Last build installed by the user: **`60e8cc8`** (Self Test in Pro all PASS/WARN). `e25f28d` (headloss type) is pushed but NOT yet installed.
 
 ## 4. Architecture
 
@@ -92,7 +92,7 @@ Key ArcGIS modules: `tools_impl.py` (tool logic), `gpkg.py` (`split_datasource` 
 
 1. **Verify the pressure side on real data**, one step at a time: (a) select a PS + its pressure main inside a gravity model's area, remove model layers from the map, run Import Pressure Data (use selected) and check wet well / chaining / discharge messages; (b) Set Pump Station Data from a data sheet; (c) Run Simulation → pump tables, flags, pump station layer. Fix what real data breaks (assumptions listed in the importer: mains join end to end within 1 m; main starts within 30 m of the PS; wet well = terminal gravity node; GeoPackage without R-tree tables).
 2. **Sub-catchments** (user's stated next item): export `wwn_subcatchments` to ICM (polygons, outlet node, manual ADWF / population, profile) and check ICM's subcatchment import fields; possibly an import tool for catchment polygons.
-3. ~~Export pump stations / rising mains to ICM~~ done 2026-11-24 (§11); verify in ICM (ODIC mapping of `solution_model`, `flood_type`, pump table, head-discharge tables).
+3. ~~Export pump stations / rising mains to ICM~~ done 2026-11-24 (§11); finish the ICM verification there (run + compare).
 4. Real ICM diurnal profile ("1 Dunkley Ave Applecross PS4", 5-min, 288 rows) → compare simulated peaks with ICM.
 5. Write the user's saved ODIC `.cfg` files out with Export To ICM (needs the files from the user).
 6. R-tree handling in sqlite writers (repair / pressure import refuse or may fail if Pro adds spatial indexes).
@@ -128,21 +128,53 @@ CI jobs: rust (ubuntu + windows), plugin, arcgis-toolbox (pyflakes + pytest), wh
 ## 11. 2026-11-24: pressure pipes in Export To ICM
 
 User report: "Pressure pipes are not being included in the export to ICM". Cause: `icm_export.build` never read
-`wwn_rising_mains` / `wwn_pump_stations` / `wwn_pumps` (it only warned "NOT exported"). Fix (Python only →
-`wwnet-arcgis-update` artifact), mirroring the engine's network (`crates/wwnet-sim/src/pumps.rs`):
+`wwn_rising_mains` / `wwn_pump_stations` / `wwn_pumps` (it only warned "NOT exported"). Fix is Python only
+(→ `wwnet-arcgis-update` artifact + Update WWNet) and mirrors the engine's network (`crates/wwnet-sim/src/pumps.rs`).
 
-- Rising main → row in `ICM_Conduits`: `<ps_id>_DEL` → discharge node, `solution_model` = `ForceMain` (gravity rows
-  `Full`), wet well floor → discharge chamber floor (first/last `profile_json` level if present), CW ks (default 1.5 mm)
-  or `HW` C, `wwn_link_kind` = gravity / rising_main. Unknown discharge node → not exported (warned, `skipped`).
-- `<ps_id>_DEL` pump delivery node: Break, `flood_type` = Sealed, floor = wet well floor, ground = wet well ground;
-  placed at the rising main's first vertex, else the PS point, else 1 m east of the wet well.
-- `ICM_Pumps` (+ `_pumps.csv`): wet well → `_DEL`; `Rotpmp` + `HD_<pump_id>` head-discharge table (`_head_discharge.csv`
-  and listed in the notes; decreasing head, speed by affinity laws) or `Fixpmp` (`discharge` L/s = station rate);
-  switch on/off = start/stop (engine defaults if missing); assist +0.2/+0.1 m; standby skipped.
-- Wet well chamber/shaft area = `wet_well_area_m2` (default 7.07 m²). A rising-main discharge node with nothing
+Commits: `c6b4c46` pressure export; `60e8cc8` null-geometry fix; `e25f28d` headloss type; plus handover commits.
+
+### What the export now writes
+
+- **Rising main** → row in `ICM_Conduits`: `<ps_id>_DEL` → discharge node; `solution_model` = `ForceMain` (gravity
+  `Full`); `us/ds_headloss_type` = `None` (gravity `Normal`); inverts wet well floor → discharge chamber floor (first /
+  last `profile_json` level if present; intermediate points not exported); CW ks (default 1.5 mm) or `HW` C;
+  `wwn_link_kind` = gravity / rising_main. Unknown discharge node → not exported (warned, `skipped`).
+- **`<ps_id>_DEL` delivery node**: Break, floor = wet well floor, ground = wet well ground (copied after DEM fill),
+  `flood_type` = Sealed (ICM Break nodes have no flood type, so it is ignored). Placed at the rising main's first
+  vertex, else the PS point, else 1 m east of the wet well.
+- **`ICM_Pumps`** (+ `_pumps.csv`): wet well → `_DEL`; `Rotpmp` + `HD_<pump_id>` (curve → `_head_discharge.csv` and the
+  notes; decreasing head, speed by affinity laws) or `Fixpmp` (`discharge` L/s = station rate); switch on/off =
+  start/stop (engine defaults floor + 1.0 / + 0.3 m); assist +0.2 / +0.1 m; standby skipped. Link suffixes shared
+  with conduits. Stale `ICM_Pumps` / pump CSVs removed when a model has no pumps.
+- Wet well chamber/shaft area = `wet_well_area_m2` (default 7.07 m²). Rising-main discharge node with nothing
   downstream → Outfall (`wwn_outfall_reason` = rising main discharge).
-- New fields: nodes `flood_type`; conduits `solution_model`, `bottom/top_roughness_HW`, `wwn_link_kind`. The user's
-  saved ODIC configs need these mapped (else rising mains import as Full conduits).
-- Self Test step "export to ICM (pump station)": first Pro run FAILED (SHAPE@XY of a PS without geometry is `(None, None)`; fixed in `60e8cc8`, fake arcpy now mimics it); **Pro Self Test on `60e8cc8`: WARN (expected warnings only), 1 rising main + 1 Rotpmp pump exported**. ICM 2024.5 ODIC: ICM_Nodes, ICM_Conduits and ICM_Pumps import OK (`Rotpmp` accepted). Break nodes have no Flood type field (flood_type ignored). Validation: E2075 (Normal/High headloss not allowed with ForceMain) → `us/ds_headloss_type` = None on rising mains (gravity Normal) added; I2040 chamber area below minimum on demo N01 is info only. Next: re-export, validate, run. Unverified in ICM: link_type spelling (`Rotpmp`/`Fixpmp`), whether
-  ODIC can import the head-discharge CSV directly, `discharge` units (L/s vs ICM's flow unit).
+- New fields (user's saved ODIC configs must map them): nodes `flood_type`; conduits `solution_model`,
+  `us_headloss_type`, `ds_headloss_type`, `bottom/top_roughness_HW`, `wwn_link_kind`; whole new pump table.
+- Code: `icm_export._pressure` / `_station_pumps` (pure), `read_pressure_geometry`, `node_geometry_fn`,
+  `link_geometry_fn`, `write_gdb(..., extra_geom=)` for rows not in the GeoPackage (`_extra`). All `SHAPE@XY` reads go
+  through `_xy()`: **Pro returns `(None, None)` for a feature with no geometry** (Self Test crash, fixed `60e8cc8`; fake
+  arcpy now does the same and returns geometry objects for `SHAPE@`).
+- Tests: 263 toolbox (11 new ICM tests, helper `tests/pressure_line.py`), 104 plugin. Self Test step
+  "export to ICM (pump station)".
 
+### Verified in Pro / ICM 2024.5
+
+- Pro Self Test on `60e8cc8`: all PASS/WARN; pump model exports 1 rising main + 1 `Rotpmp` pump.
+- ICM ODIC: `ICM_Nodes`, `ICM_Conduits`, `ICM_Pumps` import OK (`Rotpmp` accepted as link type; pump field names work).
+- Validation errors E2075 x2 on `PS1_DEL.1` ("Normal or high headlosses are not allowed for ForceMain") → fixed in
+  `e25f28d`. I2040 on demo N01 (chamber area below Simulation Parameters minimum) is info only.
+
+### Where we stopped (next session starts here)
+
+1. User was asked (step 5) to set US/DS headloss type = None by hand on `PS1_DEL.1` in the scratch ICM network,
+   validate, run a short simulation and report pump starts / peak flow / max wet well level. WWNet engine reference
+   for the Self Test pump model: 18 starts (4.5/h), Qmax 30 L/s, max wet well 23.01 m AHD, RM1 Qmax 8.42 L/s.
+   Ask for those results first.
+2. Not yet known: whether the user created `HD_PS1_P1` by hand or ODIC imported the head-discharge CSV (ask; if ODIC
+   can, document the mapping in the notes); `discharge` unit for `Fixpmp` (L/s vs ICM flow unit).
+3. Then: install `e25f28d` (Update WWNet), map the new conduit fields in the saved ODIC config, re-export a real model
+   with a pump station (needs Import Pressure Data + Set Pump Station Data on real data, §8 item 1).
+4. Side issues noticed: export GP calls are slow in the user's project (Delete / CreateFeatureclass / AddFields 6–38 s
+   each; Self Test export 67–161 s). Offered, not done: delete and recreate the whole `_ICM.gdb` folder instead of
+   per-table Delete (fails if ICM/Pro holds the gdb). Pump station simulation in Self Test shows 15.4 % continuity
+   error (engine, tiny 1 m² wet well) — check on a real station.
