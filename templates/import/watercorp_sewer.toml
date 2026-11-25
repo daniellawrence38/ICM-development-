@@ -6,8 +6,14 @@
 [options]
 snap_tolerance_m = 0.5          # a sewer segment end within this distance of a chamber / connection point / another end is connected
 tee_tolerance_m = 0.5           # a lone sewer end this close to another sewer's mid-line is a T-junction: the main is split there
-grade_source = "levels"         # "levels" | "field": field = derive a missing invert from FLOW_GRADE and length
-grade_tolerance_pct = 10.0      # warn when the grade from levels differs from FLOW_GRADE by more than this
+grade_source = "levels"         # "levels" | "field". Missing inverts are ALWAYS estimated (INVERT_ESTIMATED), whichever is chosen:
+                                # other end -/+ length / FLOW_GRADE, else from the adjoining sewers' inverts. Real values are never changed.
+grade_tolerance_pct = 10.0      # report when the grade from levels differs from FLOW_GRADE by more than this; listed (GRADE_MISMATCH)
+                                # only if the fall over the sewer's length differs by > 0.05 m, otherwise counted in one summary line
+
+# LEVEL PLACEHOLDERS: the GIS stores -99.9 (also -9996, -9998 ...) for "unknown". Any value <= -99 in the sewer
+# UPSTREAM / DOWNSTREAM inverts and the chamber TOPLEV is treated as MISSING (never a level), as in Import Pressure Data.
+# IDS: a chamber PACID, or a sewer US_MANHOLE_ID / DS_MANHOLE_ID, that is blank or all zeros ("0", "0.0", "0000") means "no id".
 load_connection_points = true   # assign each connection point read to the nearest sewer's upstream node as a load (630 L/d/connection)
 cp_load_search_m = 10.0         # max distance (m) from a connection point to its sewer; further ones are reported as unassigned
 default_dn = 150                # assumed DN when no (valid) diameter is available
@@ -42,20 +48,35 @@ install_date = "DATEINST"
 planset = "PLANSET"
 
 # Coded values: the text before the first "-" is the code ("A- actual" -> "A"). Codes are upper-cased.
+# "skip" = the feature is not imported (counted in the summary, no per-feature warning).
+# Status: only A (actual) is imported; N (not in use) and D (dead) sewers are skipped. Unknown codes -> "existing" with a warning.
 [codes.status]
 A = "existing"
+N = "skip"
+D = "skip"
 
 # Chamber type -> node_type ("ac" access chamber, "ms" maintenance shaft) or "skip" (not imported:
-# inspection shafts sit at sewer ends and have no PACID). Unknown codes -> "ac" with a warning.
+# inspection shafts sit at sewer ends and have no PACID; E deleted manhole and P pit access are not nodes either:
+# sewers there connect by geometry). Unknown codes -> "ac" with a warning.
 [codes.chamber_type]
 M = "ac"
 J = "ms"
 I = "skip"
+E = "skip"                      # E- deleted manhole
+P = "skip"                      # P- pit access
+F = "ac"                        # F- overflow
+OS = "ac"                       # OS- overflow storage
+O = "ac"                        # O- oversized
+DT = "ac"                       # DT- discharge tower
 
 [codes.sewer_type]
 R = "reticulation"              # R- retic
 B = "reticulation"              # B- branch
 M = "main"                      # M- main
+C = "reticulation"              # C- collection
+I = "reticulation"              # I- inlet
+O = "reticulation"              # O- overflow (overflow pipes stay as sewers)
+OS = "reticulation"             # OS- overflow storage
 E = "is"                        # E- inspection shaft sewer: no upstream access chamber (DS 50 4.2.2)
 IO = "io"
 IS = "is"
@@ -71,6 +92,7 @@ VC = "vc"
 AC = "ac_pipe"
 DI = "di"
 DICL = "di"
+SU = "other"                    # SU- steel, unlined
 CI = "other"
 PE = "pe"
 HDPE = "pe"

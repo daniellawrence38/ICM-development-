@@ -320,6 +320,25 @@ an existing model, then re-run Import Pressure Data and Import Pump Station Data
 run Join Dangling Sewer Ends (preview off) on the existing model. Also still open: "unconnected to outfall" caused
 by mains outside the selection (expected; select the whole catchment down to the outlet).
 
+### Bulk import issue list (user's Issues table, 4,028 rows, 2026-11-25)
+
+Triage of the user's Issues export (import + check). Fixed in the importer (user's decisions in brackets):
+- **−99.9 placeholder levels** (inverts, TOPLEV; any value <= −99) were used as real levels → ~390 issues
+  (118 m drops, adverse / flat grades, invert above surface −99.9). Now missing, then estimated ["from grade"]:
+  one end from the other ± length / FLOW_GRADE; both missing from adjoining sewers at the shared node (lowest
+  incoming ds invert / single outgoing us invert), then grade. `INVERT_ESTIMATED` per sewer, conduit
+  `data_source=assumed`; `INVERT_DERIVED` removed.
+- STATUS N (not in use) and D (dead) skipped [user]; only A imported. A not-in-use stub made a false tee + cycle.
+- MAINTYPE C / I / O / OS = reticulation [overflow pipes kept as sewers]; CHAMBER_TY E and P skipped [user],
+  F / OS / O / DT = ac; MATERIAL SU = other. PACID / manhole ids all zeros = no id.
+- False-tee guard: a branch whose other end is at one of the main's end nodes is not teed (SUSPECT_TEE);
+  directed cycles through a tee node reported (SUSPECT_TEE).
+- Noise: TEE_JOINED / END_SNAPPED are info (`rep.notes`, severity info in the Issues layer); GRADE_MISMATCH listed
+  only when the fall difference > 50 mm (rest one summary line).
+Left as genuine data issues for the user: DN_REDUCTION (23), real INVERT_ABOVE_SURFACE, small TEE_ADVERSE,
+ID_MISMATCH (5), DANGLING_END / DIRECTION_UNKNOWN at the selection edge, BIFURCATION at real overflows.
+Tests: qgis 130 + 1 skipped, toolbox 270.
+
 ### Where we stopped (next session starts here)
 
 1. Install: if the user already runs the 38f46e2 full bundle, Update WWNet with this commit's `wwnet-arcgis-update`

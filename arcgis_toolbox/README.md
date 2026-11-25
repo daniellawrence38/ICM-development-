@@ -90,6 +90,15 @@ operations*), snap tolerance (0.5 m), grade source (`levels` | `field`), *Use se
 with no selection is read in full), *Add to map* (on), then one **Field** parameter per role. Picking a layer fills
 its fields with the Water Corporation names that exist in it; change any of them.
 
+**Data rules (bulk-import fixes)**: levels <= -99 (`-99.9`, `-9996`, `-9998`) in `UPSTREAM` / `DOWNSTREAM` / `TOPLEV` are
+missing, never levels. Missing inverts are estimated once connectivity and direction are known (other end -/+ length /
+`FLOW_GRADE`, else from the adjoining sewers' inverts; real values are never changed) and each one is flagged
+`INVERT_ESTIMATED`. Only `STATUS` A sewers are imported (N / D skipped, counted in the summary). Chamber types E and P are
+skipped (sewers connect by geometry); a `PACID` or manhole reference that is blank or all zeros means no id. A branch end is
+not teed into a main whose end node its other end already sits at (`SUSPECT_TEE`, as is a directed cycle through a tee).
+`TEE_JOINED` / `END_SNAPPED` are info rows (Issues layer, not warnings); `GRADE_MISMATCH` is listed only when the fall differs
+by more than 0.05 m, the rest are counted in one line. Codes: `templates/import/watercorp_sewer.toml`.
+
 | Role | Layer | Default field | Used for |
 |---|---|---|---|
 | ac_id / ac_surface_level | access chambers | `PACID` / `TOPLEV` | `node_id`, `surface_level` (lid, m AHD) |

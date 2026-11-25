@@ -66,6 +66,9 @@ def con(res):
 
 def test_end_to_end_valid_gpkg_and_messages(world, tmp_path):
     a, lyr, layers = world
+    # 22030223 gets a FLOW_GRADE that disagrees with its levels by 0.15 m of fall (listed); 22030208 differs by only
+    # 2 mm of fall (counted in a summary line, not listed: Import Sewer Data fix)
+    a.sources["C:/d/sew"]["rows"][1]["FLOW_GRADE"] = 50
     res = run(a, lyr, tmp_path)
     c = con(res)
     assert c.execute("select count(*) from wwn_nodes").fetchone()[0] == 4
@@ -81,6 +84,8 @@ def test_end_to_end_valid_gpkg_and_messages(world, tmp_path):
     assert cp_reads and not any(r["full_scan"] for r in cp_reads)      # far-away C9 is never read
     log = a.log
     assert any(lv == "warn" and "GRADE_MISMATCH" in t and "22030223" in t for lv, t in log)
+    assert not any("GRADE_MISMATCH" in t and "22030208" in t for lv, t in log)
+    assert any(lv == "info" and "1 sewer(s) have a levels / FLOW_GRADE grade difference" in t for lv, t in log)
     assert any(t.startswith("Reversed digitising direction of 1") for lv, t in log if lv == "info")
     assert not any("direction_reversed" in t for lv, t in log)
     assert not [t for lv, t in log if lv == "error"]

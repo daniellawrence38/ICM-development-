@@ -36,6 +36,11 @@ def codes_of(rep):
     return [w.code for w in rep.warnings]
 
 
+def note_codes(rep):
+    """Codes of the info-severity rows (TEE_JOINED, END_SNAPPED): kept apart from the warnings."""
+    return [w.code for w in rep.notes]
+
+
 def by_id(items, key):
     return {x[key]: x for x in items}
 
@@ -79,11 +84,11 @@ def test_sample_rows_basic_mapping():
     assert n["A1"]["surface_level"] == 20.0 and n["A1"]["node_type"] == "ac" and n["A1"]["data_source"] == "gis"
     assert "invert derived from lowest incoming sewer ds invert" in n["A2"]["notes"]
     assert "lowest outgoing sewer us invert" in n["A1"]["notes"]
-    # both sample sewers disagree with FLOW_GRADE by more than 10%: 1 in 100 vs 120 and 1 in 172 vs 150
-    gm = {w.object_id: w.message for w in rep.warnings if w.code == "GRADE_MISMATCH"}
-    assert set(gm) == {"22030208", "22030223"}
-    assert "1 in 100.1" in gm["22030208"] and "120" in gm["22030208"]
-    assert "1 in 172.1" in gm["22030223"] and "150" in gm["22030223"]
+    # both sample sewers disagree with FLOW_GRADE by more than 10% (1 in 100 vs 120, 1 in 172 vs 150) but the
+    # fall differs by only 2 mm / 9 mm: not listed per sewer, counted in one summary line
+    assert "GRADE_MISMATCH" not in codes_of(rep) and rep.counts["grade_rounding"] == 2
+    assert any("2 sewer(s) have a levels / FLOW_GRADE grade difference > 10 % but < 50 mm of fall (rounding); "
+               "not listed" in x for x in rep.diagnostics)
     _, loose = build_model(acs, [], pipes, FieldMap(diameter="HEIGHT"), ImportOptions(grade_tolerance_pct=20))
     assert not [w for w in loose.warnings if w.code == "GRADE_MISMATCH"]
     assert rep.counts["nodes"] == 4 and rep.counts["conduits"] == 2
@@ -140,8 +145,9 @@ def test_snapping_blank_and_unmatched_ids():
     c = model["conduits"][0]
     assert (c["us_node_id"], c["ds_node_id"]) == ("A", "B")
     assert rep.counts["ends_snapped"] == 2 and len(model["nodes"]) == 2
-    msgs = " ".join(str(w) for w in rep.warnings)
-    assert "blank" in msgs and "unmatched" in msgs
+    msgs = " ".join(str(w) for w in rep.notes)
+    assert "blank" in msgs and "unmatched" in msgs and note_codes(rep).count("END_SNAPPED") == 2
+    assert "END_SNAPPED" not in codes_of(rep) and {i["severity"] for i in rep.issues() if i["code"] == "END_SNAPPED"} == {"info"}
     # outside tolerance: option respected
     p = pipe("P", [(0.3, 0), (10.2, 0)], None, None, LENGTH=10)
     model, rep = build_model(acs, [], [p], options=ImportOptions(snap_tolerance_m=0.1))
@@ -192,12 +198,13 @@ def test_grade_source_field_derives_missing_ds_invert():
     model, rep = build_model(acs, [], [p], options=ImportOptions(grade_source="field"))
     c = model["conduits"][0]
     assert c["ds_invert"] == pytest.approx(4.7) and c["data_source"] == "assumed"
-    assert "derived" in c["notes"] and "INVERT_DERIVED" in codes_of(rep)
+    assert "estimated" in c["notes"] and "INVERT_ESTIMATED" in codes_of(rep)
     n = by_id(model["nodes"], "node_id")
     assert n["B"]["invert_level"] == pytest.approx(4.7)
-    # levels source leaves it missing and warns
+    # without FLOW_GRADE (and no neighbours) it stays missing
+    p = pipe("P", [(0, 0), (30, 0)], "A", "B", LENGTH=30, UPSTREAM=5.0, DOWNSTREAM=None, FLOW_GRADE=None)
     model, rep = build_model(acs, [], [p])
-    assert "ds_invert" not in model["conduits"][0]
+    assert "ds_invert" not in model["conduits"][0] and "INVERT_ESTIMATED" not in codes_of(rep)
     assert "missing_invert" not in codes_of(rep)  # reported by the model check (MISSING_INVERT)
     assert "invert_level" not in by_id(model["nodes"], "node_id")["B"]
 
@@ -322,7 +329,7 @@ def test_segmented_run_junctions_direction_and_inverts():
     # the inspection shaft is skipped silently (counted), ids are not required for it
     codes = codes_of(rep)
     assert "AC_NO_ID" not in codes and rep.counts["inspection_shafts_skipped"] == 1
-    assert "skipped 1 inspection shaft(s)" in "\n".join(rep.summary_lines()).lower()
+    assert "skipped 1 chamber(s) of a type mapped to skip" in "\n".join(rep.summary_lines()).lower()
     assert "ID_MISMATCH" not in codes and "END_FAR_FROM_NODE" not in codes
     assert codes.count("DIRECTION_UNKNOWN") == 0      # BR2: no usable id, but the dead-end rule orients it
     assert rep.counts["direction_dead_end"] == 1 and "dead-end rule" in c["BR2"]["notes"]
@@ -553,7 +560,8 @@ def test_tee_splits_main_and_orients_branch(reverse, tmp_path):
     assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 1
     assert rep.counts.get("dangling_ends", 0) == 0 and rep.counts["dangling_other"] == 0
     assert rep.counts["direction_tee"] == 1 and rep.counts["conduits"] == 3
-    assert "TEE_JOINED" in codes_of(rep) and "TEE_ADVERSE" not in codes_of(rep)
+    assert "TEE_JOINED" in note_codes(rep) and "TEE_ADVERSE" not in codes_of(rep)
+    assert "TEE_JOINED" not in codes_of(rep) and {i["severity"] for i in rep.issues() if i["code"] == "TEE_JOINED"} == {"info"}
     assert "DIRECTION_UNKNOWN" not in codes_of(rep)
     assert any(x.startswith("Tees: 1 branch end(s) joined mid-line to 1 sewer(s)") for x in rep.summary_lines(0))
     _check_clean(model, tmp_path)
@@ -820,7 +828,7 @@ def test_two_branches_opposite_sides_split_main(rev1, rev2, rev_main, tmp_path):
     assert n["T1"]["notes"].startswith("tee (mid-line junction)") and n["T1"]["invert_level"] == pytest.approx(19.6)
     assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 2
     assert rep.counts.get("junction_nodes", 0) == 0 and rep.counts["direction_tee"] == 2
-    assert codes_of(rep).count("TEE_JOINED") == 2 and "TEE_ADVERSE" not in codes_of(rep)
+    assert note_codes(rep).count("TEE_JOINED") == 2 and "TEE_ADVERSE" not in codes_of(rep)
     _no_dangling(rep)
     assert any(x.startswith("Tees: 2 branch end(s) joined mid-line to 1 sewer(s)") for x in rep.summary_lines(0))
     assert "0 segment junction(s)" in rep.summary_lines(0)[0]
@@ -998,3 +1006,209 @@ def test_pass_through_pair_stays_junction_while_genuine_branch_tees():
     assert c["R1"]["ds_node_id"] == c["R2"]["us_node_id"] == "J1" and "T1" not in (c["R1"]["ds_node_id"],)
     assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 1
     assert rep.counts["junction_nodes"] == 1
+
+
+# ---------------------------------------------------------------------------------------------
+# Import Sewer Data fixes from a real bulk import (placeholder levels, estimated inverts, status, codes, ids,
+# false tees, severity of notes, GRADE_MISMATCH threshold)
+
+def test_placeholder_levels_are_missing_not_levels():
+    acs = [ac("A", 0, 0, -99.9), ac("B", 10, 0, 5.0), ac("C", 20, 0, -9996)]
+    p1 = pipe("P1", [(0, 0), (10, 0)], "A", "B", UPSTREAM=-99.9, DOWNSTREAM=4.0, FLOW_GRADE=None, LENGTH=10)
+    p2 = pipe("P2", [(10, 0), (20, 0)], "B", "C", UPSTREAM=-9998, DOWNSTREAM=-99.9, FLOW_GRADE=None, LENGTH=10)
+    model, rep = build_model(acs, [], [p1, p2])
+    c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
+    assert "us_invert" not in c["P1"] and c["P1"]["ds_invert"] == 4.0
+    assert c["P2"]["us_invert"] == 4.0 and "ds_invert" not in c["P2"]       # us from the adjoining sewer, ds stays missing
+    assert "surface_level" not in n["A"] and "surface_level" not in n["C"] and n["B"]["surface_level"] == 5.0
+    assert "invert_level" not in n["A"] and n["B"]["invert_level"] == 4.0 and "invert_level" not in n["C"]
+    assert not [w for w in rep.warnings if w.code in ("TEE_ADVERSE", "GRADE_MISMATCH")]
+    for x in model["nodes"] + model["conduits"]:
+        assert all(not isinstance(v, float) or v > -99 for v in x.values()), x
+    assert rep.counts["placeholder_levels"] == 5 and any("placeholder level" in d for d in rep.diagnostics)
+    assert imp.to_level(-99.0) is None and imp.to_level(-98.9) == -98.9 and imp.to_level("-9996") is None
+
+
+def test_missing_invert_filled_from_grade_one_end():
+    acs = [ac("A", 0, 0), ac("B", 32.1, 0)]
+    p = pipe("P", [(0, 0), (32.1, 0)], "A", "B", LENGTH=32.1, UPSTREAM=19.0, DOWNSTREAM=-99.9, FLOW_GRADE=150)
+    model, rep = build_model(acs, [], [p])
+    c = model["conduits"][0]
+    assert c["ds_invert"] == pytest.approx(19.0 - 32.1 / 150, abs=1e-3) and c["data_source"] == "assumed"
+    w = [x for x in rep.warnings if x.code == "INVERT_ESTIMATED"]
+    assert len(w) == 1 and w[0].object_id == "P"
+    assert w[0].message == "ds invert 18.786 estimated from us invert and FLOW_GRADE 1 in 150 over 32.1 m"
+    assert by_id(model["nodes"], "node_id")["B"]["invert_level"] == pytest.approx(18.786)
+    # the other way round: downstream known, upstream = known + grade x length
+    p = pipe("P", [(0, 0), (30, 0)], "A", "B", LENGTH=30, UPSTREAM=None, DOWNSTREAM=5.0, FLOW_GRADE=100)
+    model, rep = build_model([ac("A", 0, 0), ac("B", 30, 0)], [], [p])
+    assert model["conduits"][0]["us_invert"] == pytest.approx(5.3)
+    assert "us invert 5.3 estimated from ds invert and FLOW_GRADE" in rep.warnings[-1].message or \
+        any("us invert 5.3 estimated from ds invert and FLOW_GRADE" in x.message for x in rep.warnings)
+
+
+def test_both_inverts_missing_from_neighbours_then_grade():
+    acs = [ac(k, 10 * i, 0) for i, k in enumerate("ABCD")]
+    p1 = pipe("P1", [(0, 0), (10, 0)], "A", "B", UPSTREAM=10.1, DOWNSTREAM=10.0, LENGTH=10)
+    p2 = pipe("P2", [(10, 0), (20, 0)], "B", "C", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=100)
+    p3 = pipe("P3", [(20, 0), (30, 0)], "C", "D", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=100)
+    model, rep = build_model(acs, [], [p1, p2, p3])
+    c = by_id(model["conduits"], "conduit_id")
+    assert (c["P2"]["us_invert"], c["P2"]["ds_invert"]) == (10.0, 9.9)           # us from P1, ds from grade
+    assert (c["P3"]["us_invert"], c["P3"]["ds_invert"]) == (9.9, 9.8)            # iterated
+    msgs = {w.object_id: w.message for w in rep.warnings if w.code == "INVERT_ESTIMATED"}
+    assert set(msgs) == {"P2", "P3"}                                              # one warning per sewer
+    assert "us invert 10 estimated from the adjoining sewer's ds invert at node B" in msgs["P2"]
+    assert "ds invert 9.9 estimated from us invert and FLOW_GRADE 1 in 100 over 10 m" in msgs["P2"]
+    n = by_id(model["nodes"], "node_id")
+    assert n["B"]["invert_level"] == 10.0 and n["C"]["invert_level"] == 9.9 and n["D"]["invert_level"] == 9.8
+    assert rep.counts["inverts_estimated"] == 4 and rep.counts["inverts_estimated_grade"] == 2
+    assert any(d.startswith("Estimated 4 missing invert(s) in 2 sewer(s)") for d in rep.diagnostics)
+    # downstream end from the single outgoing sewer, lowest ds invert of several incoming for the upstream end
+    acs = [ac("A", 0, 0), ac("B", 10, 0), ac("C", 20, 0), ac("X", 10, 10)]
+    q1 = pipe("Q1", [(0, 0), (10, 0)], "A", "B", UPSTREAM=10.4, DOWNSTREAM=10.2, LENGTH=10)
+    q2 = pipe("Q2", [(10, 10), (10, 0)], "X", "B", UPSTREAM=10.5, DOWNSTREAM=10.1, LENGTH=10)
+    q3 = pipe("Q3", [(10, 0), (20, 0)], "B", "C", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=None)
+    model, rep = build_model(acs, [], [q1, q2, q3])
+    assert by_id(model["conduits"], "conduit_id")["Q3"]["us_invert"] == 10.1
+    acs = [ac("A", 0, 0), ac("B", 10, 0), ac("C", 20, 0)]
+    r1 = pipe("R1", [(0, 0), (10, 0)], "A", "B", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=None)
+    r2 = pipe("R2", [(10, 0), (20, 0)], "B", "C", UPSTREAM=7.0, DOWNSTREAM=6.9, LENGTH=10)
+    model, rep = build_model(acs, [], [r1, r2])
+    r1c = by_id(model["conduits"], "conduit_id")["R1"]
+    assert r1c["ds_invert"] == 7.0 and "us_invert" not in r1c                     # still missing: left as is
+
+
+def test_real_inverts_never_overwritten_and_nothing_to_estimate_from_is_skipped():
+    acs = [ac("A", 0, 0), ac("B", 10, 0)]
+    p = pipe("P", [(0, 0), (10, 0)], "A", "B", UPSTREAM=5.0, DOWNSTREAM=5.5, LENGTH=10, FLOW_GRADE=100)   # adverse but real
+    model, rep = build_model(acs, [], [p])
+    c = model["conduits"][0]
+    assert (c["us_invert"], c["ds_invert"]) == (5.0, 5.5) and "INVERT_ESTIMATED" not in codes_of(rep)
+    lone = pipe("P", [(0, 0), (10, 0)], "A", "B", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=100)
+    model, rep = build_model(acs, [], [lone])
+    assert "us_invert" not in model["conduits"][0] and "INVERT_ESTIMATED" not in codes_of(rep)
+
+
+def test_status_n_and_d_skipped_a_imported():
+    acs = [ac("A", 0, 0), ac("B", 10, 0)]
+    ok = pipe("P1", [(0, 0), (10, 0)], "A", "B", LENGTH=10)
+    nu = pipe("P2", [(0, 0), (10, 0)], "A", "B", LENGTH=10, STATUS="N- not in use")
+    dd = [pipe(f"D{i}", [(0, 0), (10, 0)], "A", "B", STATUS="D- dead") for i in range(2)]
+    model, rep = build_model(acs, [], [ok, nu] + dd)
+    assert [c["conduit_id"] for c in model["conduits"]] == ["P1"]
+    assert rep.counts["status_skipped"] == 3 and rep.status_skipped == {"N": 1, "D": 2}
+    assert "UNKNOWN_CODE" not in codes_of(rep) and not rep.unknown_codes
+    assert not [w for w in rep.warnings if w.object_id in ("P2", "D0", "D1")]
+    assert any("Skipped 3 sewer(s) by status (not imported): D x2, N x1." == x for x in rep.summary_lines(0))
+    # the unknown-code fallback is unchanged
+    _, rep = build_model(acs, [], [pipe("P1", [(0, 0), (10, 0)], "A", "B", STATUS="Q- odd")])
+    assert rep.unknown_codes == {"STATUS": {"Q": 1}}
+
+
+def test_new_codes_are_mapped_silently():
+    acs = [chamber(k, 10 * i, 0, f"{k}- thing") for i, k in enumerate(["F", "OS", "O", "DT"])]
+    acs = [dict(a, PACID=f"C{i}") for i, a in enumerate(acs)]
+    rows = [pipe(f"P{i}", [(10 * i, 0), (10 * i + 10, 0)], f"C{i}", f"C{i + 1}", MAINTYPE=f"{t}- x", MATERIAL="SU- steel",
+                 LENGTH=10, UPSTREAM=5 - i * .1, DOWNSTREAM=4.9 - i * .1)
+            for i, t in enumerate(["C", "I", "O"])]
+    rows.append(pipe("P3", [(30, 0), (40, 0)], "C3", None, MAINTYPE="OS- x", MATERIAL="SU- steel"))
+    model, rep = build_model(acs, [], rows)
+    assert {n["node_type"] for n in model["nodes"] if n["node_id"].startswith("C")} == {"ac"}
+    assert len([n for n in model["nodes"] if n["node_id"].startswith("C")]) == 4
+    assert {c["sewer_type"] for c in model["conduits"]} == {"reticulation"}
+    assert {c["material"] for c in model["conduits"]} == {"other"}
+    assert "UNKNOWN_CODE" not in codes_of(rep) and not rep.unknown_codes and not rep.assumed_codes
+
+
+def test_deleted_manhole_and_pit_access_skipped_sewers_still_connect():
+    acs = [chamber("A", 0, 0, "M- standard manhole"), chamber("DM1", 10, 0, "E- deleted manhole"),
+           chamber("B", 20, 0, "M- standard manhole"), chamber("PX", 30, 0, "P- pit access"),
+           {"PACID": "", "CHAMBER_TY": "E- deleted manhole", GEOM: (40, 0)}]
+    p1 = pipe("P1", [(0, 0), (10, 0)], "A", "DM1", LENGTH=10, UPSTREAM=5.0, DOWNSTREAM=4.9)
+    p2 = pipe("P2", [(10, 0), (20, 0)], "DM1", "B", LENGTH=10, UPSTREAM=4.9, DOWNSTREAM=4.8)
+    p3 = pipe("P3", [(20, 0), (30, 0)], "B", "PX", LENGTH=10, UPSTREAM=4.8, DOWNSTREAM=4.7)
+    model, rep = build_model(acs, [], [p1, p2, p3])
+    n = by_id(model["nodes"], "node_id")
+    assert "DM1" not in n and "PX" not in n and rep.counts["inspection_shafts_skipped"] == 3
+    c = by_id(model["conduits"], "conduit_id")
+    assert c["P1"]["ds_node_id"] == c["P2"]["us_node_id"] and c["P1"]["ds_node_id"] in n   # joined by geometry
+    assert (c["P1"]["us_node_id"], c["P2"]["ds_node_id"], c["P3"]["us_node_id"]) == ("A", "B", "B")
+    assert "AC_NO_ID" not in codes_of(rep) and "UNKNOWN_CODE" not in codes_of(rep)
+
+
+def test_zero_pacid_and_zero_manhole_refs_are_no_id():
+    acs = [ac("A", 0, 0), ac("B", 10, 0), ac(0, 20, 0), ac("0000", 30, 0), ac(0.0, 40, 0), ac("0.0", 50, 0), ac("  ", 60, 0)]
+    p = pipe("P", [(0, 0), (10, 0)], "0000", 0, LENGTH=10, UPSTREAM=5.0, DOWNSTREAM=4.9)
+    model, rep = build_model(acs, [], [p])
+    assert sorted(n["node_id"] for n in model["nodes"]) == ["A", "B"]
+    assert codes_of(rep).count("AC_NO_ID") == 5 and "AC_DUPLICATE_ID" not in codes_of(rep)
+    assert rep.counts["access_chambers_skipped"] == 5
+    c = model["conduits"][0]
+    assert (c["us_node_id"], c["ds_node_id"]) == ("A", "B")
+    assert "ID_MISMATCH" not in codes_of(rep)
+    assert [w.message.split(";")[0].split()[0] for w in rep.notes] == ["US", "DS"] and "blank" in rep.notes[0].message
+    assert imp.to_ref_id("0000") == "" and imp.to_ref_id(0.0) == "" and imp.to_ref_id("0.0") == "" \
+        and imp.to_ref_id("0A") == "0A" and imp.to_ref_id("10") == "10" and imp.to_ref_id(" M1 ") == "M1"
+
+
+def test_false_tee_guard_stub_from_the_mains_own_manhole():
+    acs = [ac("M5183", 0, 0), ac("M2", 100, 0)]
+    main = pipe("MAIN", [(0, 0), (100, 0)], "M5183", "M2", LENGTH=100, UPSTREAM=10.0, DOWNSTREAM=9.0)
+    stub = pipe("STUB", [(0, 0), (1.3, 0)], "M5183", None, LENGTH=1.3, UPSTREAM=None, DOWNSTREAM=None)
+    model, rep = build_model(acs, [], [main, stub])
+    assert rep.counts.get("tee_junctions", 0) == 0 and "TEE_JOINED" not in note_codes(rep)
+    assert {c["conduit_id"] for c in model["conduits"]} == {"MAIN", "STUB"}          # main not split
+    assert not any(n["node_id"].startswith("T") for n in model["nodes"])
+    sus = [w for w in rep.warnings if w.code == "SUSPECT_TEE"]
+    assert len(sus) == 1 and sus[0].object_id == "STUB" and "MAIN" in sus[0].message and "STUB" in sus[0].message
+    # no cycle: the stub's free end stays a dangling end, flow M5183 side -> nowhere is not a loop
+    c = by_id(model["conduits"], "conduit_id")
+    assert c["MAIN"]["us_node_id"] == "M5183" and c["MAIN"]["ds_node_id"] == "M2"
+    assert "STUB" not in rep.diagnostics and not any("possible missed tee" in d for d in rep.diagnostics)
+    # a real branch from elsewhere still tees
+    branch = pipe("BR", [(50, 30), (50, 0)], "X", None, LENGTH=30, UPSTREAM=12.0, DOWNSTREAM=9.4)
+    model, rep = build_model(acs + [ac("X", 50, 30)], [], [main, branch])
+    assert rep.counts["tee_junctions"] == 1 and "SUSPECT_TEE" not in codes_of(rep)
+
+
+def test_directed_cycle_through_a_tee_is_reported():
+    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("D", 100, 50)]
+    main = pipe("M", [(0, 0), (100, 0)], "A", "B", LENGTH=100, UPSTREAM=10.0, DOWNSTREAM=9.0)
+    q = pipe("Q", [(100, 0), (100, 50)], "B", "D", LENGTH=50, UPSTREAM=9.0, DOWNSTREAM=8.5)
+    br = pipe("BR", [(100, 50), (50, 0)], "D", None, LENGTH=70, UPSTREAM=8.5, DOWNSTREAM=9.5)
+    model, rep = build_model(acs, [], [main, q, br])
+    assert rep.counts["tee_junctions"] == 1
+    sus = [w for w in rep.warnings if w.code == "SUSPECT_TEE"]
+    assert len(sus) == 1 and sus[0].object_type == "node" and sus[0].object_id == "T1"
+    assert "directed cycle through tee T1" in sus[0].message and "BR" in sus[0].message
+    assert all(f" {k} " in f" {sus[0].message} " or k in sus[0].message for k in ("B", "D"))
+    # a clean tee has no such warning
+    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("C", 50, 30)]
+    main = pipe("M", [(0, 0), (100, 0)], "A", "B", LENGTH=100, UPSTREAM=10.0, DOWNSTREAM=9.0)
+    br = pipe("BR", [(50, 30), (50, 0)], "C", None, LENGTH=30, UPSTREAM=12.0, DOWNSTREAM=9.4)
+    _, rep = build_model(acs, [], [main, br])
+    assert rep.counts["tee_junctions"] == 1 and "SUSPECT_TEE" not in codes_of(rep)
+
+
+def test_notes_are_info_severity_in_issues_and_not_warnings():
+    rep = imp.ImportReport()
+    rep.warn("TEE_JOINED", "conduit", "P1", "joined", severity="info")
+    rep.warn("DN_ASSUMED", "conduit", "P2", "dn")
+    assert [w.code for w in rep.warnings] == ["DN_ASSUMED"] and [w.code for w in rep.notes] == ["TEE_JOINED"]
+    assert {i["code"]: i["severity"] for i in rep.issues()} == {"TEE_JOINED": "info", "DN_ASSUMED": "warning"}
+    text = "\n".join(rep.summary_lines(40))
+    assert "1 warning(s): DN_ASSUMED x1" in text and "1 note(s) (info, in the Issues layer): TEE_JOINED x1" in text
+    assert "[TEE_JOINED]" not in text
+
+
+def test_grade_mismatch_listed_only_above_fall_threshold():
+    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("C", 110, 0)]
+    big = pipe("BIG", [(0, 0), (100, 0)], "A", "B", LENGTH=100, UPSTREAM=10.0, DOWNSTREAM=9.5, FLOW_GRADE=100)  # 0.5 m vs 1 m
+    small = pipe("SMALL", [(100, 0), (110, 0)], "B", "C", LENGTH=10, UPSTREAM=9.5, DOWNSTREAM=9.36, FLOW_GRADE=100)  # 0.14 vs 0.1: 40 %, 0.04 m
+    model, rep = build_model(acs, [], [big, small])
+    gm = [w for w in rep.warnings if w.code == "GRADE_MISMATCH"]
+    assert [w.object_id for w in gm] == ["BIG"] and "0.500 m" in gm[0].message
+    assert rep.counts["grade_rounding"] == 1
+    assert "1 sewer(s) have a levels / FLOW_GRADE grade difference > 10 % but < 50 mm of fall (rounding); not listed" \
+        in rep.diagnostics

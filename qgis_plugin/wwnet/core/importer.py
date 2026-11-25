@@ -82,6 +82,7 @@ class FieldMap:
         return FieldMap(**d)
 
 
+GRADE_MISMATCH_MIN_FALL_M = 0.05            # a levels / FLOW_GRADE grade difference is listed only above this fall difference
 NEAR_MISS_M = 5.0                           # lone ends this close to another sewer's mid-line are reported
 
 
@@ -116,6 +117,7 @@ class ImportWarning:
     message: str
     x: float | None = None  # location for issues that are not at a model object (optional)
     y: float | None = None
+    severity: str = "warning"   # "warning" | "info" (info rows live in ImportReport.notes, not .warnings)
 
     def __str__(self) -> str:
         who = f"{self.object_type} {self.object_id}: " if self.object_id else ""
@@ -125,22 +127,26 @@ class ImportWarning:
 @dataclass
 class ImportReport:
     counts: dict = field(default_factory=dict)
-    warnings: list = field(default_factory=list)          # [ImportWarning]
+    warnings: list = field(default_factory=list)          # [ImportWarning] (severity warning)
+    notes: list = field(default_factory=list)             # [ImportWarning] with severity "info" (TEE_JOINED, END_SNAPPED ...)
     infos: list = field(default_factory=list)             # [str]
     unknown_codes: dict = field(default_factory=dict)     # {"STATUS": {"X": 3}}
     assumed_codes: dict = field(default_factory=dict)     # {"MAINTYPE": {"E": 26}}: mapped by assumption
     assumed_notes: dict = field(default_factory=dict)     # {"MAINTYPE": {"E": "meaning unconfirmed ..."}}
     diagnostics: list = field(default_factory=list)       # [str] summary lines (direction, dangling ends, grade ratios)
+    status_skipped: dict = field(default_factory=dict)    # {"N": 12, "D": 3}: sewers skipped by STATUS code
 
-    def warn(self, code: str, object_type: str, object_id: str, message: str, xy=None):
+    def warn(self, code: str, object_type: str, object_id: str, message: str, xy=None, severity: str = "warning"):
         x, y = (xy if xy else (None, None))
-        self.warnings.append(ImportWarning(code, object_type, str(object_id), message, x, y))
+        w = ImportWarning(code, object_type, str(object_id), message, x, y, severity)
+        (self.notes if severity == "info" else self.warnings).append(w)
 
     def issues(self) -> list:
         """The warnings as issue dicts for ``wwnet_native.store_issues(gpkg, "import", json)``: they are
         drawn at their node / conduit (or at x, y) in the model's Issues layer."""
-        return [{"severity": "warning", "code": w.code, "object_type": w.object_type, "object_id": w.object_id,
-                 "clause": None, "message": w.message, "x": w.x, "y": w.y} for w in self.warnings]
+        return [{"severity": w.severity, "code": w.code, "object_type": w.object_type, "object_id": w.object_id,
+                 "clause": None, "message": w.message, "x": w.x, "y": w.y}
+                for w in itertools.chain(self.warnings, self.notes)]
 
     def count(self, key: str, n: int = 1):
         self.counts[key] = self.counts.get(key, 0) + n
@@ -148,6 +154,12 @@ class ImportReport:
     def warning_counts(self) -> dict:
         out: dict = {}
         for w in self.warnings:
+            out[w.code] = out.get(w.code, 0) + 1
+        return out
+
+    def note_counts(self) -> dict:
+        out: dict = {}
+        for w in self.notes:
             out[w.code] = out.get(w.code, 0) + 1
         return out
 
@@ -176,7 +188,11 @@ class ImportReport:
                  f"Skipped: {c.get('connection_points_skipped', 0)} unreferenced connection point(s), "
                  f"{c.get('conduits_skipped', 0)} sewer(s), {c.get('access_chambers_skipped', 0)} chamber(s)."]
         if c.get("inspection_shafts_skipped"):
-            lines.append(f"Skipped {c['inspection_shafts_skipped']} inspection shaft(s) (type skip: not imported).")
+            lines.append(f"Skipped {c['inspection_shafts_skipped']} chamber(s) of a type mapped to skip "
+                         "(inspection shafts, deleted manholes, pit access): not imported.")
+        if c.get("status_skipped"):
+            lines.append(f"Skipped {c['status_skipped']} sewer(s) by status (not imported): "
+                         + ", ".join(f"{k} x{v}" for k, v in sorted(self.status_skipped.items())) + ".")
         if c.get("context_chambers_unused"):
             lines.append(f"Ignored {c['context_chambers_unused']} context chamber(s) not touching any sewer end.")
         if c.get("reversed"):
@@ -198,6 +214,10 @@ class ImportReport:
         wc = self.warning_counts()
         if wc:
             lines.append(f"{len(self.warnings)} warning(s): " + ", ".join(f"{k} x{v}" for k, v in sorted(wc.items())))
+        nc = self.note_counts()
+        if nc:
+            lines.append(f"{len(self.notes)} note(s) (info, in the Issues layer): "
+                         + ", ".join(f"{k} x{v}" for k, v in sorted(nc.items())))
         if max_warnings > 0:
             ex = self.example_warnings(max_warnings)
             lines.extend(str(w) for w in ex)
@@ -241,6 +261,21 @@ def to_id(v) -> str:
     if isinstance(v, float) and v.is_integer():
         return str(int(v))
     return str(v).strip()
+
+
+LEVEL_PLACEHOLDER = -99.0      # source levels <= this (-99.9, -9996, -9998 ...) are placeholders = missing
+
+
+def to_level(v):
+    """A level (m AHD) or None: blanks and the GIS placeholders (-99.9, -9996, -9998; any value <= -99) are missing."""
+    f = to_float(v)
+    return None if f is None or f <= LEVEL_PLACEHOLDER else f
+
+
+def to_ref_id(v) -> str:
+    """Identifier as :func:`to_id`, but blank and all-zero values ('0', '0.0', '0000') mean "no id"."""
+    s = to_id(v)
+    return "" if s and re.fullmatch(r"0+(\.0*)?", s) else s
 
 
 def code_of(v) -> str:
@@ -396,6 +431,14 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         name = getattr(fm, role)
         return row.get(name) if name else None
 
+    def level(v):
+        """Level or None; placeholders (<= -99) count as missing and are tallied for the summary."""
+        f = to_float(v)
+        if f is not None and f <= LEVEL_PLACEHOLDER:
+            rep.count("placeholder_levels")
+            return None
+        return f
+
     def code_lookup(role, fname, row, cmap, default, obj_type, oid, what):
         """Coded value -> enum text. Unknown/blank -> default + counted warning."""
         raw = get(row, role)
@@ -435,7 +478,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             if node_type == "skip":
                 rep.count("inspection_shafts_skipped")
                 continue
-        nid = to_id(get(row, "ac_id"))
+        nid = to_ref_id(get(row, "ac_id"))
         p = _point(row)
         if not nid:
             rep.count("access_chambers_skipped")
@@ -452,7 +495,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         if row.get(CONTEXT):
             ctx_ids.add(nid)
         nodes[nid] = _clean({"node_id": nid, "geom": list(p), "node_type": node_type,
-                             "surface_level": to_float(get(row, "ac_surface_level")),
+                             "surface_level": level(get(row, "ac_surface_level")),
                              "status": "existing", "data_source": "gis", "asset_id": nid})
         node_pos[nid] = p
         node_ref[nid] = nid
@@ -507,6 +550,12 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     for row in sewers:
         pid = to_id(get(row, "pipe_id"))
         line = _line(row)
+        status, scode = code_lookup("status", fm.status, row, codes.get("status", {}), "existing",
+                                    "conduit", pid, "status")
+        if status == "skip":             # N- not in use, D- dead: not imported, counted only
+            rep.count("status_skipped")
+            rep.status_skipped[scode] = rep.status_skipped.get(scode, 0) + 1
+            continue
         if not pid:
             rep.count("conduits_skipped")
             rep.warn("PIPE_NO_ID", "conduit", "", f"sewer without {fm.pipe_id} skipped")
@@ -521,8 +570,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             continue
         pipe_ids.add(pid)
         rep.count("conduits_read")
-        segs.append({"pid": pid, "row": row, "line": line, "us_id": to_id(get(row, "us_node")),
-                     "ds_id": to_id(get(row, "ds_node")), "ends": [None, None]})
+        segs.append({"pid": pid, "row": row, "line": line, "us_id": to_ref_id(get(row, "us_node")),
+                     "ds_id": to_ref_id(get(row, "ds_node")), "ends": [None, None], "status": status})
 
     # ---- connectivity by geometry ---------------------------------------------------------------
     # 1. segment end within tolerance of a chamber, else of a connection point
@@ -613,6 +662,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     cross_cand: dict = {}            # J node id -> (main pid, pids of a possible pass-through pair)
     tee_cross: dict = {}             # tee node id -> (J node id, main pid, pair pids) for the invert plausibility check
     tee_end_inv: dict = {}           # tee node -> [(pid, invert at the tee)] of unsplit conduits touching it
+    suspect_nodes: set = set()       # dangling end nodes whose tee was refused (SUSPECT_TEE)
     leftover: list = []              # multi clusters whose IS / IO members stay behind: (J node id, [members])
     if tee_tol > 0 and (singles or multis):
         sgrid = _SegGrid(10.0, tee_tol)
@@ -648,10 +698,26 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                         best = (d, tj, cums[tj][k] + t * _dist(a, b), q)
             return best, near_end
 
+        def false_tee(si, e, tj, nid, chain):
+            """A branch end must not tee into a main whose end node the branch's OTHER end already sits at (a short
+            stub / parallel sewer leaving the same manhole): it would make a cycle. Reported, end left as is."""
+            far = segs[si]["ends"][1 - e]
+            if far is None or far not in segs[tj]["ends"]:
+                return False
+            suspect_nodes.add(nid)
+            rep.count("suspect_tees")
+            rep.warn("SUSPECT_TEE", "conduit", segs[si]["pid"],
+                     f"end lies on sewer {segs[tj]['pid']} (chainage {_fmt(chain, 2)} m) but the other end of "
+                     f"{segs[si]['pid']} is already at {far}, an end node of {segs[tj]['pid']}: not joined as a tee "
+                     f"(parallel stub / duplicate?); end left to dangling / snap handling")
+            return True
+
         for nid, si, e, pt in singles:
             if free_by_design(si, e):
                 continue                 # IS / IO upstream end: free by design
             best, near_end = find_tee(pt, {si})
+            if best is not None and false_tee(si, e, best[1], nid, best[2]):
+                continue
             if best is not None:
                 tees.append((si, e, nid, best[1], best[2], best[3], best[0]))
             elif near_end is not None:
@@ -672,7 +738,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             best, _ne = find_tee(c, {si for si, _e in members})
             if best is None:
                 continue
-            att = [(si, e) for si, e in members if not free_by_design(si, e)]
+            att = [(si, e) for si, e in members if not free_by_design(si, e)
+                   and not false_tee(si, e, best[1], nid, best[2])]
             # a run split where it crosses the main: the end of one segment and the start of the next segment
             # of the same run (same non-blank us / ds manhole ids) are a continuing run, not two branches
             through: set = set()
@@ -729,7 +796,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                     rep.count("tee_branch_ends")
                     rep.warn("TEE_JOINED", "conduit", segs[t[0]]["pid"], f"end joined mid-line to sewer "
                              f"{segs[tj]['pid']} at chainage {_fmt(t[4], 2)} m ({_fmt(t[6], 2)} m from the line); "
-                             f"flow assumed into the main")
+                             f"flow assumed into the main", severity="info")
             main = segs[tj]
             pieces = _cut_line(main["full"], cuts)
             chain = [main["ends"][0]] + tids + [main["ends"][1]]
@@ -923,7 +990,32 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         f"{why_counts['tee']} by tee rule, {why_counts['dead_end']} by dead-end rule, {why_counts['is_io']} by IS/IO rule, "
         f"{why_counts['unknown']} unknown (digitised direction kept).")
 
+    # ---- levels: read, then fill the missing inverts ---------------------------------------------
+    # Placeholders (<= -99) are missing. A missing invert is estimated (never over a real value) once the
+    # connectivity and flow direction are known: from the other end and the grade, else from the adjoining sewers.
+    recs: dict = {}                  # parent segment index -> level record of the oriented sewer
+    for idxs in parents.values():
+        s = segs[idxs[0]]
+        flipped = up_end[idxs[0]] == 1
+        line = s["full"][::-1] if flipped else s["full"]
+        nchain = [s["ends"][0]] + [segs[i]["ends"][1] for i in idxs]
+        if flipped:
+            nchain = nchain[::-1]
+        glen = _length(line)
+        length = to_float(get(s["row"], "length"))
+        if length is None or length <= 0:
+            length = glen
+        fgrade = to_float(get(s["row"], "flow_grade"))
+        if fgrade is not None and fgrade <= 0:
+            fgrade = None
+        recs[idxs[0]] = {"pid": s["pid"], "us": nchain[0], "ds": nchain[-1], "glen": glen, "length": length,
+                         "fgrade": fgrade, "est": {},
+                         "ui": level(get(s["row"], "us_invert")), "di": level(get(s["row"], "ds_invert"))}
+    if recs:
+        _fill_inverts(list(recs.values()), rep)
+
     # ---- conduits --------------------------------------------------------------------------------
+    grade_rounding = 0
     conduits: list = []
     outgoing: dict = {}              # node_id -> [us inverts]
     incoming: dict = {}              # node_id -> [ds inverts]
@@ -961,7 +1053,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 why = "blank" if not rid else "unmatched"
                 rep.count("ends_snapped")
                 rep.warn("END_SNAPPED", "conduit", pid, f"{end} manhole id {why}; connected to node {nid} "
-                         f"by geometry ({_fmt(_dist(line[0] if end == 'US' else line[-1], node_pos[nid]), 2)} m)")
+                         f"by geometry ({_fmt(_dist(line[0] if end == 'US' else line[-1], node_pos[nid]), 2)} m)",
+                         severity="info")
             elif ref not in (s["us_id"], s["ds_id"]):
                 mismatch.append(f"{end} end at {nid}")
         if mismatch:
@@ -970,24 +1063,15 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         if us == ds:
             rep.warn("SELF_LOOP", "conduit", pid, f"US and DS node are both {us}")
 
-        # levels, length, grade
-        ui, di = to_float(get(row, "us_invert")), to_float(get(row, "ds_invert"))
-        glen = _length(line)
-        length = to_float(get(row, "length"))
-        if length is None or length <= 0:
-            length = glen
-        fgrade = to_float(get(row, "flow_grade"))
-        if fgrade is not None and fgrade <= 0:
-            fgrade = None
-        if opt.grade_source == "field" and fgrade and length:
-            if ui is not None and di is None:
-                di, data_source = ui - length / fgrade, "assumed"
-                notes.append(f"ds invert derived from us invert, length and grade 1 in {_fmt(fgrade, 1)}")
-                rep.warn("INVERT_DERIVED", "conduit", pid, f"ds invert {di:.3f} derived from FLOW_GRADE")
-            elif di is not None and ui is None:
-                ui, data_source = di + length / fgrade, "assumed"
-                notes.append(f"us invert derived from ds invert, length and grade 1 in {_fmt(fgrade, 1)}")
-                rep.warn("INVERT_DERIVED", "conduit", pid, f"us invert {ui:.3f} derived from FLOW_GRADE")
+        # levels, length, grade (read and filled in the pre-pass above)
+        rc = recs[idxs[0]]
+        ui, di, glen, length, fgrade = rc["ui"], rc["di"], rc["glen"], rc["length"], rc["fgrade"]
+        if rc["est"]:
+            data_source = "assumed"
+            notes.extend(f"{k} invert estimated from {m}" for k, (_v, m, _c) in sorted(rc["est"].items()))
+            rep.warn("INVERT_ESTIMATED", "conduit", pid, "; ".join(
+                f"{k} invert {_fmt(v, 3)} estimated from {m}" for k, (v, m, _c) in sorted(rc["est"].items(),
+                                                                       key=lambda kv: kv[0] != "us")))
         # Missing levels and non-falling grades are reported by the model check that runs after the
         # import (MISSING_INVERT, ADVERSE_GRADE / FLAT_GRADE), not here as well.
         if ui is not None and di is not None:
@@ -1002,9 +1086,13 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                     ratios["shape"].append(shp / drop / fgrade)
                     ratios["shape_vs_len"].append(shp / length)
                 lg = length / drop
-                if abs(lg - fgrade) / fgrade * 100.0 > opt.grade_tolerance_pct:
-                    rep.warn("GRADE_MISMATCH", "conduit", pid, f"grade from levels 1 in {lg:.1f} vs "
-                             f"{fm.flow_grade} 1 in {_fmt(fgrade, 1)} (>{_fmt(opt.grade_tolerance_pct, 1)}%)")
+                if not rc["est"] and abs(lg - fgrade) / fgrade * 100.0 > opt.grade_tolerance_pct:
+                    if abs(drop - length / fgrade) > GRADE_MISMATCH_MIN_FALL_M:
+                        rep.warn("GRADE_MISMATCH", "conduit", pid, f"grade from levels 1 in {lg:.1f} vs "
+                                 f"{fm.flow_grade} 1 in {_fmt(fgrade, 1)} (>{_fmt(opt.grade_tolerance_pct, 1)}%); "
+                                 f"fall differs by {abs(drop - length / fgrade):.3f} m over {_fmt(length, 1)} m")
+                    else:
+                        grade_rounding += 1
 
         # diameter
         dn, internal = opt.default_dn, None
@@ -1029,8 +1117,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
 
         sewer_type, _stc = code_lookup("sewer_type", fm.sewer_type, row, codes.get("sewer_type", {}),
                                        "reticulation", "conduit", pid, "sewer type")
-        status, _ = code_lookup("status", fm.status, row, codes.get("status", {}), "existing",
-                                "conduit", pid, "status")
+        status = s["status"]
         material, _ = code_lookup("material", fm.material, row, codes.get("material", {}), "other",
                                   "conduit", pid, "material")
         pur, plan = get(row, "purpose"), get(row, "planset")
@@ -1092,6 +1179,16 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         for j in range(len(piece_cids) - 1):
             through_pairs.append((nchain[j + 1], piece_cids[j], piece_cids[j + 1]))
 
+    if grade_rounding:
+        rep.count("grade_rounding", grade_rounding)
+        rep.diagnostics.append(
+            f"{grade_rounding} sewer(s) have a levels / {fm.flow_grade} grade difference > "
+            f"{_fmt(opt.grade_tolerance_pct, 1)} % but < {GRADE_MISMATCH_MIN_FALL_M * 1000:.0f} mm of fall "
+            "(rounding); not listed")
+    if rep.counts.get("placeholder_levels"):
+        rep.diagnostics.append(f"{rep.counts['placeholder_levels']} placeholder level(s) (<= -99, e.g. -99.9) in "
+                               "invert / surface level fields treated as missing.")
+    _report_tee_cycles(segs, up_end, tee_nodes, tee_by_seg, rep)
     for cid, nid, di in branch_ds:
         inv = tee_inv.get(nid)
         if inv is not None and di is not None and di < inv - 0.01:
@@ -1111,7 +1208,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             rep.count("dangling_ends")
             rep.count("inflow_only_junctions")
     near_miss: list = []
-    still = [(t[0], {t[1]}, t[3], t[1], t[2]) for t in singles if t[0] in nodes]
+    still = [(t[0], {t[1]}, t[3], t[1], t[2]) for t in singles if t[0] in nodes and t[0] not in suspect_nodes]
     still += [(nid, {si for si, _e in m}, c, m[0][0], m[0][1]) for nid, m, c in inflow_only]
     if still:
         ngrid = _SegGrid(10.0, NEAR_MISS_M)
@@ -1243,6 +1340,120 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         if loads:
             model["node_loads"] = loads
     return model, rep
+
+
+def _fill_inverts(recs: list, rep: ImportReport, max_iter: int = 50):
+    """Estimate missing inverts of oriented sewers (``recs``: dicts with us / ds node, ui / di, length, fgrade,
+    est), never over a real value. (a) one end known: the other = known -/+ length / FLOW_GRADE (downstream
+    lower); (b) both missing: upstream = lowest ds invert of the sewers flowing into the upstream node, downstream
+    = us invert of the single sewer leaving the downstream node, then (a) for what is left. Repeated until
+    nothing changes (bounded). Each estimate is recorded in ``rec["est"][end] = (value, method, category)``."""
+    by_us: dict = {}
+    by_ds: dict = {}
+    for r in recs:
+        by_us.setdefault(r["us"], []).append(r)
+        by_ds.setdefault(r["ds"], []).append(r)
+
+    def put(r, end, v, method, cat):
+        r["ui" if end == "us" else "di"] = round(v, 6)
+        r["est"][end] = (round(v, 6), method, cat)
+
+    def by_grade(r):
+        g, ln = r["fgrade"], r["length"]
+        if not g or not ln or ln <= 0:
+            return False
+        drop = ln / g
+        how = f"FLOW_GRADE 1 in {_fmt(g, 1)} over {_fmt(ln, 1)} m"
+        if r["ui"] is not None and r["di"] is None:
+            put(r, "ds", r["ui"] - drop, f"us invert and {how}", "grade")
+            return True
+        if r["di"] is not None and r["ui"] is None:
+            put(r, "us", r["di"] + drop, f"ds invert and {how}", "grade")
+            return True
+        return False
+
+    for _ in range(max_iter):
+        changed = False
+        for r in recs:
+            if r["ui"] is not None and r["di"] is not None:
+                continue
+            if r["ui"] is None and r["di"] is None:
+                inn = [q["di"] for q in by_ds.get(r["us"], ()) if q is not r and q["di"] is not None]
+                if inn:
+                    put(r, "us", min(inn), f"{len(inn)} adjoining sewer(s) flowing into node {r['us']} "
+                        f"(lowest ds invert)" if len(inn) > 1 else f"the adjoining sewer's ds invert at node "
+                        f"{r['us']}", "adjoining")
+                    changed = True
+                out = [q for q in by_us.get(r["ds"], ()) if q is not r]
+                if len(out) == 1 and out[0]["ui"] is not None:
+                    put(r, "ds", out[0]["ui"], f"the outgoing sewer {out[0]['pid']} us invert at node {r['ds']}",
+                        "adjoining")
+                    changed = True
+            if by_grade(r):
+                changed = True
+        if not changed:
+            break
+    n_sewers = sum(1 for r in recs if r["est"])
+    if n_sewers:
+        cats = {"grade": 0, "adjoining": 0}
+        for r in recs:
+            for _v, _m, c in r["est"].values():
+                cats[c] += 1
+        rep.count("inverts_estimated", cats["grade"] + cats["adjoining"])
+        rep.count("inverts_estimated_grade", cats["grade"])
+        rep.count("inverts_estimated_adjoining", cats["adjoining"])
+        rep.count("sewers_with_estimated_inverts", n_sewers)
+        left = sum(1 for r in recs if r["ui"] is None or r["di"] is None)
+        rep.diagnostics.append(
+            f"Estimated {cats['grade'] + cats['adjoining']} missing invert(s) in {n_sewers} sewer(s) "
+            f"(INVERT_ESTIMATED): {cats['grade']} from FLOW_GRADE and length, {cats['adjoining']} from adjoining "
+            f"sewers' inverts; {left} sewer(s) still missing an invert (reported by the model check).")
+
+
+def _report_tee_cycles(segs: list, up_end: dict, tee_nodes: set, tee_by_seg: dict, rep: ImportReport):
+    """After flow directions are set: a directed cycle through a tee node usually means a false tee (SUSPECT_TEE)."""
+    if not tee_nodes:
+        return
+    succ: dict = {}
+    for si, s in enumerate(segs):
+        up = up_end[si]
+        succ.setdefault(s["ends"][up], []).append(s["ends"][1 - up])
+    branches: dict = {}
+    for si, es in tee_by_seg.items():
+        for e in es:
+            branches.setdefault(segs[si]["ends"][e], []).append(segs[si]["pid"])
+    seen: set = set()
+    for tee in sorted(tee_nodes):
+        prev: dict = {}
+        frontier = list(succ.get(tee, ()))
+        for n in frontier:
+            prev.setdefault(n, tee)
+        found = tee in prev
+        while frontier and not found:
+            nxt = []
+            for n in frontier:
+                for m in succ.get(n, ()):
+                    if m not in prev:
+                        prev[m] = n
+                        nxt.append(m)
+            found = tee in prev
+            frontier = nxt
+        if not found:
+            continue
+        cyc, n = [tee], prev[tee]
+        while n != tee:
+            cyc.append(n)
+            n = prev[n]
+        cyc.reverse()
+        cyc = [tee] + cyc[:-1]
+        key = frozenset(cyc)
+        if key in seen:
+            continue
+        seen.add(key)
+        rep.count("suspect_tees")
+        rep.warn("SUSPECT_TEE", "node", tee,
+                 f"directed cycle through tee {tee}: {' -> '.join(cyc + [cyc[0]])}; branch sewer(s) joined at "
+                 f"this tee: {', '.join(branches.get(tee, ())) or '(none)'}; check the tee is real")
 
 
 def _assign_cp_loads(cp_pool: dict, conduits: list, radius: float, rep: ImportReport) -> list:
