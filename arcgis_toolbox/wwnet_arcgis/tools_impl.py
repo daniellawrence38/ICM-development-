@@ -244,7 +244,7 @@ def import_pressure_data(arcpy, msgs: Messages, gpkg_path: str, ps_layer, main_l
         return float(v) if v is not None else float(defaults.get(key, fallback))
     opts = pi.Options(search_m=num(search_distance, "search_distance_m", 30.0),
                       snap_m=num(snap_tolerance, "snap_tolerance_m", 1.0),
-                      discharge_m=num(discharge_distance, "discharge_distance_m", 10.0),
+                      discharge_m=num(discharge_distance, "discharge_distance_m", 1.0),
                       include_not_in_use=bool(include_not_in_use))
     roles_fields = {r: d for r, d in pi.template_defaults().items()}
     roles_fields.update({k: (v or "") for k, v in (fields or {}).items() if k in pi.ROLE_LAYER})

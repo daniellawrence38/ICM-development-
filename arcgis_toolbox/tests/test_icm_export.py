@@ -539,3 +539,37 @@ def test_fake_arcpy_rejects_text_longer_than_the_field(fake_arcpy, tmp_path):
     with pytest.raises(RuntimeError, match="Field length exceeded"):
         with a.da.InsertCursor(fc, ["notes", "SHAPE@"]) as ins:
             ins.insertRow(["x" * 11, None])
+
+
+def test_hanging_rising_main_discharge_outfall_reason(demo_gpkg):
+    _edit(demo_gpkg,
+          "INSERT INTO wwn_nodes (geom, node_id, node_type, invert_level, surface_level, notes) "
+          "SELECT geom, 'D_RM_PS2', 'junction', 30.0, 31.0, "
+          "'Created by Import Pressure Data; rising main discharge, not connected: connect manually' "
+          "FROM wwn_nodes WHERE node_id='N01'",
+          "UPDATE wwn_nodes SET node_type='wet_well' WHERE node_id='OUT1'",
+          "INSERT INTO wwn_pump_stations (ps_id, wet_well_node_id, discharge_node_id, rising_main_id, pump_rate_lps) "
+          "VALUES ('PS2','OUT1','D_RM_PS2','RM_PS2', 8.0)",
+          "INSERT INTO wwn_rising_mains (rm_id, ps_id, discharge_node_id, dn, length_m) "
+          "VALUES ('RM_PS2','PS2','D_RM_PS2',100,80.0)")
+    d = icm_export.build(demo_gpkg)
+    n = next(x for x in d["nodes"] if x["node_id"] == "D_RM_PS2")
+    assert n["node_type"] == "Outfall"
+    assert n["wwn_outfall_reason"] == "rising main discharge, not connected (connect manually)"
+    assert any("never connected to the gravity network" in w and "D_RM_PS2" in w for w in d["warnings"])
+
+
+def test_short_conduits_exported_as_one_metre(demo_gpkg):
+    _pump_model(demo_gpkg, rm_sql="INSERT INTO wwn_rising_mains (rm_id, ps_id, discharge_node_id, dn, length_m, "
+                                  "roughness_type, roughness) VALUES ('RM1','PS1','D',150,0.8,'ks',1.0)")
+    _edit(demo_gpkg, "UPDATE wwn_conduits SET length_m=0.4 WHERE conduit_id='P01'",
+          "UPDATE wwn_conduits SET length_m=1.0 WHERE conduit_id='P02'",
+          "UPDATE wwn_conduits SET length_m=25.0 WHERE conduit_id='P03'")
+    d = icm_export.build(demo_gpkg)
+    by = {c["wwn_conduit_id"]: c for c in d["conduits"]}
+    assert by["P01"]["conduit_length"] == 1.0 and by["RM1"]["conduit_length"] == 1.0
+    assert by["P02"]["conduit_length"] == 1.0 and by["P03"]["conduit_length"] == 25.0
+    (w,) = [w for w in d["warnings"] if "shorter than 1 m" in w]
+    assert w.startswith("2 conduit(s) shorter than 1 m exported with length 1 m (ICM minimum): ")
+    assert "P01" in w and "RM1" in w and "P02" not in w
+    assert "shorter than 1 m" in icm_export.notes_text("g", "sr", "gdb", "n", "c", d["warnings"])

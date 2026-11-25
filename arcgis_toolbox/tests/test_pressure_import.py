@@ -124,7 +124,7 @@ def test_discharge_node_created_when_no_gravity_node_near(world):
     assert q(gp, "select discharge_node_id from wwn_rising_mains") == [("D_RM_S0037310",)]
     assert q(gp, "select node_type, status, data_source from wwn_nodes where node_id='D_RM_S0037310'") == [
         ("junction", "existing", "gis")]
-    assert any("discharge point not connected to the gravity model" in w for w in warns(a))
+    assert any("discharge end is not at a gravity node" in w for w in warns(a))
 
 
 def test_idempotent_rerun_keeps_user_data(world):
@@ -289,3 +289,33 @@ def test_diameters_differ_warns_and_uses_most_common():
 def test_blob_roundtrip():
     assert pi.blob_xy(pi.point_blob((1.5, 2.5))) == (1.5, 2.5)
     assert line_pts(pi.line_blob([(0, 0), (3, 4)])) == [(0.0, 0.0), (3.0, 4.0)]
+
+
+def _hang_build(end_offset, discharge_m=1.0):
+    node = {"node_id": "G1", "node_type": "ac", "xy": (100.0, 0.0), "notes": None}
+    res = pi.build_pressure(
+        [{"ps_id": "P", "ps_status": "A", GEOM: (1.0, 0.0)}],
+        [{"main_id": "a", "main_status": "A", "diameter": 300, GEOM: [(0, 0), (100.0 - end_offset, 0)]}],
+        [node], [], pi.Options(discharge_m=discharge_m), {})
+    return res
+
+
+def test_discharge_joins_only_when_meeting_node():
+    res = _hang_build(0.5)
+    assert res.rising_mains[0]["discharge_node_id"] == "G1"
+    assert not any(n["node_id"] == "D_RM_P" for n in res.new_nodes)
+
+
+def test_discharge_far_end_hangs_with_note_and_warning():
+    res = _hang_build(5.0)
+    assert res.rising_mains[0]["discharge_node_id"] == "D_RM_P"
+    n = next(n for n in res.new_nodes if n["node_id"] == "D_RM_P")
+    assert n["node_type"] == "junction" and "rising main discharge, not connected: connect manually" in n["notes"]
+    assert pi.MARKER in n["notes"]
+    (w,) = [w for w in res.warnings if "discharge end is not at a gravity node" in w]
+    assert "RM_P" in w and "nearest G1 5.0 m" in w and "connect it manually" in w
+
+
+def test_discharge_configured_larger_distance_still_joins():
+    assert _hang_build(5.0, discharge_m=10.0).rising_mains[0]["discharge_node_id"] == "G1"
+    assert pi.Options().discharge_m == 1.0

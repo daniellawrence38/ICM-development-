@@ -111,7 +111,8 @@ CONC = "rcpl"
 [pressure]
 search_distance_m = 30.0        # pump station -> pressure main end, and pump station -> gravity terminal node (wet well)
 snap_tolerance_m = 1.0          # pressure main segment ends within this distance are joined
-discharge_distance_m = 10.0     # pressure main far end -> gravity node (discharge); else a new junction node is made
+discharge_distance_m = 1.0      # pressure main far end joins a gravity node only if within this distance (= snap: it actually meets it); else a new
+                                # hanging junction node is made at the end (no guessing; connect manually). Raise it to allow looser joins.
 
 [pressure.fields.pump_stations]
 id = "SAP_ID"                   # ps_id; when empty the ID field below is used (integer text)

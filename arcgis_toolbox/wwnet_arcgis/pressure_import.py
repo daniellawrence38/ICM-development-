@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from . import gpkg, sewer_import
 
 MARKER = "Created by Import Pressure Data"
+HANGING_NOTE = "rising main discharge, not connected: connect manually"   # also read by icm_export
 SRS = 7850
 MAX_LIST = 30
 GRAVITY_READ_BUFFER_M = 200.0     # extent (model nodes + pump stations) grown by this when reading mains
@@ -84,7 +85,7 @@ def roles_for(layer_key: str, fields: dict) -> dict:
 class Options:
     search_m: float = 30.0
     snap_m: float = 1.0
-    discharge_m: float = 10.0
+    discharge_m: float = 1.0      # far end joins an existing node only when it meets it (no guessing)
     include_not_in_use: bool = False
 
 
@@ -468,14 +469,18 @@ def build_pressure(ps_rows: list, main_rows: list, nodes: list, conduit_ends, op
             res.warnings.append(f"Rising main {rm_id}: the nearest main end to pump station {pid} is not a dead "
                                 "end (joins other segments); check the chain.")
         end = rm["coords"][-1]
-        hit = grid.nearest(end, opts.discharge_m, lambda nid: nid != ps_by_id[pid]["wet_well_node_id"])
+        not_wet = lambda nid: nid != ps_by_id[pid]["wet_well_node_id"]  # noqa: E731
+        hit = grid.nearest(end, opts.discharge_m, not_wet)
         if hit:
             rm["discharge_node_id"] = hit[1]
         else:
-            rm["discharge_node_id"] = add_node("D_" + rm_id, "junction", (end[0], end[1]), MARKER)
-            res.warnings.append(f"Rising main {rm_id}: discharge point not connected to the gravity model "
-                                f"(no node within {opts.discharge_m:g} m of its far end); created junction node "
-                                f"{rm['discharge_node_id']}.")
+            # never guess: the far end joins an existing node only when it meets it; otherwise it hangs at a new node
+            near = grid.nearest(end, max(opts.search_m, opts.discharge_m), not_wet)
+            rm["discharge_node_id"] = add_node("D_" + rm_id, "junction", (end[0], end[1]),
+                                               f"{MARKER}; {HANGING_NOTE}")
+            nearest = f"nearest {near[1]} {near[0]:.1f} m" if near else f"no node within {max(opts.search_m, opts.discharge_m):g} m"
+            res.warnings.append(f"Rising main {rm_id}: discharge end is not at a gravity node ({nearest}); "
+                                f"left hanging at new node {rm['discharge_node_id']} — connect it manually.")
         if ch["end_kind"] == "junction":
             res.warnings.append(f"Rising main {rm_id} ends at a junction of three or more pressure main "
                                 "segments (e.g. mains combining); the chain stops there. Check the downstream main.")

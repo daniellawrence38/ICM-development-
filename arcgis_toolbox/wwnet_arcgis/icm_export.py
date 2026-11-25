@@ -37,6 +37,8 @@ ASSIST_STOP_OFFSET_M = 0.1
 RM_SOLUTION_MODEL = "ForceMain"     # ICM solution model of a rising main (recommended over "Pressure")
 RM_HEADLOSS_TYPE = "None"           # ICM E2075: Normal / High headloss not allowed with ForceMain
 GRAVITY_HEADLOSS_TYPE = "Normal"    # ICM default for conduits
+MIN_CONDUIT_LENGTH_M = 1.0         # ICM rejects very short conduits: shorter positive lengths are exported as this
+HANGING_MARK = "rising main discharge, not connected"   # in the notes of the node Import Pressure Data leaves hanging
 DELIVERY_SUFFIX = "_DEL"            # pump delivery node id = <ps_id>_DEL
 DELIVERY_OFFSET_M = 1.0             # delivery node moved this far east when it would sit on the wet well
 
@@ -222,7 +224,7 @@ def build(gpkg_path: str) -> dict:
         per_us[us] = k + 1
         return SUFFIX_CHARS[k]
 
-    out_links, missing_inv, missing_node = [], [], []
+    out_links, missing_inv, missing_node, short = [], [], [], []
     for c in conduits:
         suffix = next_suffix(c["us_node_id"])
         if c["us_invert"] is None or c["ds_invert"] is None:
@@ -232,6 +234,9 @@ def build(gpkg_path: str) -> dict:
                 missing_node.append(f"{c['conduit_id']} -> {nid}")
         dia = c["internal_diameter_mm"] or c["dn"]
         length = c["length_m"] if c["length_m"] is not None else _line_length(c["geom"])
+        if length is not None and 0 < length < MIN_CONDUIT_LENGTH_M:
+            short.append(c["conduit_id"])
+            length = MIN_CONDUIT_LENGTH_M
         ks = c["ks_mm"] if c["ks_mm"] is not None else DEFAULT_KS_MM
         out_links.append({
             "us_node_id": c["us_node_id"], "link_suffix": suffix, "ds_node_id": c["ds_node_id"],
@@ -253,7 +258,10 @@ def build(gpkg_path: str) -> dict:
         warnings.append(f"{len(missing_node)} conduit end(s) reference a node that doesn't exist (ICM will reject "
                         "them): " + ", ".join(missing_node[:20]))
 
-    pres = _pressure(out_nodes, stations, mains, pumps, next_suffix, warnings)
+    pres = _pressure(out_nodes, stations, mains, pumps, next_suffix, warnings, short)
+    if short:
+        warnings.append(f"{len(short)} conduit(s) shorter than {MIN_CONDUIT_LENGTH_M:g} m exported with length "
+                        f"{MIN_CONDUIT_LENGTH_M:g} m (ICM minimum): " + _ids(short))
     if pres["not_exported"]:
         skipped["wwn_rising_mains"] = len(pres["not_exported"])
 
@@ -264,7 +272,7 @@ def build(gpkg_path: str) -> dict:
         n_out[c["us_node_id"]] = n_out.get(c["us_node_id"], 0) + 1
         n_in[c["ds_node_id"]] = n_in.get(c["ds_node_id"], 0) + 1
     wet_wells = {s["wet_well_node_id"] for s in stations if s["wet_well_node_id"]}
-    terminal, dangling, rm_out = [], [], []
+    terminal, dangling, rm_out, rm_hang = [], [], [], []
     for n in out_nodes:
         nid = n["node_id"]
         if n_in.get(nid, 0) == 0 or n_out.get(nid, 0) > 0 or n["wwn_node_type"] == "outfall":
@@ -277,8 +285,12 @@ def build(gpkg_path: str) -> dict:
         if nid in pres["discharge_nodes"]:
             # the rising main discharges to a point with nothing downstream: the engine's free outfall
             n["node_type"] = "Outfall"
-            n["wwn_outfall_reason"] = "rising main discharge"
+            hanging = HANGING_MARK in (n["notes"] or "")
+            n["wwn_outfall_reason"] = ("rising main discharge, not connected (connect manually)" if hanging
+                                       else "rising main discharge")
             rm_out.append(nid)
+            if hanging:
+                rm_hang.append(nid)
         elif n["wwn_node_type"] in DANGLING_TYPES:
             # NOT an outfall: its flow belongs in the main it should join (missed tee). Making it an outfall
             # would silently drop that flow from the downstream network; leave the ICM validation error.
@@ -293,6 +305,9 @@ def build(gpkg_path: str) -> dict:
     if rm_out:
         warnings.append(f"{len(rm_out)} rising main discharge node(s) have no downstream pipe: exported as Outfall "
                         "(the pumped flow leaves the model there, as in the WWNet engine): " + _ids(rm_out))
+    if rm_hang:
+        warnings.append(f"{len(rm_hang)} rising main(s) end at a hanging node that was never connected to the gravity "
+                        "network (exported as Outfall; connect them manually): " + _ids(rm_hang))
     if dangling:
         warnings.append(f"{len(dangling)} sewer end(s) have no downstream pipe and are not chambers (possible missed "
                         "tee / main outside the selection). NOT made outfalls (their flow would leave the network): ICM will "
@@ -307,7 +322,8 @@ def build(gpkg_path: str) -> dict:
             "head_discharge": pres["head_discharge"], "warnings": warnings, "skipped": skipped, "counts": counts}
 
 
-def _pressure(out_nodes: list, stations: list, mains: list, pumps: list, next_suffix, warnings: list) -> dict:
+def _pressure(out_nodes: list, stations: list, mains: list, pumps: list, next_suffix, warnings: list,
+              short: list | None = None) -> dict:
     """Pump delivery nodes, rising-main conduits, pumps and head-discharge rows (see the module docstring).
     Edits wet-well rows of `out_nodes` in place (chamber / shaft area = wet well area)."""
     res = {"nodes": [], "conduits": [], "pumps": [], "head_discharge": [], "hd_ids": [], "discharge_nodes": set(),
@@ -402,6 +418,10 @@ def _pressure(out_nodes: list, stations: list, mains: list, pumps: list, next_su
             length = profile[-1][0] - profile[0][0]
         if not length:
             warnings.append(f"Rising main {rid}: no length, geometry or profile; conduit_length left blank.")
+        elif length < MIN_CONDUIT_LENGTH_M:
+            if short is not None:
+                short.append(rid)
+            length = MIN_CONDUIT_LENGTH_M
         dia = _pos(rm["internal_diameter_mm"]) or _pos(rm["dn"])
         if dia is None:
             warnings.append(f"Rising main {rid}: no diameter; conduit_width / conduit_height left blank.")
@@ -593,6 +613,9 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
         "Node table",
         "  node_id -> Node ID | node_type -> Node type (Manhole / Break / Outfall)",
         "  Terminal chambers (pipes in, none out) are exported as Outfall (free outfall, as in the WWNet engine);",
+        "  rising main discharge nodes left hanging by Import Pressure Data are Outfalls too (wwn_outfall_reason ends",
+        "  'not connected (connect manually)'); join them to the gravity network by hand",
+        "  Conduits shorter than 1 m (ICM minimum) are exported with length 1 m; inverts are unchanged",
         "  dangling sewer ends (tee / IS / IO ends with nothing downstream) stay Break: fix the join, not the outfall",
         "  ground_level -> Ground level | flood_level -> Flood level | chamber_floor -> Chamber floor level",
         "  flood_type -> Flood type (Sealed on pump delivery / rising main start nodes; blank = ICM default)",

@@ -358,8 +358,8 @@ class ImportPressureData(_Tool):
                      required=False, default=30.0, category="Options"),
                   _p("snap", "Snap tolerance between main segments (m)", "GPDouble", required=False, default=1.0,
                      category="Options"),
-                  _p("discharge", "Discharge search distance main end to gravity node (m)", "GPDouble",
-                     required=False, default=10.0, category="Options"),
+                  _p("discharge", "Join distance main end to gravity node (m; further = left hanging)", "GPDouble",
+                     required=False, default=1.0, category="Options"),
                   _p("include_n", "Include not-in-use (N) pump stations and mains", "GPBoolean", required=False,
                      default=False, category="Options")]
         for role, layer_key, label, required in pi.FIELD_ROLES:

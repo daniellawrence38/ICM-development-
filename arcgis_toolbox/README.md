@@ -44,7 +44,7 @@ Adds the Water Corporation (WA) layers *Sewer Pump Station* (points) and *Sewer 
 
 **Parameters**: model `.gpkg`, pump stations, pressure mains, *Use selected features only* (on; a layer with nothing
 selected is read by spatial filter on the model extent, never in full), search distance pump station -> main end / gravity
-terminal node (30 m), snap tolerance between main segments (1 m), discharge search distance main end -> gravity node (10 m),
+terminal node (30 m), snap tolerance between main segments (1 m), join distance main end -> gravity node (1 m: the end must meet the node),
 *Include not-in-use* (off; only STATUS `A` is imported, `N` too when ticked, never `R` / others), *Add / refresh layers on map*,
 then one **Field** parameter per role (ps id / fallback id / names / status; main id / status / diameter / internal diameter /
 material / length / name).
@@ -58,8 +58,10 @@ material / length / name).
   they differ), `internal_diameter_mm` = INDIAM1, `length_m` = sum of LENGTH (geometry length where LENGTH is 0 / unknown),
   `roughness_type` `ks` with NULL roughness (engine default).
 - The mains' UPSTREAM / DOWNSTREAM levels are **not used** (unreliable): `profile_json` stays NULL.
-- Discharge: nearest existing node within the discharge distance of the main's far end, else a new `junction` node
-  `D_<rm_id>` (warning: not connected to the gravity model).
+- Discharge: the nearest existing node within the join distance (1 m) of the main's far end; otherwise nothing is guessed:
+  a new `junction` node `D_<rm_id>` is left hanging at the end (notes "rising main discharge, not connected: connect
+  manually", one warning per main naming the nearest node). Export To ICM makes it an Outfall with reason "rising main
+  discharge, not connected (connect manually)" until it is connected.
 - Wet well: the nearest gravity terminal node (no outgoing conduit) within the search distance becomes `wet_well`
   (`wet_well_node_id`); otherwise a `wet_well` node `WW_<ps_id>` is created at the station (no levels, warning).
 - Sentinels (-99.9 levels, -9996 / -9998, zero diameters / lengths) are treated as NULL. Re-running replaces the
