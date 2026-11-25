@@ -1,10 +1,12 @@
-# WWNet: session handover (2026-11-24, merged)
+# WWNet: session handover (2026-11-25)
 
-Branch: **`ccr-7bd083b1-j0qlhq`**. It now holds BOTH lines of work: the 2026-11-23/24 ArcGIS session
-(`ccr-54bf38a8-b92qd9`: pressure side, Export To ICM, Self Test, Update WWNet; sections 2-11 below) and the
-2026-11-23 review session (schema v3 / toolbox UX; **section 12**), merged on 2026-11-24. Older branches
-(`ccr-54bf38a8-b92qd9`, `ccr-472a9a6a-he69zu`, `ccr-974cdaeb-c682le`) are superseded: continue on this one.
-**Start here: section 13 (antivirus, assistant removed), section 12 (what the merge changed), then section 11 'Where we stopped'.**
+Branch: **`ccr-153a547e-mtrc3t`** (2026-11-25 session, section 14). It was restarted from `ccr-7bd083b1-j0qlhq`
+(38f46e2), which holds BOTH earlier lines of work: the 2026-11-23/24 ArcGIS session (`ccr-54bf38a8-b92qd9`: pressure
+side, Export To ICM, Self Test, Update WWNet; sections 2-11) and the 2026-11-23 review session (schema v3 / toolbox
+UX; **section 12**), merged on 2026-11-24. All older branches (`ccr-7bd083b1-j0qlhq`, `ccr-54bf38a8-b92qd9`,
+`ccr-472a9a6a-he69zu`, `ccr-974cdaeb-c682le`) are contained in this one: continue here.
+**Start here: section 14 (pump station register import, where we stopped), then 13 (antivirus, assistant removed),
+12 (what the merge changed) and 11.**
 Plan: `docs/PLAN.md`. Review: `docs/REVIEW-2026-11.md`. OSS survey: `docs/reference-survey.md`. Deck: `docs/WWNet_functions.pptx`.
 
 ## 1. User and working style
@@ -63,7 +65,8 @@ Key ArcGIS modules: `tools_impl.py` (tool logic), `engine.py` (wwnet_native call
 | **Join Dangling Sewer Ends** | Model | new: splits the main at a missed tee, inserts a tee node, invert = US invert − grade × distance; preview default. Used by the user to fix E4/E46 |
 | Import Sewer Data | Data | verified (61 sewers); new Advanced param *Tee join distance* (0.5 m) + "possible missed tee" report |
 | **Import Pressure Data** | Data | new, **not yet run on real data** |
-| **Set Pump Station Data** | Data | new, not yet run in Pro (manual entry: wet well dia/area, levels AHD or depth, duty/assist/standby, rate or pasted curve) |
+| **Set Pump Station Data** | Data | new, not yet run in Pro (manual entry: wet well dia/area, levels AHD or depth, duty/assist/standby, rate or pasted curve); 2026-11-25: optional wet well floor level (§14) |
+| **Import Pump Station Data** | Data | 2026-11-25 (§14): pump station register .xlsx → levels / floor / area / storage / design rate; not yet run in Pro |
 | Import Diurnal Profile | Data | fake-tested; Self Test PASS in Pro |
 | **Export To ICM** | Data | **verified: gravity model loads into ICM 2024.5 and runs.** Terminal chambers → Outfall; dangling ends stay Break (warned); DEM fill of missing ground levels; GDA2020 or GDA94 output. **2026-11-24: rising mains + pumps now exported (§11), not yet run in Pro / ICM** |
 | Run Design | Analysis | verified |
@@ -260,3 +263,53 @@ assistant ("won't be able to use that at work anyway"). Done:
   assistant files would otherwise stay and may still be flagged).
 - If it is still flagged: ask IT security to treat it as a false positive / allowlist by SHA-256; code signing
   is the permanent fix (needs a certificate from IT). Do not try to evade detection.
+
+## 14. 2026-11-25: pumps not reaching ICM; pump station register import
+
+User report: "Export to ICM mostly works except the pumps are not importing across"; `ICM_Pumps` was not in the
+export. Audit (no code bug, pump path byte-identical to 421d23b where ICM accepted it): `ICM_Pumps` is written only
+when a station has a pump with a rate or curve. Import Pressure Data writes no hydraulics, so without pump data the
+export logs "no pumps and no pump rate; NO pump exported" and the wet well has no outlet in ICM. Other ways pumps
+drop out (still true): Set Pump Station Data errors are `ERROR:` warnings (tool shows success, nothing saved;
+locked GeoPackage, levels at/below the wet well invert, non-decreasing curve); pumps with counts only (no rate /
+curve) are simulated as ideal pumps by the engine but NOT exported; pumps are a separate ODIC import (Pump object;
+a nodes + conduits config won't bring them).
+
+**Key finding:** the wet well node is the gravity terminal manhole, so its invert = incoming sewer invert. Real
+stop levels sit below it, and `set_station` rejected them. Fixed: `set_station(wet_well_floor=, ground_level=)`
+sets the wet well node's invert / surface level in the same transaction (the incoming conduit keeps its ds_invert
+= a drop; SWMM offsets and ICM handle it). Set Pump Station Data has an optional "Wet well floor level (m AHD)".
+
+**New tool Import Pump Station Data** (`pump_register.py`, stdlib `xlsx.py` reader, column map in
+`templates/import/watercorp_pump_register.toml`). The user found the Water Corp pump station register (.xlsx;
+values stored as text with a leading `'`, handled). Matched on `ps_id` (= GIS SAP_ID) = functional location in
+column C of every sheet (SAP sub-locations `S0037310-...` also match). Layout from the user:
+- Level Settings: E design ground (m AHD, top of slab); depths below slab in **metres**: F overflow, G stop,
+  L high level alarm, P start, **T base (wet well floor)**. Order checked base > stop > start > alarm > overflow.
+- Civil: R wet well storage = volume **between the high level alarm (L) and overflow (F)** → area = R / (L − F);
+  AB emergency storage m³.
+- Motor and Pump Attributes: AF design flow (L/s), AG design head (m). One rate; stations are duty/standby →
+  1 duty + 1 standby at the design flow (Fixpmp in ICM); head kept in the station notes. Extra pump rows with
+  different test data are flagged "… not used …; future enhancement" (**user wants second-pump test data / curves
+  as a future enhancement; they may add a curve from one pump's test results by hand**). Existing curves are kept.
+- Per-station errors (spreadsheet sheet / column / row in the message) skip only that station; preview option.
+- Import Sewer Data (overwrite) rebuilds the model (pump data lost); Import Pressure Data keeps station data but
+  recreates the `WW_<ps_id>` nodes it made (floor lost) → re-run the register import last.
+- Self Test step "import pump station data (demo register)" (`examples/demo/pump_register_demo.xlsx`, shipped as
+  `templates/demo/`, generator `tests/make_pump_register_demo.py`).
+
+Commits: 0927ae3 xlsx reader; 1a3529b core; b65778b text values; 18c0288 WIP + the completing commit. Tests: toolbox
+266, plugin 103 + 1 skipped (needs `anthropic`), pyflakes clean. Toolbox now 22 tools. Python only since 38f46e2.
+
+### Where we stopped (next session starts here)
+
+1. Install: if the user already runs the 38f46e2 full bundle, Update WWNet with this commit's `wwnet-arcgis-update`
+   artifact; otherwise (still on 60e8cc8) the full bundle `wwnet-arcgis-bundle-win-py311` (delete the old folder
+   first, §13). Then Self Test (expect the new step PASS) and paste the report.
+2. Run Import Pump Station Data on the real model with **Preview only** first; paste messages. Then for real, then
+   Export To ICM → expect `ICM_Pumps` (Fixpmp at the design flow), then ODIC import incl. the Pump object.
+3. Open questions: `Fixpmp` `discharge` unit in ICM (L/s vs the network's flow unit); whether ODIC can import the
+   head-discharge CSV; export a placeholder pump link for stations with no data (offered, user not yet decided);
+   make Set Pump Station Data failures more visible; export pumps that have counts only (engine/export mismatch).
+4. Then §11 "Where we stopped" items and §8.
+

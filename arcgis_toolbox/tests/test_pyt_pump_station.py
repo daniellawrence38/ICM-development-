@@ -102,7 +102,6 @@ def test_update_messages_curve(pyt):
     t = pyt.SetPumpStationData()
     ps = params(t)
     q = by(ps)
-    curve = by(ps)["pump_curve"]
     t.updateMessages(ps)                                  # no curve: nothing
     assert q["pump_curve"].message is None
     q["pump_curve"].value = "0\t30\n10\t40"
@@ -168,3 +167,42 @@ def test_execute_data_error_is_warning_not_error(pyt, model, fake_arcpy):
     q["area_m2"].value, q["diameter_m"].value = 7.0, 9.0          # area and diameter disagree
     t.execute(ps, None)
     assert [lv for lv, _ in a.log] == ["warn"] and a.log[0][1].startswith("ERROR: Wet well area")
+
+
+def test_execute_wet_well_floor_end_to_end(pyt, model, fake_arcpy):
+    """PS1's wet well node N01 has invert 18.0: a stop level of 17.5 is below it, so it needs the floor."""
+    a = fake_arcpy([])
+    pyt.arcpy = a
+    t = pyt.SetPumpStationData()
+    ps = params(t)
+    q = by(ps)
+    ps[0].value = model
+    ps[1].value = "PS1 — Main PS"
+    q["stop_level"].value = 17.5
+    t.execute(ps, None)                                       # without the floor: rejected, nothing written
+    assert [lv for lv, _ in a.log] == ["warn"] and a.log[0][1].startswith("ERROR:") and "invert" in a.log[0][1]
+    a.log.clear()
+    q["floor_level"].value = 17.0
+    t.execute(ps, None)
+    assert not any(t.startswith("ERROR") for _, t in a.log), a.log
+    con = sqlite3.connect(model)
+    inv = con.execute("SELECT invert_level FROM wwn_nodes WHERE node_id='N01'").fetchone()[0]
+    stop = con.execute("SELECT stop_level FROM wwn_pump_stations WHERE ps_id='PS1'").fetchone()[0]
+    con.close()
+    assert inv == 17.0 and stop == 17.5
+
+
+def test_execute_blank_floor_leaves_node_alone(pyt, model, fake_arcpy):
+    a = fake_arcpy([])
+    pyt.arcpy = a
+    t = pyt.SetPumpStationData()
+    ps = params(t)
+    q = by(ps)
+    ps[0].value = model
+    ps[1].value = "PS1 — Main PS"
+    q["stop_level"].value = 18.6
+    t.execute(ps, None)
+    con = sqlite3.connect(model)
+    inv = con.execute("SELECT invert_level FROM wwn_nodes WHERE node_id='N01'").fetchone()[0]
+    con.close()
+    assert inv == 18.0
