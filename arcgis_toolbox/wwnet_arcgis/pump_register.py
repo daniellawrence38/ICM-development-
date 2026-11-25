@@ -98,12 +98,22 @@ def load_config(path=None) -> dict:
 
 # ------------------------------------------------------------------ reading
 
+_TEXT_MARKS = "'\u2018\u2019`"   # leading apostrophe / typographic quote of a number or ID stored as text
+
+
+def _clean_text(v: str) -> str:
+    """Strip spaces (incl. non-breaking) and a leading text marker: "'0.47" -> "0.47", "'S0037310" -> "S0037310".
+    Excel keeps its own text-prefix apostrophe out of the cell value, but exported registers often store it."""
+    v = v.replace("\u00a0", " ").strip()
+    return v.lstrip(_TEXT_MARKS).strip()
+
+
 def _number(v):
-    """float, or a numeric string (stripped, thousands commas removed); anything else None."""
+    """float, or a numeric string (stripped, a leading ' removed, thousands commas removed); anything else None."""
     if isinstance(v, bool) or v is None:
         return None
     if isinstance(v, str):
-        v = v.strip().replace(",", "")
+        v = _clean_text(v).replace(",", "")
         if not v:
             return None
     try:
@@ -118,7 +128,7 @@ def _norm_fl(v):
         return ""
     if isinstance(v, float) and v.is_integer():
         v = int(v)
-    return str(v).strip().upper()
+    return _clean_text(str(v)).upper()
 
 
 def read_register(xlsx_path, cfg) -> dict:

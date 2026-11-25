@@ -306,3 +306,21 @@ def test_bad_config_names_key(tmp_path, old, new, key):
     p.write_text(src.replace(old, new, 1))
     with pytest.raises(ValueError, match=key.replace(".", r"\.")):
         pr.load_config(p)
+
+
+@pytest.mark.parametrize("mark", ["", "'", "’"])
+def test_values_stored_as_text(model, xl, mark):
+    """Registers exported with every value as text ('0.47): numbers and the functional location still read."""
+    def txt(d):
+        return {k: f"{mark}{v:g}" if isinstance(v, float) else f"{mark}{v}" for k, v in d.items()}
+    res = pr.apply(model, xl(levels=[txt(lev("S0037310"))], civil=[txt(civ("S0037310"))],
+                             pumps=[txt(pmp("S0037310"))]))
+    st = station(res)
+    assert st["status"] == "ok", st["messages"]
+    v = st["values"]
+    assert v["wet_well_floor"] == pytest.approx(21.5) and v["stop"] == pytest.approx(22.0)
+    assert v["start"] == pytest.approx(22.8) and v["overflow"] == pytest.approx(25.0)
+    assert v["duty_rate_lps"] == pytest.approx(25.0) and v["emergency_storage_m3"] == pytest.approx(120.0)
+    assert v["wet_well_area_m2"] == pytest.approx(2.1 / 0.6, rel=1e-3)
+    assert _q(model, "SELECT invert_level FROM wwn_nodes WHERE node_id='WW'")[0][0] == pytest.approx(21.5)
+    assert pr._number(" '1,250.5 ") == pytest.approx(1250.5) and pr._number("'N/A") is None
