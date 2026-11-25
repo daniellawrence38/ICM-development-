@@ -41,7 +41,7 @@ def world(fake_arcpy, demo_gpkg):
     layers = []
     a = fake_arcpy(layers)
     a.sources["C:/d/ps"] = {"fields": PS_FIELDS, "sr": GDA2020, "rows": [
-        ps("S0037310", (OUT1[0] + 2, OUT1[1] + 4), SAP_NAME="SPS 2 ROBINSON ST CARNARVON", PSNAME="ROBINSON"),
+        ps("S0037310", (OUT1[0] + 0.3, OUT1[1] + 0.4), SAP_NAME="SPS 2 ROBINSON ST CARNARVON", PSNAME="ROBINSON"),
         ps("S0099999", (392300.0, 6466100.0), STATUS="R- removed"),
         ps("", (392280.0, 6466060.0), ID=4567.0),
         ps("S0000001", (500000.0, 6400000.0))]}                       # far outside the model: not read
@@ -319,3 +319,49 @@ def test_discharge_far_end_hangs_with_note_and_warning():
 def test_discharge_configured_larger_distance_still_joins():
     assert _hang_build(5.0, discharge_m=10.0).rising_mains[0]["discharge_node_id"] == "G1"
     assert pi.Options().discharge_m == 1.0
+
+
+def _ww_build(terms, wet_well_m=1.0):
+    """Station at (0, 0); `terms` = {node_id: (x, 0)} gravity terminal nodes (each fed by one conduit)."""
+    nodes = [{"node_id": k, "node_type": "ac", "xy": (x, 0.0), "notes": None} for k, x in terms.items()]
+    nodes.append({"node_id": "UP", "node_type": "ac", "xy": (0.0, 50.0), "notes": None})
+    ends = [("UP", k) for k in terms]
+    return pi.build_pressure([{"ps_id": "P", "ps_status": "A", GEOM: (0.0, 0.0)}], [], nodes, ends,
+                             pi.Options(wet_well_m=wet_well_m), {})
+
+
+def test_wet_well_is_sewer_end_at_station_point():
+    res = _ww_build({"T1": 0.3, "T2": 8.0})
+    assert res.pump_stations[0]["wet_well_node_id"] == "T1" and res.retype_nodes == {"T1": "wet_well"}
+    assert not res.new_nodes
+
+
+def test_wet_well_picks_one_at_the_point_over_one_5m_away():
+    res = _ww_build({"A5": 5.0, "B0": 0.0}, wet_well_m=10.0)
+    assert res.pump_stations[0]["wet_well_node_id"] == "B0"
+
+
+def test_wet_well_far_terminal_not_guessed():
+    res = _ww_build({"T8": 8.0})
+    assert res.pump_stations[0]["wet_well_node_id"] == "WW_P" and not res.retype_nodes
+    n = next(n for n in res.new_nodes if n["node_id"] == "WW_P")
+    assert n["node_type"] == "wet_well" and n["xy"] == (0.0, 0.0) and pi.MARKER in n["notes"]
+    assert "no gravity sewer ends at the pump station point: connect the inlet sewer manually" in n["notes"]
+    (w,) = [w for w in res.warnings if "no gravity sewer ends within" in w]
+    assert w == ("Pump station P: no gravity sewer ends within 1 m of the station point (nearest dead-end gravity "
+                 "node T8 8.0 m); wet well WW_P created at the station point and left unconnected — connect the "
+                 "inlet sewer manually or raise the wet well distance.")
+
+
+def test_wet_well_configured_larger_distance_joins():
+    assert _ww_build({"T8": 8.0}, wet_well_m=10.0).pump_stations[0]["wet_well_node_id"] == "T8"
+    assert pi.Options().wet_well_m == 1.0
+
+
+def test_wet_well_stale_ww_removed_on_reimport(world):
+    a, lyr, gp, _ = world
+    run(a, lyr, gp, wet_well_distance=0.01)                  # OUT1 is 0.5 m from the station: not used
+    assert q(gp, "select wet_well_node_id from wwn_pump_stations where ps_id='S0037310'") == [("WW_S0037310",)]
+    run(a, lyr, gp)                                          # default 1 m: the stale WW_ node is cleaned up
+    assert q(gp, "select count(*) from wwn_nodes where node_id='WW_S0037310'") == [(0,)]
+    assert q(gp, "select wet_well_node_id from wwn_pump_stations where ps_id='S0037310'") == [("OUT1",)]

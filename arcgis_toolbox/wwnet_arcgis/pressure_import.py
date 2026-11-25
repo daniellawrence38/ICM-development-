@@ -86,6 +86,7 @@ class Options:
     search_m: float = 30.0
     snap_m: float = 1.0
     discharge_m: float = 1.0      # far end joins an existing node only when it meets it (no guessing)
+    wet_well_m: float = 1.0       # the gravity sewer end AT the station point is its wet well (no guessing further)
     include_not_in_use: bool = False
 
 
@@ -418,7 +419,7 @@ def build_pressure(ps_rows: list, main_rows: list, nodes: list, conduit_ends, op
     outgoing = {u for u, _d in conduit_ends}
     incoming = {d for _u, d in conduit_ends}
     terminal = {nid for nid in incoming if nid not in outgoing and nid in node_by_id}
-    cell = max(opts.search_m, opts.discharge_m, 1.0)
+    cell = max(opts.search_m, opts.discharge_m, opts.wet_well_m, 1.0)
     grid = _PointGrid(cell)
     for n in live:
         grid.add(n["node_id"], n["xy"])
@@ -446,7 +447,7 @@ def build_pressure(ps_rows: list, main_rows: list, nodes: list, conduit_ends, op
     claimed = set()
     ps_by_id = {p["ps_id"]: p for p in pss}
     for p in pss:
-        hit = grid.nearest(p["xy"], opts.search_m, lambda nid: nid in terminal and nid not in claimed)
+        hit = grid.nearest(p["xy"], opts.wet_well_m, lambda nid: nid in terminal and nid not in claimed)
         if hit:
             nid = hit[1]
             claimed.add(nid)
@@ -455,9 +456,17 @@ def build_pressure(ps_rows: list, main_rows: list, nodes: list, conduit_ends, op
                 node_by_id[nid] = dict(node_by_id[nid], node_type="wet_well")
             p["wet_well_node_id"] = nid
         else:
-            p["wet_well_node_id"] = add_node("WW_" + p["ps_id"], "wet_well", p["xy"], MARKER)
-            res.warnings.append(f"Pump station {p['ps_id']}: no gravity terminal node within {opts.search_m:g} m; "
-                                f"created wet well node {p['wet_well_node_id']} at the station (no levels).")
+            # never guess: no gravity sewer ends at the station point -> a new wet well there, left unconnected
+            far = min(((_dist(p["xy"], node_by_id[t]["xy"]), t) for t in terminal if t not in claimed),
+                      default=None, key=lambda x: (x[0], str(x[1])))
+            nearest = f"nearest dead-end gravity node {far[1]} {far[0]:.1f} m" if far else "no dead-end gravity node"
+            p["wet_well_node_id"] = add_node("WW_" + p["ps_id"], "wet_well", p["xy"],
+                                             f"{MARKER}; no gravity sewer ends at the pump station point: "
+                                             "connect the inlet sewer manually")
+            res.warnings.append(f"Pump station {p['ps_id']}: no gravity sewer ends within {opts.wet_well_m:g} m of "
+                                f"the station point ({nearest}); wet well {p['wet_well_node_id']} created at the "
+                                "station point and left unconnected — connect the inlet sewer manually or raise "
+                                "the wet well distance.")
     # --- rising mains
     counter = {}
     for ch in chains:

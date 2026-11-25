@@ -62,8 +62,11 @@ material / length / name).
   a new `junction` node `D_<rm_id>` is left hanging at the end (notes "rising main discharge, not connected: connect
   manually", one warning per main naming the nearest node). Export To ICM makes it an Outfall with reason "rising main
   discharge, not connected (connect manually)" until it is connected.
-- Wet well: the nearest gravity terminal node (no outgoing conduit) within the search distance becomes `wet_well`
-  (`wet_well_node_id`); otherwise a `wet_well` node `WW_<ps_id>` is created at the station (no levels, warning).
+- Wet well: the gravity sewer end AT the pump station point: the nearest gravity terminal node (no outgoing conduit)
+  within the wet well distance (1 m) of the station point becomes `wet_well` (`wet_well_node_id`). Nothing further away
+  is guessed: otherwise a `wet_well` node `WW_<ps_id>` is created at the station point, left unconnected (notes "no
+  gravity sewer ends at the pump station point: connect the inlet sewer manually"; one warning naming the nearest
+  dead-end gravity node and its distance). The search distance (30 m) only finds the rising main start.
 - Sentinels (-99.9 levels, -9996 / -9998, zero diameters / lengths) are treated as NULL. Re-running replaces the
   rows and tool-created nodes of the same `ps_id`s; hydraulic values and `wwn_pumps` rows already entered are kept.
 

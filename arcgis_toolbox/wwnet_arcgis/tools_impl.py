@@ -230,6 +230,7 @@ def pressure_field_defaults(arcpy, layer, layer_key: str) -> dict:
 def import_pressure_data(arcpy, msgs: Messages, gpkg_path: str, ps_layer, main_layer, fields: dict | None = None,
                          use_selected: bool = True, search_distance: float | None = None,
                          snap_tolerance: float | None = None, discharge_distance: float | None = None,
+                         wet_well_distance: float | None = None,
                          include_not_in_use: bool = False, add_to_map: bool = True) -> dict:
     """Water Corporation pump stations + pressure mains -> wwn_pump_stations / wwn_rising_mains (+ nodes) of an
     existing model (see arcgis_toolbox/README.md). Re-running replaces the same ps_ids."""
@@ -245,6 +246,7 @@ def import_pressure_data(arcpy, msgs: Messages, gpkg_path: str, ps_layer, main_l
     opts = pi.Options(search_m=num(search_distance, "search_distance_m", 30.0),
                       snap_m=num(snap_tolerance, "snap_tolerance_m", 1.0),
                       discharge_m=num(discharge_distance, "discharge_distance_m", 1.0),
+                      wet_well_m=num(wet_well_distance, "wet_well_distance_m", 1.0),
                       include_not_in_use=bool(include_not_in_use))
     roles_fields = {r: d for r, d in pi.template_defaults().items()}
     roles_fields.update({k: (v or "") for k, v in (fields or {}).items() if k in pi.ROLE_LAYER})
@@ -266,7 +268,7 @@ def import_pressure_data(arcpy, msgs: Messages, gpkg_path: str, ps_layer, main_l
         mext = model["extent"]
         ext = None
         if mext is not None:
-            b = opts.search_m + opts.discharge_m
+            b = max(opts.search_m, opts.wet_well_m) + opts.discharge_m
             ext = (mext[0] - b, mext[1] - b, mext[2] + b, mext[3] + b)
         ps_rows, main_rows = pi.read_sources(arcpy, msgs, ps_layer, main_layer, roles_fields, ext, use_selected, opts)
         if not ps_rows:

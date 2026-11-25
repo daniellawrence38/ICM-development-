@@ -360,6 +360,8 @@ class ImportPressureData(_Tool):
                      category="Options"),
                   _p("discharge", "Join distance main end to gravity node (m; further = left hanging)", "GPDouble",
                      required=False, default=1.0, category="Options"),
+                  _p("wet_well", "Wet well distance (m): gravity sewer end at the pump station point", "GPDouble",
+                     required=False, default=1.0, category="Options"),
                   _p("include_n", "Include not-in-use (N) pump stations and mains", "GPBoolean", required=False,
                      default=False, category="Options")]
         for role, layer_key, label, required in pi.FIELD_ROLES:
@@ -387,7 +389,7 @@ class ImportPressureData(_Tool):
         fields = {role: (p.text("f_" + role) or "") for role, _k, _l, _q in pi.FIELD_ROLES}
         impl.import_pressure_data(arcpy, msgs, path, _source(p["ps_layer"]), _source(p["main_layer"]), fields,
                                   p.flag("use_selected", True), p.val("search"), p.val("snap"), p.val("discharge"),
-                                  p.flag("include_n"), p.flag("add_to_map", True))
+                                  p.val("wet_well"), p.flag("include_n"), p.flag("add_to_map", True))
         return path
 
 

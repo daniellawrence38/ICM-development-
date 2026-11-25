@@ -109,10 +109,13 @@ CONC = "rcpl"
 # Sentinels treated as NULL: diameters / lengths <= 0 or <= -99 (-9996, -9998). Only STATUS "A" (actual) is imported
 # ("N- not in use" too when the tool option is ticked); never R (removed) or abandoned codes.
 [pressure]
-search_distance_m = 30.0        # pump station -> pressure main end, and pump station -> gravity terminal node (wet well)
+search_distance_m = 30.0        # pump station -> pressure main start (rising main chain search)
 snap_tolerance_m = 1.0          # pressure main segment ends within this distance are joined
 discharge_distance_m = 1.0      # pressure main far end joins a gravity node only if within this distance (= snap: it actually meets it); else a new
                                 # hanging junction node is made at the end (no guessing; connect manually). Raise it to allow looser joins.
+
+wet_well_distance_m = 1.0        # the gravity sewer end AT the pump station point is its wet well; further = no wet well guessed
+                                # (a new node WW_<ps_id> is made at the station point, left unconnected; connect the inlet sewer manually)
 
 [pressure.fields.pump_stations]
 id = "SAP_ID"                   # ps_id; when empty the ID field below is used (integer text)
