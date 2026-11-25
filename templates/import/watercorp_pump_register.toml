@@ -1,0 +1,37 @@
+# Import template: Water Corporation (WA) pump station register spreadsheet (.xlsx) -> WWNet pump station data.
+# Used by arcgis_toolbox/wwnet_arcgis/pump_register.py. Column letters are Excel letters (A, B, ... Z, AA, AB, ...).
+# Every sheet has the SAP functional location (the model's pump station ID, e.g. S0037310) in its key column.
+# Header / title rows above the data are skipped: a data row has a key AND a number in a configured value column.
+
+[sheets.levels]
+name = "Level Settings"         # worksheet name (case-insensitive)
+key = "C"                       # functional location
+ground = "E"                    # design ground level, m AHD (= top of slab)
+overflow = "F"                  # overflow level, DEPTH below top of slab
+stop = "G"                      # pump stop level, depth below top of slab
+alarm = "L"                     # high level alarm, depth below top of slab (used only to size the wet well area)
+start = "P"                     # pump start level, depth below top of slab
+base = "T"                      # base = wet well floor, depth below top of slab
+
+[sheets.civil]
+name = "Civil"
+key = "C"                       # functional location
+wet_well_storage = "R"          # m3 between the high level alarm and the overflow level
+emergency_storage = "AB"        # emergency storage volume, m3
+
+[sheets.pumps]
+name = "Motor and Pump Attributes"
+key = "C"                       # functional location (may be a pump sub-location)
+design_flow = "AF"              # design (test) flow, in [units] flow
+design_head = "AG"              # design (test) head, m
+
+[units]
+depth = "m"                     # unit of the depth columns: "m" or "mm"
+flow = "L/s"                    # unit of the design flow column: "L/s", "m3/h" or "ML/d"
+
+[pumps]
+n_duty = 1                      # duty pumps written per station
+n_standby = 1                   # standby pumps written (more if the register lists more pump rows)
+
+[matching]
+sub_location_separators = "-/._ "   # a functional location "<ps_id><separator>..." (e.g. S0037310-PMP01) belongs to station <ps_id>

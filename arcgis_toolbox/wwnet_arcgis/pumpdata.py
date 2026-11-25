@@ -190,8 +190,16 @@ def set_station(gpkg, ps_id, *, wet_well_diameter_m=None, wet_well_area_m2=None,
                 level_mode="AHD", start=None, stop=None, overflow=None,
                 emergency_storage_m3=None, n_duty=1, n_assist=0, n_standby=0,
                 duty_rate_lps=None, curve=None, speed_pct=100, source_note=None,
-                replace_pumps=True):
-    """Validate and write pump station data in one transaction. See module docstring."""
+                replace_pumps=True, wet_well_floor=None, ground_level=None,
+                dry_run=False):
+    """Validate and write pump station data in one transaction. See module docstring.
+
+    ``wet_well_floor`` / ``ground_level`` (m AHD) also set the wet well NODE's ``invert_level`` /
+    ``surface_level`` in the same transaction. The wet well node is the gravity terminal manhole, whose
+    invert is the incoming sewer invert; real stop levels often sit below it. The floor given here replaces
+    the node's invert for all validation and depth conversion; the incoming conduit keeps its own ds_invert
+    (a drop into the wet well).  ``dry_run=True`` validates and reports without writing.
+    """
     mode = str(level_mode).strip().lower()
     if mode not in ("ahd", "depth"):
         raise ValueError("level_mode must be 'AHD' or 'depth'.")
@@ -205,6 +213,21 @@ def set_station(gpkg, ps_id, *, wet_well_diameter_m=None, wet_well_area_m2=None,
         if row is None:
             raise ValueError(f"Pump station '{ps_id}' not found in the model.")
         inv = row["inv"]
+        node = None
+        if wet_well_floor is not None or ground_level is not None:
+            what = "wet well floor" if wet_well_floor is not None else "ground level"
+            if not row["wet_well_node_id"]:
+                raise ValueError(f"Pump station '{ps_id}' has no wet well node, so the {what} cannot be set.")
+            node = con.execute("SELECT invert_level, surface_level FROM wwn_nodes WHERE node_id=?",
+                               (row["wet_well_node_id"],)).fetchone()
+            if node is None:
+                raise ValueError(f"Wet well node '{row['wet_well_node_id']}' of '{ps_id}' does not exist "
+                                 f"in the model, so the {what} cannot be set.")
+            for nm, v in (("Wet well floor", wet_well_floor), ("Ground level", ground_level)):
+                if v is not None and not math.isfinite(v):
+                    raise ValueError(f"{nm} must be a number.")
+            if wet_well_floor is not None:
+                inv = wet_well_floor
 
         # area
         area = wet_well_area_m2
@@ -236,6 +259,15 @@ def set_station(gpkg, ps_id, *, wet_well_diameter_m=None, wet_well_area_m2=None,
                     f"{k.capitalize()} level {v:.2f} m AHD is not above the wet well invert {inv:.2f} m AHD.")
         eff = {"start": row["start_level"], "stop": row["stop_level"], "overflow": row["overflow_level"]}
         eff.update({k: v for k, v in lv.items() if v is not None})
+        if wet_well_floor is not None:
+            for k, v in eff.items():
+                if v is not None and not wet_well_floor < v:
+                    raise ValueError(
+                        f"Wet well floor {wet_well_floor:.2f} m AHD must be below the {k} level {v:.2f} m AHD.")
+        floor_now = inv if node is None else (wet_well_floor if wet_well_floor is not None else node["invert_level"])
+        if ground_level is not None and floor_now is not None and not ground_level > floor_now:
+            raise ValueError(f"Ground level {ground_level:.2f} m AHD must be above the wet well floor "
+                             f"{floor_now:.2f} m AHD.")
         if any(v is not None for v in lv.values()):
             if eff["stop"] is not None and eff["start"] is not None:
                 if not eff["stop"] < eff["start"]:
@@ -288,32 +320,48 @@ def set_station(gpkg, ps_id, *, wet_well_diameter_m=None, wet_well_area_m2=None,
         tag = f"[pump data: {source_note.strip() + ', ' if source_note and source_note.strip() else ''}{datetime.date.today().isoformat()}]"
         base = _TAG_RE.sub("", row["notes"] or "").strip()
         upd["notes"] = (base + " " + tag).strip()
+        node_upd = {}
+        if wet_well_floor is not None:
+            node_upd["invert_level"] = float(wet_well_floor)
+        if ground_level is not None:
+            node_upd["surface_level"] = float(ground_level)
 
         pump_ids = []
-        con.execute("BEGIN")
-        try:
-            sets = ", ".join(f"{c}=?" for c in upd)
-            con.execute(f"UPDATE wwn_pump_stations SET {sets} WHERE ps_id=?", (*upd.values(), ps_id))
-            if replace_pumps:
-                con.execute("DELETE FROM wwn_pumps WHERE ps_id=?", (ps_id,))
-                cj = json.dumps([[q, h] for q, h in cpts]) if cpts else None
-                i = 0
-                for role, n in (("duty", n_duty), ("assist", n_assist), ("standby", n_standby)):
-                    for _ in range(int(n)):
-                        i += 1
-                        pid = f"{ps_id}_P{i}"
+        if replace_pumps:
+            pump_ids = [f"{ps_id}_P{i}" for i in
+                        range(1, int(n_duty) + int(n_assist) + int(n_standby) + 1)]
+        if not dry_run:
+            con.execute("BEGIN")
+            try:
+                sets = ", ".join(f"{c}=?" for c in upd)
+                con.execute(f"UPDATE wwn_pump_stations SET {sets} WHERE ps_id=?", (*upd.values(), ps_id))
+                if node_upd:
+                    nsets = ", ".join(f"{c}=?" for c in node_upd)
+                    con.execute(f"UPDATE wwn_nodes SET {nsets} WHERE node_id=?",
+                                (*node_upd.values(), row["wet_well_node_id"]))
+                if replace_pumps:
+                    con.execute("DELETE FROM wwn_pumps WHERE ps_id=?", (ps_id,))
+                    cj = json.dumps([[q, h] for q, h in cpts]) if cpts else None
+                    roles = ["duty"] * int(n_duty) + ["assist"] * int(n_assist) + ["standby"] * int(n_standby)
+                    for pid, role in zip(pump_ids, roles):
                         con.execute(
                             "INSERT INTO wwn_pumps (pump_id, ps_id, role, curve_json, speed_pct) "
                             "VALUES (?,?,?,?,?)", (pid, ps_id, role, cj, speed_pct))
-                        pump_ids.append(pid)
-            con.execute("COMMIT")
-        except Exception:
-            con.execute("ROLLBACK")
-            raise
+                con.execute("COMMIT")
+            except Exception:
+                con.execute("ROLLBACK")
+                raise
 
         # summary
         fa = upd.get("wet_well_area_m2", row["wet_well_area_m2"])
         bits = [f"{ps_id}:"]
+
+        def _chg(label, old, new):
+            return f"{label} {'n/a' if old is None else format(old, '.2f')} -> {new:.2f} m AHD,"
+        if wet_well_floor is not None:
+            bits.append(_chg("floor", node["invert_level"], wet_well_floor))
+        if ground_level is not None:
+            bits.append(_chg("ground", node["surface_level"], ground_level))
         if fa is not None:
             d = math.sqrt(4 * fa / math.pi)
             bits.append(f"wet well {fa:.2f} m2 ({d:.2f} m dia),")
@@ -329,7 +377,9 @@ def set_station(gpkg, ps_id, *, wet_well_diameter_m=None, wet_well_area_m2=None,
         else:
             bits.append("no curve")
         summary = " ".join(bits).rstrip(",")
-        return {"ps_id": ps_id, "updated_fields": list(upd), "pumps": pump_ids,
+        fields = list(upd) + (["wet_well_floor"] if wet_well_floor is not None else []) \
+            + (["ground_level"] if ground_level is not None else [])
+        return {"ps_id": ps_id, "updated_fields": fields, "pumps": pump_ids,
                 "warnings": warnings, "summary": summary}
     finally:
         con.close()

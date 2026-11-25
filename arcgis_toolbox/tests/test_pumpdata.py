@@ -160,3 +160,48 @@ def test_report(gp):
     assert "wet well node" in lines[1]
     pd.set_station(gp, "PS1", wet_well_area_m2=8, start=19.5, stop=18.5, curve=CURVE)
     assert pd.station_report(gp)[0] == "PS1: pump data complete"
+
+
+# ------------------------------------------------------------------ wet_well_floor / ground_level
+
+def _node(gp, nid="N01"):
+    con = sqlite3.connect(gp)
+    r = con.execute("SELECT invert_level, surface_level FROM wwn_nodes WHERE node_id=?", (nid,)).fetchone()
+    con.close()
+    return r
+
+
+def test_floor_below_node_invert_updates_node(gp):
+    old_surface = _node(gp)[1]
+    r = pd.set_station(gp, "PS1", wet_well_floor=16.5, ground_level=24.0, stop=17.0, start=18.0,
+                       overflow=22.0, wet_well_area_m2=5, duty_rate_lps=10)
+    assert _node(gp) == (16.5, 24.0) and old_surface != 24.0
+    assert {"wet_well_floor", "ground_level"} <= set(r["updated_fields"])
+    assert "floor 18.00 -> 16.50 m AHD" in r["summary"] and "ground" in r["summary"]
+    # depth mode converts from the new floor
+    pd.set_station(gp, "PS1", level_mode="depth", wet_well_floor=16.0, stop=1.0, start=2.0, replace_pumps=False)
+    s = pd.list_stations(gp)[0]
+    assert (s["stop_level"], s["start_level"]) == (17.0, 18.0) and s["wet_well_invert"] == 16.0
+
+
+def test_floor_validation_and_atomic(gp):
+    before = (snap(gp), _node(gp))
+    with pytest.raises(ValueError, match="not above the wet well invert"):
+        pd.set_station(gp, "PS1", wet_well_floor=19.0, stop=18.5, start=19.5)
+    with pytest.raises(ValueError, match="Ground level"):
+        pd.set_station(gp, "PS1", wet_well_floor=16.0, ground_level=15.0, stop=17.0, start=18.0)
+    pd.set_station(gp, "PS1", stop=18.5, start=19.5, wet_well_area_m2=5)
+    with pytest.raises(ValueError, match="below the stop"):   # stored stop level also checked
+        pd.set_station(gp, "PS1", wet_well_floor=18.6, replace_pumps=False)
+    assert _node(gp) == before[1]
+
+
+def test_floor_needs_wet_well_node(gp):
+    with pytest.raises(ValueError, match="no wet well node"):
+        pd.set_station(gp, "PS2", wet_well_floor=10.0)
+    con = sqlite3.connect(gp)
+    con.execute("UPDATE wwn_pump_stations SET wet_well_node_id='NOPE' WHERE ps_id='PS2'")
+    con.commit()
+    con.close()
+    with pytest.raises(ValueError, match="does not exist"):
+        pd.set_station(gp, "PS2", wet_well_floor=10.0)
