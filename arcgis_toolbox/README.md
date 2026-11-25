@@ -17,6 +17,7 @@ last Check / Design / Import / Simulation, column `source`).
 | Add Model To Map | Model | Adds a model's layers (and result / issue layers that hold data); upgrades older models to schema v3 |
 | Model Settings | Model | Shows / sets ADWF per connection (L/day), peaking factor (GSDF = ADWF x factor) and the default diurnal profile; lists the profiles |
 | Join Dangling Sewer Ends | Model | Joins dangling downstream ends to the nearest sewer (splits it at a new tee); preview first |
+| Import Network Data | Data | **All imports in one run**: sewers, then optional pressure data, then join dangling ends (default 5 m), then optional pump station register; model added to the map once at the end (see below) |
 | Import Sewer Data | Data | Water Corporation gravity sewer layers -> new model with connection point loads (see below) |
 | Import Pressure Data | Data | Pump stations + pressure mains into an existing model (see below) |
 | Set Pump Station Data | Data | Wet well, levels (optional wet well floor level), pumps and pump curve from the data sheet |
@@ -35,6 +36,29 @@ last Check / Design / Import / Simulation, column `source`).
 | Verify Setup | Setup | Where `wwnet_native` is loaded from and whether it has every function the toolbox needs |
 | Self Test | Setup | Runs every tool on the bundled demo model in a scratch folder and writes one report file to paste back |
 | Update WWNet | Setup | Applies a Python-only update zip (`wwnet-arcgis-update`) in place; never writes engine binaries; removes obsolete files |
+
+## Import Network Data
+
+One tool for the whole import. It takes the *Import Sewer Data* inputs and options, the optional *Import Pressure Data*
+pump station / pressure main layers and options (blank = skipped; give both layers or neither), an optional pump station
+register workbook + TOML (blank = skipped), *Join dangling sewer ends* (default on) with *Join distance (m)* (default 5.0)
+and *Add model to map*. As in Import Sewer Data, an existing output needs *Overwrite the outputs of geoprocessing
+operations* (Environments). Pressure options are prefixed `ps_` / `pf_` in the parameter names; the sewer and pressure
+tools are unchanged and can still be re-run alone.
+
+Steps, each preceded by a header line in the messages (`== 1/4 Sewers ==` ...):
+
+1. **Sewers**: Import Sewer Data without adding layers to the map.
+2. **Pressure** (if layers given): Import Pressure Data. It runs *before* the join: the inlet sewer's dead end at each pump
+   station point becomes the wet well first.
+3. **Join dangling ends** (if ticked): Join Dangling Sewer Ends, applied. It only considers dangling junction / is_end /
+   io_end nodes, so wet wells are never joined, and it only joins to gravity sewers (rising mains are a separate table).
+4. **Pump station register** (if given): Import Pump Station Data (needs the wet wells from step 2).
+
+The model is then added to the map once (no sqlite write while Pro holds the layers) and a summary line gives nodes,
+sewers, tees, joins made, pump stations, rising mains and stations with pump data, then "Next: Export To ICM".
+If the sewer step fails, nothing else runs. A pressure failure (an `ERROR:` warning) skips the register step; a join failure
+does not stop the register step. Model check errors from the sewer import are findings in the Issues layer, not a failure.
 
 ## Import Pressure Data
 

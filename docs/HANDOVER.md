@@ -358,9 +358,23 @@ Tests: qgis 130 + 1 skipped, toolbox 270.
 - **Export To ICM**: gdb notes fields 2000 chars, other text 254; longer text cut (' ...'); fake arcpy enforces
   field lengths (user's EdenHillV5 export failed 'Field length exceeded. Field: notes').
 
+### Import Network Data (one combined import) and the ICM floor fix
+
+- **Import Network Data** (user: "combine the import functions into one"): one tool, steps in this order:
+  1 sewers (Import Sewer Data parameters), 2 pressure (optional layers; `pf_` field prefixes), 3 Join Dangling
+  Sewer Ends (default on, 5 m; user's choice) — AFTER pressure, so the inlet dead end at each PS point is already a
+  wet_well node (repair.py only joins junction / is_end / io_end nodes), 4 pump station register (optional),
+  then a final model check (Issues refreshed after the joins) and the model added to the map once (no sqlite
+  write while Pro holds a lock). Sewer exception stops all; pressure failure skips the register; join failure
+  continues. The single tools are kept. 23 tools.
+- **Export To ICM**: chamber_floor lowered to the lowest attached conduit invert (ICM "ds invert is below
+  attached node floor level"); wwn_floor_source "lowered to lowest connected invert (was X)".
+- User reported the tee / branch-not-joined problem still occurring (without running Join Dangling Sewer Ends):
+  the combined import's 5 m join should cover ends beyond the 0.5 m tee tolerance — confirm on EdenHill.
+
 ### Where we stopped (next session starts here)
 
-1. Install: if the user already runs the 38f46e2 full bundle, Update WWNet with this commit's `wwnet-arcgis-update`
+1. Install (latest commit of this branch): if the user already runs the 38f46e2 full bundle, Update WWNet with the `wwnet-arcgis-update`
    artifact; otherwise (still on 60e8cc8) the full bundle `wwnet-arcgis-bundle-win-py311` (delete the old folder
    first, §13). Then Self Test (expect the new step PASS) and paste the report.
 2. Run Import Pump Station Data on the real model with **Preview only** first; paste messages. Then for real, then

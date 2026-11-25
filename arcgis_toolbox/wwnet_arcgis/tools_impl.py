@@ -463,6 +463,167 @@ def join_dangling_ends(arcpy, msgs: Messages, gpkg_path: str, max_distance_m: fl
     return res
 
 
+# --------------------------------------------------------------- Import Network Data (combined import)
+
+class _Tap(Messages):
+    """Passes every message through to `inner` and counts the "ERROR:" warnings (data errors, never AddError)."""
+
+    def __init__(self, inner: Messages):
+        super().__init__(inner._arcpy)
+        self.inner, self.errors = inner, 0
+
+    def info(self, text):
+        self.inner.info(text)
+
+    def warn(self, text):
+        if str(text).startswith("ERROR:"):
+            self.errors += 1
+        self.inner.warn(text)
+
+    def error(self, text):
+        self.errors += 1
+        self.inner.error(text)
+
+    def step(self, label):
+        self.inner.step(label)
+
+    def start(self, label):
+        self.inner.start(label)
+
+
+def _count(gpkg_path: str, table: str) -> int:
+    con = sqlite3.connect(gpkg_path)
+    try:
+        return con.execute(f'SELECT count(*) FROM "{table}"').fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    finally:
+        con.close()
+
+
+def import_network_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, out_path: str,
+                        fields: dict | None = None, snap_tolerance: float | None = None,
+                        grade_source: str | None = None, use_selected: bool = False,
+                        load_connection_points: bool = True, cp_load_search_m: float | None = None,
+                        tee_tolerance: float | None = None,
+                        ps_layer=None, main_layer=None, pressure_fields: dict | None = None,
+                        pressure_use_selected: bool = True, search_distance: float | None = None,
+                        pressure_snap: float | None = None, discharge_distance: float | None = None,
+                        wet_well_distance: float | None = None, include_not_in_use: bool = False,
+                        register: str | None = None, register_config: str | None = None,
+                        join_dangling: bool = True, join_distance: float | None = 5.0,
+                        add_to_map: bool = True, native=None) -> dict:
+    """Import Sewer Data, Import Pressure Data (optional), Join Dangling Sewer Ends (optional) and Import Pump
+    Station Data (optional) in one run. Order matters: pressure before join (the inlet sewer's dead end at a pump
+    station becomes the wet well; wet_well nodes are never dangling-join candidates and rising mains are not in
+    wwn_conduits, so the join cannot tie either to a nearby main), the register last (it needs the wet wells), and
+    the model is added to the map once at the end (no sqlite write while Pro holds the layers).
+
+    Sewer failure (exception) stops everything; a pressure failure skips the register step; the join continues
+    after a pressure failure and its own failure does not stop the register. Model check errors of the sewer
+    import are findings in the Issues layer, not a failure of the step."""
+    has_ps, has_main = ps_layer is not None, main_layer is not None
+    if has_ps != has_main:
+        raise RuntimeError("Give both the pump station layer and the pressure main layer, or neither.")
+    do_pressure, do_register = has_ps, bool(register)
+    out_path = _gpkg_path(out_path)
+    out = {"path": out_path, "sewer": None, "pressure": None, "join": None, "register": None,
+           "steps": {}, "joins": 0}
+
+    msgs.info("== 1/4 Sewers ==")
+    try:
+        sew = import_sewer_data(arcpy, msgs, ac_layer, cp_layer, sewer_layer, out_path, fields, snap_tolerance,
+                                grade_source, use_selected, False, native, tee_tolerance,
+                                load_connection_points, cp_load_search_m)
+    except Exception as exc:  # noqa: BLE001
+        msgs.warn(f"ERROR: Sewer import failed: {exc}")
+        msgs.warn("ERROR: Import Network Data stopped: the pressure, join and register steps were not run.")
+        raise
+    out["sewer"] = sew
+    out["steps"]["sewer"] = "ok"
+
+    pressure_ok = True
+    msgs.info("== 2/4 Pressure ==")
+    if not do_pressure:
+        msgs.info("Skipped: no pump station / pressure main layers given.")
+        out["steps"]["pressure"] = "skipped"
+    else:
+        tap = _Tap(msgs)
+        try:
+            out["pressure"] = import_pressure_data(arcpy, tap, out_path, ps_layer, main_layer, pressure_fields,
+                                                   pressure_use_selected, search_distance, pressure_snap,
+                                                   discharge_distance, wet_well_distance, include_not_in_use,
+                                                   False)
+        except (RuntimeError, ValueError, sqlite3.Error) as exc:
+            msgs.warn(f"ERROR: Pressure import failed: {exc}")
+            pressure_ok = False
+        pressure_ok = pressure_ok and not tap.errors
+        out["steps"]["pressure"] = "ok" if pressure_ok else "failed"
+        if not pressure_ok:
+            msgs.warn("ERROR: The pressure step failed" + ("; the pump station register step will be skipped."
+                                                           if do_register else "."))
+
+    msgs.info("== 3/4 Join dangling ends ==")
+    if not join_dangling:
+        msgs.info("Skipped: 'Join dangling sewer ends' is off.")
+        out["steps"]["join"] = "skipped"
+    else:
+        tap = _Tap(msgs)
+        res = join_dangling_ends(arcpy, tap, out_path, join_distance, False)
+        out["join"] = res
+        out["steps"]["join"] = "ok" if res is not None and not tap.errors else "failed"
+        out["joins"] = len(res["joins"]) if res else 0
+        if out["steps"]["join"] == "failed":
+            msgs.warn("ERROR: The join step failed; continuing with the remaining steps.")
+
+    msgs.info("== 4/4 Pump station register ==")
+    if not do_register:
+        msgs.info("Skipped: no pump station register given.")
+        out["steps"]["register"] = "skipped"
+    elif not pressure_ok:
+        msgs.warn("Skipped: the pressure step failed (the register needs the pump stations).")
+        out["steps"]["register"] = "skipped"
+    elif not do_pressure and not _count(out_path, "wwn_pump_stations"):
+        msgs.warn("Skipped: the model has no pump stations (give the pump station and pressure main layers).")
+        out["steps"]["register"] = "skipped"
+    else:
+        tap = _Tap(msgs)
+        res = import_pump_station_data(arcpy, tap, out_path, register, register_config, False)
+        out["register"] = res
+        out["steps"]["register"] = "ok" if res is not None and not tap.errors else "failed"
+
+    # the sewer step's model check predates the joins / pressure side: refresh the check issues
+    try:
+        final = engine.run_check(out_path)
+        out["issues"] = final
+        msgs.info(_summary().issue_count_line(final, "Final model check") + " (Issues layer updated).")
+    except Exception as exc:  # noqa: BLE001
+        msgs.warn(f"Final model check not run: {exc}")
+
+    if add_to_map:
+        try:
+            add_model_to_map(arcpy, msgs, out_path, True)
+        except Exception as exc:  # noqa: BLE001
+            msgs.warn(f"Could not add the model to the active map: {exc}")
+
+    rep = sew["report"]
+    stations = sum(1 for st in out["register"]["stations"] if st["status"] == "ok") if out["register"] else 0
+    out["summary"] = {"nodes": _count(out_path, "wwn_nodes"), "sewers": _count(out_path, "wwn_conduits"),
+                      "tees": rep.counts.get("tee_junctions", 0), "joins": out["joins"],
+                      "pump_stations": _count(out_path, "wwn_pump_stations"),
+                      "rising_mains": _count(out_path, "wwn_rising_mains"), "stations_with_pump_data": stations}
+    sm = out["summary"]
+    msgs.info("== Summary == " + f"{sm['nodes']} nodes, {sm['sewers']} sewers, {sm['tees']} tees, "
+              f"{sm['joins']} dangling end(s) joined, {sm['pump_stations']} pump station(s), "
+              f"{sm['rising_mains']} rising main(s), {sm['stations_with_pump_data']} station(s) with pump data.")
+    failed = [k for k, v in out["steps"].items() if v == "failed"]
+    if failed:
+        msgs.warn("ERROR: Step(s) with errors: " + ", ".join(failed) + ". The rest of the model was kept; re-run "
+                  "the single tool for each of these.")
+    msgs.info("Next: Export To ICM.")
+    return out
+
+
 # --------------------------------------------------------------- analysis
 
 def check_model(arcpy, msgs: Messages, gpkg_path: str, show_layer: bool = True) -> list:

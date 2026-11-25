@@ -341,7 +341,7 @@ def test_pyt_tools_parameters_and_categories(fake_arcpy):
     tb = mod.Toolbox()
     tools = {t().label: t() for t in tb.tools}
     assert list(tools) == ["New Model", "Add Model To Map", "Model Settings", "Join Dangling Sewer Ends",
-                           "Import Sewer Data", "Import Pressure Data", "Set Pump Station Data",
+                           "Import Network Data", "Import Sewer Data", "Import Pressure Data", "Set Pump Station Data",
                            "Import Pump Station Data", "Import Diurnal Profile", "Assign Profile", "Export To ICM",
                            "Check Model", "Run Design",
                            "Run Simulation", "Trace", "Show Simulation Run", "Compare Simulation Runs",

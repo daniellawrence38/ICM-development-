@@ -290,6 +290,101 @@ class ImportSewerData(_Tool):
                                tee_tolerance=p.num("tee_join"))
 
 
+class ImportNetworkData(_Tool):
+    label = "Import Network Data"
+    description = ("Import everything in one run: Water Corporation (WA) gravity sewers (Import Sewer Data), then "
+                   "optionally the pump stations and pressure mains (Import Pressure Data), then join dangling "
+                   "sewer ends within the distance (Join Dangling Sewer Ends), then optionally the pump station "
+                   "register workbook (Import Pump Station Data). The model is added to the map once at the end. "
+                   "Pressure data is imported before the join so the inlet sewer's dead end at each pump station "
+                   "becomes its wet well first. Each step can still be re-run on its own with its own tool.")
+    category = "Data"
+
+    def getParameterInfo(self):
+        sew = {p.name: p for p in ImportSewerData().getParameterInfo()}
+        pres = {p.name: p for p in ImportPressureData().getParameterInfo()}
+        sew["out_gpkg"].name = "model_gpkg"
+        sew["model_gpkg"] = sew.pop("out_gpkg")
+        sew["model_gpkg"].displayName = "Output GeoPackage (the model)"
+        for old, new, label in (("use_selected", "ps_use_selected", "Use selected pump stations and mains only"),
+                                ("search", "ps_search", None), ("snap", "ps_snap", None),
+                                ("discharge", "ps_discharge", None), ("wet_well", "ps_wet_well", None),
+                                ("include_n", "ps_include_n", None)):
+            pres[old].name = new
+            pres[new] = pres.pop(old)
+            if label:
+                pres[new].displayName = label
+        for n in ("ps_layer", "main_layer"):
+            pres[n].parameterType = "Optional"
+            pres[n].displayName += " (optional)"
+        for name, p in list(pres.items()):
+            if name.startswith("f_"):
+                p.name = "p" + name                       # pf_<role>: sewer and pressure roles share names
+                p.category = "Pressure source fields"
+        for name, p in sew.items():
+            if name.startswith("f_"):
+                p.category = "Sewer source fields"
+        for n in ("ps_search", "ps_snap", "ps_discharge", "ps_wet_well", "ps_include_n"):
+            pres[n].category = "Pressure options"
+        for n in ("snap", "grade_source", "tee_join"):
+            sew[n].category = "Sewer options"
+        reg = _p("register", "Pump station register (.xlsx, optional)", "DEFile", required=False,
+                 filetype=["xlsx", "xlsm"])
+        cfg = _p("register_config", "Register import template (TOML, blank = bundled)", "DEFile", required=False,
+                 filetype=["toml"])
+        join = _p("join_dangling", "Join dangling sewer ends", "GPBoolean", required=False, default=True)
+        dist = _p("join_distance", "Join distance (m)", "GPDouble", required=False, default=5.0)
+        add = _p("add_to_map", "Add model to map", "GPBoolean", required=False, default=True)
+        first = [sew[n] for n in ("ac_layer", "cp_layer", "sewer_layer", "model_gpkg", "use_selected")]
+        first += [pres["ps_layer"], pres["main_layer"], pres["ps_use_selected"], reg, cfg, join, dist, add]
+        rest = [p for p in list(sew.values()) + list(pres.values()) if p not in first]
+        rest = [p for p in rest if p.name not in ("add_to_map", "gpkg", "out_gpkg")]  # sewer's / pressure's own
+        return first + rest + [_model_out()]
+
+    def update(self, p):
+        from wwnet_arcgis import pressure_import as pi
+        from wwnet_arcgis import sewer_import as si
+        for layer_key, pname in ImportSewerData._LAYER_NAME.items():
+            if not p.fresh(pname):
+                continue
+            try:
+                found = impl.sewer_field_defaults(arcpy, _source(p[pname]))
+            except Exception:  # noqa: BLE001
+                continue
+            for role, k, _l, _q in si.FIELD_ROLES:
+                if k == layer_key:
+                    p["f_" + role].value = found.get(role) or None
+        for layer_key, pname in ImportPressureData._LAYER_NAME.items():
+            if not p.fresh(pname):
+                continue
+            try:
+                found = impl.pressure_field_defaults(arcpy, _source(p[pname]), layer_key)
+            except Exception:  # noqa: BLE001
+                continue
+            for role, k, _l, _q in pi.FIELD_ROLES:
+                if k == layer_key:
+                    p["pf_" + role].value = found.get(role) or None
+
+    def run(self, p, msgs):
+        from wwnet_arcgis import pressure_import as pi
+        from wwnet_arcgis import sewer_import as si
+        fields = {role: (p.text("f_" + role) or "") for role, _k, _l, _q in si.FIELD_ROLES}
+        pfields = {role: (p.text("pf_" + role) or "") for role, _k, _l, _q in pi.FIELD_ROLES}
+        res = impl.import_network_data(
+            arcpy, msgs, _source(p["ac_layer"]), _source(p["cp_layer"]), _source(p["sewer_layer"]),
+            p.text("model_gpkg"), fields, p.num("snap", 0.5), p.text("grade_source", "levels"),
+            p.flag("use_selected"), load_connection_points=p.flag("load_cps", True),
+            cp_load_search_m=p.num("cp_radius"), tee_tolerance=p.num("tee_join"),
+            ps_layer=_source(p["ps_layer"]), main_layer=_source(p["main_layer"]), pressure_fields=pfields,
+            pressure_use_selected=p.flag("ps_use_selected", True), search_distance=p.val("ps_search"),
+            pressure_snap=p.val("ps_snap"), discharge_distance=p.val("ps_discharge"),
+            wet_well_distance=p.val("ps_wet_well"), include_not_in_use=p.flag("ps_include_n"),
+            register=p.text("register"), register_config=p.text("register_config"),
+            join_dangling=p.flag("join_dangling", True), join_distance=p.num("join_distance", 5.0),
+            add_to_map=p.flag("add_to_map", True))
+        return res["path"]
+
+
 class ImportDiurnalProfile(_Tool):
     label = "Import Diurnal Profile"
     description = ("Import a diurnal flow profile (time as hh:mm or minutes, factor; any interval, header optional) "
@@ -837,7 +932,7 @@ class Toolbox(object):
         self.label = "WWNet"
         self.alias = "wwnet"
         self.tools = [NewModel, AddModelToMap, ModelSettings, JoinDanglingEnds,
-                      ImportSewerData, ImportPressureData, SetPumpStationData, ImportPumpStationData,
+                      ImportNetworkData, ImportSewerData, ImportPressureData, SetPumpStationData, ImportPumpStationData,
                       ImportDiurnalProfile, AssignProfile,
                       ExportToICM,
                       CheckModel, RunDesign, RunSimulation, Trace,
