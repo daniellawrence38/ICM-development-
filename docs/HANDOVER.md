@@ -7,6 +7,12 @@ UX; **section 12**), merged on 2026-11-24. All older branches (`ccr-7bd083b1-j0q
 `ccr-472a9a6a-he69zu`, `ccr-974cdaeb-c682le`) are contained in this one: continue here.
 **Start here: section 14 (pump station register import, where we stopped), then 13 (antivirus, assistant removed),
 12 (what the merge changed) and 11.**
+**Session workflow (from 2026-11-25):** `main` holds the latest working code (created at 0b59caa; the user is
+setting it as the GitHub default branch, replacing `ccr-974cdaeb-c682le`). New sessions start from `main` in the
+personal cloud environment `ICM-development-`, whose setup script builds `.venv` (pytest, pyflakes, maturin,
+anthropic, openpyxl + the wwnet_native wheel) and `target/debug/wwnet` (gate: `.venv/bin/python -m pytest ...`;
+unproven until the first fresh session). End of session: everything pushed, this file's "Where we stopped"
+updated, CI green, then open a PR from the session branch into `main` for the user to merge.
 Plan: `docs/PLAN.md`. Review: `docs/REVIEW-2026-11.md`. OSS survey: `docs/reference-survey.md`. Deck: `docs/WWNet_functions.pptx`.
 
 ## 1. User and working style
