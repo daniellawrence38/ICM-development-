@@ -265,6 +265,31 @@ def build(gpkg_path: str) -> dict:
     if pres["not_exported"]:
         skipped["wwn_rising_mains"] = len(pres["not_exported"])
 
+    # ICM requires every link invert at a node to be >= the node's chamber floor. The model's node invert is
+    # not always the lowest connected invert (tee / junction / dangling nodes, estimated inverts, adverse
+    # steps, rising main ends), so lower the floor to the lowest attached conduit invert where needed.
+    low_all = {}
+    for c in out_links + pres["conduits"]:
+        for nid, inv in ((c["us_node_id"], c["us_invert"]), (c["ds_node_id"], c["ds_invert"])):
+            if inv is not None:
+                low_all[nid] = min(inv, low_all.get(nid, inv))
+    lowered = []
+    for n in out_nodes + pres["nodes"]:
+        lo = low_all.get(n["node_id"])
+        if lo is None:
+            continue
+        fl = n["chamber_floor"]
+        if fl is None:
+            n["chamber_floor"] = _r(lo)
+            n["wwn_floor_source"] = "lowest connected invert"
+        elif fl > lo:
+            n["chamber_floor"] = _r(lo)
+            n["wwn_floor_source"] = f"lowered to lowest connected invert (was {fl:g})"
+            lowered.append(n["node_id"])
+    if lowered:
+        warnings.append(f"{len(lowered)} node(s): chamber floor lowered to the lowest connected conduit invert "
+                        "(ICM requires link inverts >= chamber floor): " + _ids(lowered))
+
     # A terminal node (links in, none out) is a free outfall in the WWNet engine, so it is exported as an
     # ICM Outfall (ICM rejects links with no outfall). A wet well with no exported pump stays Manhole.
     n_in, n_out = {}, {}
@@ -618,6 +643,9 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
         "  Conduits shorter than 1 m (ICM minimum) are exported with length 1 m; inverts are unchanged",
         "  dangling sewer ends (tee / IS / IO ends with nothing downstream) stay Break: fix the join, not the outfall",
         "  ground_level -> Ground level | flood_level -> Flood level | chamber_floor -> Chamber floor level",
+        "  Chamber floor is the node invert, lowered to the lowest connected conduit invert where a pipe is lower",
+        "  (tee branches, adverse steps, estimated inverts, rising main ends; ICM: 'ds invert is below attached",
+        "  node floor level'); wwn_floor_source says 'lowered to lowest connected invert (was X)'",
         "  flood_type -> Flood type (Sealed on pump delivery / rising main start nodes; blank = ICM default)",
         "  chamber_area / shaft_area -> Chamber area / Shaft area (m2, from chamber_diameter_mm; wet wells: the",
         "    station's wet well area; blank = ICM default)",

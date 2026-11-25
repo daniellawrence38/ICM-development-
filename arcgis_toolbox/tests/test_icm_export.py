@@ -573,3 +573,69 @@ def test_short_conduits_exported_as_one_metre(demo_gpkg):
     assert w.startswith("2 conduit(s) shorter than 1 m exported with length 1 m (ICM minimum): ")
     assert "P01" in w and "RM1" in w and "P02" not in w
     assert "shorter than 1 m" in icm_export.notes_text("g", "sr", "gdb", "n", "c", d["warnings"])
+
+
+# ------------------------------------------------------------------ chamber floor <= every connected invert
+
+def _no_invert_below_floor(d):
+    floor = {n["node_id"]: n["chamber_floor"] for n in d["nodes"]}
+    bad = []
+    for c in d["conduits"]:
+        for nid, inv in ((c["us_node_id"], c["us_invert"]), (c["ds_node_id"], c["ds_invert"])):
+            if inv is not None and floor.get(nid) is not None and inv < floor[nid] - 1e-9:
+                bad.append((c["wwn_conduit_id"], nid, inv, floor[nid]))
+    return bad
+
+
+def _node(d, nid):
+    return next(n for n in d["nodes"] if n["node_id"] == nid)
+
+
+def test_floor_demo_and_pump_model_never_above_inverts(demo_gpkg):
+    assert _no_invert_below_floor(icm_export.build(demo_gpkg)) == []
+    _pump_model(demo_gpkg)
+    d = icm_export.build(demo_gpkg)
+    assert any(c["wwn_link_kind"] == "rising_main" for c in d["conduits"])
+    assert _no_invert_below_floor(d) == []
+
+
+def test_floor_lowered_for_incoming_pipe_below_node_invert(demo_gpkg):
+    base = icm_export.build(demo_gpkg)
+    ds_of = {c["wwn_conduit_id"]: c for c in base["conduits"]}["P03"]
+    nid = ds_of["ds_node_id"]
+    old = _node(base, nid)["chamber_floor"]
+    _edit(demo_gpkg, f"UPDATE wwn_conduits SET ds_invert={old - 0.05} WHERE conduit_id='P03'")
+    d = icm_export.build(demo_gpkg)
+    n = _node(d, nid)
+    assert n["chamber_floor"] == round(old - 0.05, 3)
+    assert n["wwn_floor_source"] == f"lowered to lowest connected invert (was {old:g})"
+    assert any(w.startswith("1 node(s): chamber floor lowered to the lowest connected conduit invert")
+               and nid in w for w in d["warnings"])
+    assert _no_invert_below_floor(d) == []
+
+
+def test_floor_unchanged_when_node_already_lowest(demo_gpkg):
+    d = icm_export.build(demo_gpkg)
+    assert not any("chamber floor lowered" in w for w in d["warnings"])
+    assert all(not (n["wwn_floor_source"] or "").startswith("lowered") for n in d["nodes"])
+
+
+def test_floor_none_invert_keeps_fallback(demo_gpkg):
+    _edit(demo_gpkg, "UPDATE wwn_nodes SET invert_level=NULL WHERE node_id='N05'")
+    d = icm_export.build(demo_gpkg)
+    n5 = _node(d, "N05")
+    assert n5["chamber_floor"] == 23.9 and n5["wwn_floor_source"] == "lowest connected invert"
+    assert not any("chamber floor lowered" in w for w in d["warnings"])
+
+
+def test_floor_lowered_at_rising_main_discharge_and_wet_well(demo_gpkg):
+    _pump_model(demo_gpkg)
+    # gravity sewer leaving the discharge node D starts below D's invert; pipe into the wet well too
+    _edit(demo_gpkg, "UPDATE wwn_conduits SET us_invert=24.8 WHERE conduit_id='PSG1'",
+          "UPDATE wwn_conduits SET ds_invert=22.1 WHERE conduit_id='P08'")
+    d = icm_export.build(demo_gpkg)
+    assert _node(d, "D")["chamber_floor"] == 24.8
+    assert _node(d, "WW")["chamber_floor"] == 22.1
+    assert _node(d, "D")["wwn_floor_source"] == "lowered to lowest connected invert (was 25)"
+    assert any("2 node(s): chamber floor lowered" in w for w in d["warnings"])
+    assert _no_invert_below_floor(d) == []
