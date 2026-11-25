@@ -242,7 +242,7 @@ sub-location such as `S0037310-PMP01`). Logic: `wwnet_arcgis/pump_register.py` (
 
 **Columns used** (defaults, all in `templates/import/watercorp_pump_register.toml`; leave the *Import template*
 parameter blank to use the bundled copy, or point it at an edited one): functional location in column C of every sheet.
-*Level Settings*: ground level E, overflow F, stop G, high level alarm L, start P, base (wet well floor) T (depths below
+*Level Settings*: ground level E, overflow F, high level alarm L, start P, stop Q, base (wet well floor) T (depths below
 top of slab, m). *Civil*: wet well storage R (m3 between the alarm and the overflow level), emergency storage AB (m3).
 *Motor and Pump Attributes*: design flow AF, design head AG. Units (`m` / `mm`, `L/s` / `m3/h` / `ML/d`), sheet names,
 duty / standby counts and the sub-location separators are in the TOML too; a bad value is reported with its TOML key.

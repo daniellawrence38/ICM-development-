@@ -284,7 +284,7 @@ sets the wet well node's invert / surface level in the same transaction (the inc
 `templates/import/watercorp_pump_register.toml`). The user found the Water Corp pump station register (.xlsx;
 values stored as text with a leading `'`, handled). Matched on `ps_id` (= GIS SAP_ID) = functional location in
 column C of every sheet (SAP sub-locations `S0037310-...` also match). Layout from the user:
-- Level Settings: E design ground (m AHD, top of slab); depths below slab in **metres**: F overflow, G stop,
+- Level Settings: E design ground (m AHD, top of slab); depths below slab in **metres**: F overflow, Q stop (corrected 2026-11-25, was G),
   L high level alarm, P start, **T base (wet well floor)**. Order checked base > stop > start > alarm > overflow.
 - Civil: R wet well storage = volume **between the high level alarm (L) and overflow (F)** → area = R / (L − F);
   AB emergency storage m³.

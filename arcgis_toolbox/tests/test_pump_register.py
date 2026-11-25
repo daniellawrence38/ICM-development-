@@ -46,7 +46,8 @@ def model(demo_gpkg):
 
 
 def lev(fl, ground=26.0, base=4.5, stop=4.0, start=3.2, alarm=1.6, overflow=1.0):
-    return {"C": fl, "E": ground, "F": overflow, "G": stop, "L": alarm, "P": start, "T": base}
+    # G holds a decoy: the stop level is column Q (corrected by the user), G must not be read
+    return {"C": fl, "E": ground, "F": overflow, "G": 99.9, "L": alarm, "P": start, "Q": stop, "T": base}
 
 
 def civ(fl, storage=2.1, emerg=120.0):
@@ -68,7 +69,7 @@ def book(path, levels=None, civil=None, pumps=None, extra_levels=()):
     cv = [civ("S0037310")] if civil is None else civil
     pm = [pmp("S0037310")] if pumps is None else pumps
     write_xlsx(path, {
-        "Level Settings": sheet("Level settings register", {"E": "Ground", "F": "Overflow", "G": "Stop"},
+        "Level Settings": sheet("Level settings register", {"E": "Ground", "F": "Overflow", "Q": "Stop"},
                                 list(lv) + list(extra_levels)),
         "Civil": sheet("Civil", {"R": "Storage", "AB": "Emergency"}, cv),
         "Motor and Pump Attributes": sheet("Motors", {"AF": "Flow", "AG": "Head"}, pm)})
@@ -157,7 +158,7 @@ def test_floor_not_below_stop_is_error_other_station_imports(model, xl):
                              pumps=[pmp("S0037310"), pmp("S0099999")]))
     bad, good = station(res), station(res, "S0099999")
     assert bad["status"] == "error" and bad["messages"][0].startswith("ERROR:")
-    assert "Level Settings T4" in bad["messages"][0] and "G4" in bad["messages"][0]
+    assert "Level Settings T4" in bad["messages"][0] and "Q4" in bad["messages"][0]
     assert good["status"] == "ok"
     assert _q(model, "SELECT stop_level FROM wwn_pump_stations WHERE ps_id='S0037310'")[0][0] is None
     assert _q(model, "SELECT stop_level FROM wwn_pump_stations WHERE ps_id='S0099999'")[0][0] == pytest.approx(22.0)
@@ -288,13 +289,14 @@ def test_missing_sheet_error(model, tmp_path):
 
 def test_default_config_values():
     cfg = pr.load_config()
+    assert cfg["sheets"]["levels"]["cols"]["stop"] == "Q" and cfg["sheets"]["levels"]["cols"]["start"] == "P"
     assert cfg["sheets"]["levels"]["cols"]["base"] == "T" and cfg["sheets"]["pumps"]["cols"]["design_head"] == "AG"
     assert cfg["sheets"]["civil"]["cols"]["emergency_storage"] == "AB"
     assert (cfg["n_duty"], cfg["n_standby"], cfg["depth_unit"], cfg["flow_unit"]) == (1, 1, "m", "L/s")
 
 
 @pytest.mark.parametrize("old,new,key", [
-    ('stop = "G"', 'stop = "G1"', "sheets.levels.stop"),
+    ('stop = "Q"', 'stop = "Q1"', "sheets.levels.stop"),
     ('depth = "m"', 'depth = "cm"', "units.depth"),
     ('flow = "L/s"', 'flow = "gpm"', "units.flow"),
     ("n_standby = 1", "n_standby = -1", "pumps.n_standby")])

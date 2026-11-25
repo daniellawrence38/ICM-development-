@@ -90,7 +90,7 @@ def test_not_in_register_and_error_station(fake_arcpy, model, tmp_path):
     assert any(t.startswith("Model pump station(s) not in the register: PSX") and lv == "warn" for lv, t in a.log)
     # stop deeper than the base: an ERROR station, reported as warnings (never AddError)
     sh = demo.sheets()
-    sh["Level Settings"][4]["G"] = 5.0
+    sh["Level Settings"][4]["Q"] = 5.0
     bad = tmp_path / "bad.xlsx"
     write_xlsx(bad, sh)
     a, res, log = run(fake_arcpy, model, bad)

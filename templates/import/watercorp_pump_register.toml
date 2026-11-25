@@ -8,7 +8,7 @@ name = "Level Settings"         # worksheet name (case-insensitive)
 key = "C"                       # functional location
 ground = "E"                    # design ground level, m AHD (= top of slab)
 overflow = "F"                  # overflow level, DEPTH below top of slab
-stop = "G"                      # pump stop level, depth below top of slab
+stop = "Q"                      # pump stop level, depth below top of slab
 alarm = "L"                     # high level alarm, depth below top of slab (used only to size the wet well area)
 start = "P"                     # pump start level, depth below top of slab
 base = "T"                      # base = wet well floor, depth below top of slab

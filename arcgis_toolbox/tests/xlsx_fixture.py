@@ -49,8 +49,10 @@ def _sheet_xml(rows, shared, with_r=True, ns=MAIN) -> str:
     out = []
     for n, cells in sorted(rows.items()):
         rattr = f' r="{n}"' if with_r else ""
+        # Excel requires the cells of a row in column order: sort A..Z, AA.. (without r, dict order IS the order)
+        items = sorted(cells.items(), key=lambda kv: (len(kv[0]), kv[0])) if with_r else cells.items()
         cs = "".join(_cell(f"{c}{n}" if with_r else None, v, shared)
-                     for c, v in cells.items() if v is not None)
+                     for c, v in items if v is not None)
         out.append(f"<row{rattr}>{cs}</row>")
     return (f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
             f'<worksheet xmlns="{ns}"><sheetData>{"".join(out)}</sheetData></worksheet>')

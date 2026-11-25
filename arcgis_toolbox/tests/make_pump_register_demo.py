@@ -32,10 +32,10 @@ PUMPS = [("PS1-PMP01", 25.0, 30.0), ("PS1-PMP02", 25.0, 30.0),
 
 def sheets() -> dict:
     lv = {1: {"A": "Pump station register - Level Settings (demo data)"},
-          3: {"C": FL, "E": "Ground level (m AHD)", "F": "Overflow (m below TOS)", "G": "Stop (m below TOS)",
+          3: {"C": FL, "E": "Ground level (m AHD)", "F": "Overflow (m below TOS)", "Q": "Stop (m below TOS)",
               "L": "High level alarm (m below TOS)", "P": "Start (m below TOS)", "T": "Base (m below TOS)"}}
     for i, (fl, ground, ovf, stop, alarm, start, base) in enumerate(LEVELS, 4):
-        lv[i] = {"C": fl, "E": ground, "F": ovf, "G": stop, "L": alarm, "P": start, "T": base}
+        lv[i] = {"C": fl, "E": ground, "F": ovf, "Q": stop, "L": alarm, "P": start, "T": base}
     cv = {1: {"A": "Pump station register - Civil (demo data)"},
           3: {"C": FL, "R": "Wet well storage (m3)", "AB": "Emergency storage (m3)"}}
     for i, (fl, storage, emerg) in enumerate(CIVIL, 4):
