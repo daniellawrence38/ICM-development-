@@ -1369,7 +1369,7 @@ def _fill_inverts(recs: list, rep: ImportReport, max_iter: int = 50):
     """Estimate missing inverts of oriented sewers (``recs``: dicts with us / ds node, ui / di, dn, length,
     fgrade, est, rej, mid), never over a real value. For each missing end, in priority:
     (1) the other side of the node: ds from the largest-DN outgoing sewer's (or the main's tee) us invert,
-    lifted so the oberts match when the pipe gets bigger; us from the lowest of the incoming ds inverts, each
+    lifted so the obverts match when the pipe gets bigger; us from the lowest of the incoming ds inverts, each
     lowered likewise; rejected when it would make the sewer adverse; (2) the other end of the sewer and
     FLOW_GRADE x length; (3) the other end and the DS 50 minimum grade for the DN. Rule 1 runs to a fixpoint
     on real / already estimated values before rules 2 / 3 are applied to what is left, and the whole is

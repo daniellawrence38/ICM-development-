@@ -201,12 +201,11 @@ def test_grade_source_field_derives_missing_ds_invert():
     assert "estimated" in c["notes"] and "INVERT_ESTIMATED" in codes_of(rep)
     n = by_id(model["nodes"], "node_id")
     assert n["B"]["invert_level"] == pytest.approx(4.7)
-    # without FLOW_GRADE (and no neighbours) it stays missing
+    # without FLOW_GRADE (and no neighbours) the DS 50 minimum grade is assumed (DN150: 1 in 200)
     p = pipe("P", [(0, 0), (30, 0)], "A", "B", LENGTH=30, UPSTREAM=5.0, DOWNSTREAM=None, FLOW_GRADE=None)
     model, rep = build_model(acs, [], [p])
-    assert "ds_invert" not in model["conduits"][0] and "INVERT_ESTIMATED" not in codes_of(rep)
-    assert "missing_invert" not in codes_of(rep)  # reported by the model check (MISSING_INVERT)
-    assert "invert_level" not in by_id(model["nodes"], "node_id")["B"]
+    assert model["conduits"][0]["ds_invert"] == pytest.approx(4.85)
+    assert "assumed DS 50 minimum grade 1 in 200" in [w for w in rep.warnings if w.code == "INVERT_ESTIMATED"][0].message
 
 
 def test_unknown_codes_listed_with_counts():
@@ -1018,10 +1017,10 @@ def test_placeholder_levels_are_missing_not_levels():
     p2 = pipe("P2", [(10, 0), (20, 0)], "B", "C", UPSTREAM=-9998, DOWNSTREAM=-99.9, FLOW_GRADE=None, LENGTH=10)
     model, rep = build_model(acs, [], [p1, p2])
     c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
-    assert "us_invert" not in c["P1"] and c["P1"]["ds_invert"] == 4.0
-    assert c["P2"]["us_invert"] == 4.0 and "ds_invert" not in c["P2"]       # us from the adjoining sewer, ds stays missing
+    assert c["P1"]["us_invert"] == pytest.approx(4.05) and c["P1"]["ds_invert"] == 4.0   # us: DS 50 grade
+    assert c["P2"]["us_invert"] == 4.0 and c["P2"]["ds_invert"] == pytest.approx(3.95)   # us from P1, ds DS 50 grade
     assert "surface_level" not in n["A"] and "surface_level" not in n["C"] and n["B"]["surface_level"] == 5.0
-    assert "invert_level" not in n["A"] and n["B"]["invert_level"] == 4.0 and "invert_level" not in n["C"]
+    assert n["A"]["invert_level"] == pytest.approx(4.05) and n["B"]["invert_level"] == 4.0 and n["C"]["invert_level"] == pytest.approx(3.95)
     assert not [w for w in rep.warnings if w.code in ("TEE_ADVERSE", "GRADE_MISMATCH")]
     for x in model["nodes"] + model["conduits"]:
         assert all(not isinstance(v, float) or v > -99 for v in x.values()), x
@@ -1047,7 +1046,7 @@ def test_missing_invert_filled_from_grade_one_end():
         any("us invert 5.3 estimated from ds invert and FLOW_GRADE" in x.message for x in rep.warnings)
 
 
-def test_both_inverts_missing_from_neighbours_then_grade():
+def test_both_inverts_missing_node_side_then_grade():
     acs = [ac(k, 10 * i, 0) for i, k in enumerate("ABCD")]
     p1 = pipe("P1", [(0, 0), (10, 0)], "A", "B", UPSTREAM=10.1, DOWNSTREAM=10.0, LENGTH=10)
     p2 = pipe("P2", [(10, 0), (20, 0)], "B", "C", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=100)
@@ -1058,11 +1057,12 @@ def test_both_inverts_missing_from_neighbours_then_grade():
     assert (c["P3"]["us_invert"], c["P3"]["ds_invert"]) == (9.9, 9.8)            # iterated
     msgs = {w.object_id: w.message for w in rep.warnings if w.code == "INVERT_ESTIMATED"}
     assert set(msgs) == {"P2", "P3"}                                              # one warning per sewer
-    assert "us invert 10 estimated from the adjoining sewer's ds invert at node B" in msgs["P2"]
+    assert "us invert 10 estimated from the incoming sewer P1 ds invert at node B" in msgs["P2"]
     assert "ds invert 9.9 estimated from us invert and FLOW_GRADE 1 in 100 over 10 m" in msgs["P2"]
     n = by_id(model["nodes"], "node_id")
     assert n["B"]["invert_level"] == 10.0 and n["C"]["invert_level"] == 9.9 and n["D"]["invert_level"] == 9.8
     assert rep.counts["inverts_estimated"] == 4 and rep.counts["inverts_estimated_grade"] == 2
+    assert rep.counts["inverts_estimated_node"] == 2
     assert any(d.startswith("Estimated 4 missing invert(s) in 2 sewer(s)") for d in rep.diagnostics)
     # downstream end from the single outgoing sewer, lowest ds invert of several incoming for the upstream end
     acs = [ac("A", 0, 0), ac("B", 10, 0), ac("C", 20, 0), ac("X", 10, 10)]
@@ -1070,13 +1070,95 @@ def test_both_inverts_missing_from_neighbours_then_grade():
     q2 = pipe("Q2", [(10, 10), (10, 0)], "X", "B", UPSTREAM=10.5, DOWNSTREAM=10.1, LENGTH=10)
     q3 = pipe("Q3", [(10, 0), (20, 0)], "B", "C", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=None)
     model, rep = build_model(acs, [], [q1, q2, q3])
-    assert by_id(model["conduits"], "conduit_id")["Q3"]["us_invert"] == 10.1
+    q3c = by_id(model["conduits"], "conduit_id")["Q3"]
+    assert q3c["us_invert"] == 10.1 and q3c["ds_invert"] == pytest.approx(10.05)
     acs = [ac("A", 0, 0), ac("B", 10, 0), ac("C", 20, 0)]
     r1 = pipe("R1", [(0, 0), (10, 0)], "A", "B", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=None)
     r2 = pipe("R2", [(10, 0), (20, 0)], "B", "C", UPSTREAM=7.0, DOWNSTREAM=6.9, LENGTH=10)
     model, rep = build_model(acs, [], [r1, r2])
     r1c = by_id(model["conduits"], "conduit_id")["R1"]
-    assert r1c["ds_invert"] == 7.0 and "us_invert" not in r1c                     # still missing: left as is
+    assert r1c["ds_invert"] == 7.0 and r1c["us_invert"] == pytest.approx(7.05)    # ds from node, us DS 50 grade
+
+
+def est_msgs(rep):
+    return {w.object_id: w.message for w in rep.warnings if w.code == "INVERT_ESTIMATED"}
+
+
+def test_ds_missing_from_outgoing_sewer_same_dn_and_obvert_lift():
+    acs = [ac("A", 0, 0), ac("B", 10, 0), ac("C", 20, 0)]
+    p1 = pipe("P1", [(0, 0), (10, 0)], "A", "B", UPSTREAM=6.0, DOWNSTREAM=None, LENGTH=10, HEIGHT=150)
+    p2 = pipe("P2", [(10, 0), (20, 0)], "B", "C", UPSTREAM=5.0, DOWNSTREAM=4.9, LENGTH=10, HEIGHT=150)
+    model, rep = build_model(acs, [], [p1, p2], FieldMap(diameter="HEIGHT"))
+    c = by_id(model["conduits"], "conduit_id")
+    assert c["P1"]["ds_invert"] == 5.0 and c["P1"]["data_source"] == "assumed"
+    assert "ds invert 5 estimated from the outgoing sewer P2 us invert at node B" in est_msgs(rep)["P1"]
+    p2["HEIGHT"] = 225
+    model, rep = build_model(acs, [], [p1, p2], FieldMap(diameter="HEIGHT"))
+    assert by_id(model["conduits"], "conduit_id")["P1"]["ds_invert"] == pytest.approx(5.075)   # DN150 into DN225
+    assert "lifted 0.075 m" in est_msgs(rep)["P1"]
+    p2["HEIGHT"] = 100
+    model, rep = build_model(acs, [], [p1, p2], FieldMap(diameter="HEIGHT"))
+    assert by_id(model["conduits"], "conduit_id")["P1"]["ds_invert"] == 5.0                    # reducing: invert match
+
+
+def test_us_missing_from_incoming_min_obvert_matched():
+    acs = [ac("A", 0, 0), ac("X", 10, 10), ac("B", 10, 0), ac("C", 20, 0)]
+    q1 = pipe("Q1", [(0, 0), (10, 0)], "A", "B", UPSTREAM=10.4, DOWNSTREAM=10.2, LENGTH=10, HEIGHT=150)
+    q2 = pipe("Q2", [(10, 10), (10, 0)], "X", "B", UPSTREAM=10.5, DOWNSTREAM=10.15, LENGTH=10, HEIGHT=100)
+    q3 = pipe("Q3", [(10, 0), (20, 0)], "B", "C", UPSTREAM=None, DOWNSTREAM=10.0, LENGTH=10, HEIGHT=225)
+    model, rep = build_model(acs, [], [q1, q2, q3], FieldMap(diameter="HEIGHT"))
+    # Q1: 10.2 - 0.075 = 10.125; Q2: 10.15 - 0.125 = 10.025 -> min
+    assert by_id(model["conduits"], "conduit_id")["Q3"]["us_invert"] == pytest.approx(10.025)
+    assert "lowest of 2 incoming sewers' ds inverts at node B" in est_msgs(rep)["Q3"]
+
+
+def test_branch_ds_missing_at_tee_uses_main_invert_lifted():
+    acs, sew = tee_world(lambda x, off: [(x, 20), (x, off)], branch_levels=(21.0, None))
+    sew[0]["HEIGHT"] = 300
+    sew[1]["HEIGHT"] = 150
+    model, rep = build_model(acs, [], sew, FieldMap(diameter="HEIGHT"))
+    c = by_id(model["conduits"], "conduit_id")
+    assert c["M"]["ds_invert"] == pytest.approx(19.6) and c["M~2"]["us_invert"] == pytest.approx(19.6)
+    assert c["BR"]["ds_invert"] == pytest.approx(19.75)                      # tee invert + (300 - 150) mm
+    assert "main M invert at tee node" in est_msgs(rep)["BR"] and "M" not in est_msgs(rep)
+    assert not [w for w in rep.warnings if w.code == "TEE_ADVERSE"]
+
+
+def test_head_of_line_us_missing_falls_to_grade_then_ds50():
+    acs = [ac("A", 0, 0), ac("B", 10, 0)]
+    p = pipe("P", [(0, 0), (10, 0)], "A", "B", UPSTREAM=None, DOWNSTREAM=5.0, LENGTH=10, FLOW_GRADE=100)
+    model, rep = build_model(acs, [], [p], FieldMap(diameter="HEIGHT"))
+    assert model["conduits"][0]["us_invert"] == pytest.approx(5.1)
+    assert "us invert 5.1 estimated from ds invert and FLOW_GRADE 1 in 100 over 10 m" in est_msgs(rep)["P"]
+    p = pipe("P", [(0, 0), (10, 0)], "A", "B", UPSTREAM=None, DOWNSTREAM=5.0, LENGTH=10, FLOW_GRADE=None, HEIGHT=225)
+    model, rep = build_model(acs, [], [p], FieldMap(diameter="HEIGHT"))
+    assert model["conduits"][0]["us_invert"] == pytest.approx(5.0 + 10 / 300)          # DN225: 1 in 300
+    assert "assumed DS 50 minimum grade 1 in 300" in est_msgs(rep)["P"]
+    assert rep.counts["inverts_estimated_ds50"] == 1
+
+
+def test_node_side_value_adverse_is_rejected_for_grade():
+    acs = [ac("A", 0, 0), ac("B", 10, 0), ac("C", 20, 0)]
+    p1 = pipe("P1", [(0, 0), (10, 0)], "A", "B", UPSTREAM=5.0, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=100, HEIGHT=150)
+    p2 = pipe("P2", [(10, 0), (20, 0)], "B", "C", UPSTREAM=5.4, DOWNSTREAM=5.3, LENGTH=10, HEIGHT=150)
+    model, rep = build_model(acs, [], [p1, p2], FieldMap(diameter="HEIGHT"))
+    assert by_id(model["conduits"], "conduit_id")["P1"]["ds_invert"] == pytest.approx(4.9)
+    m = est_msgs(rep)["P1"]
+    assert "FLOW_GRADE 1 in 100" in m and "node-side value 5.4 rejected (adverse)" in m
+
+
+def test_cascade_along_run_of_missing_inverts():
+    acs = [ac(k, 10 * i, 0) for i, k in enumerate("ABCDEF")]
+    k1 = pipe("K1", [(0, 0), (10, 0)], "A", "B", UPSTREAM=10.2, DOWNSTREAM=10.0, LENGTH=10)
+    k2 = pipe("K2", [(40, 0), (50, 0)], "E", "F", UPSTREAM=9.6, DOWNSTREAM=9.5, LENGTH=10)
+    run = [pipe("P1", [(10, 0), (20, 0)], "B", "C", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=100),
+           pipe("P2", [(20, 0), (30, 0)], "C", "D", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=100),
+           pipe("P3", [(30, 0), (40, 0)], "D", "E", UPSTREAM=None, DOWNSTREAM=None, LENGTH=10, FLOW_GRADE=100)]
+    model, rep = build_model(acs, [], [k1] + run + [k2], FieldMap(diameter="HEIGHT"))
+    c = by_id(model["conduits"], "conduit_id")
+    assert (c["P1"]["us_invert"], c["P1"]["ds_invert"]) == (10.0, pytest.approx(9.9))
+    assert c["P2"]["us_invert"] == pytest.approx(9.9) and c["P2"]["ds_invert"] == pytest.approx(9.7)
+    assert c["P3"]["us_invert"] == pytest.approx(9.7) and c["P3"]["ds_invert"] == 9.6
 
 
 def test_real_inverts_never_overwritten_and_nothing_to_estimate_from_is_skipped():

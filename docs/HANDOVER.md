@@ -339,6 +339,23 @@ Left as genuine data issues for the user: DN_REDUCTION (23), real INVERT_ABOVE_S
 ID_MISMATCH (5), DANGLING_END / DIRECTION_UNKNOWN at the selection edge, BIFURCATION at real overflows.
 Tests: qgis 130 + 1 skipped, toolbox 270.
 
+### Follow-up requests (2026-11-25, after the bulk import)
+
+- **Missing inverts from the other side of the node** (user: "a realistic value based on the invert on the other
+  side of the node"): `_fill_inverts` priority per missing end: (1) ds = largest-DN outgoing sewer's us invert (or
+  the main's invert at a tee) + max(0, DN_out − DN_in)/1000 (obverts matched); us = min over incoming of
+  ds_in − max(0, DN_out − DN_in)/1000; rejected if it makes the sewer adverse; (2) other end + FLOW_GRADE ×
+  length; (3) other end + DS 50 minimum grade for the DN (ruleset `grades`, nearest smaller DN; 1 in 200 if
+  unreadable). Counts inverts_estimated_node / _grade / _ds50. Shared core 136 + 1 skipped.
+- **Import Pressure Data**: a main's far end joins a gravity node only within 1 m (discharge distance default
+  10 → 1 m); otherwise new node `D_<rm_id>` "rising main discharge, not connected: connect manually"; Export To
+  ICM writes it as Outfall, reason "… not connected (connect manually)". Other connection guesses kept (audit):
+  main start = nearest segment end within 30 m of the PS; wet well = nearest terminal gravity node within 30 m.
+- **Export To ICM**: conduit / rising main lengths 0 < L < 1 m exported as 1 m (ICM minimum; user: "everything
+  less than 1 m can be inserted as 1 m" — interpreted as conduit length, not confirmed), one warning.
+- **Export To ICM**: gdb notes fields 2000 chars, other text 254; longer text cut (' ...'); fake arcpy enforces
+  field lengths (user's EdenHillV5 export failed 'Field length exceeded. Field: notes').
+
 ### Where we stopped (next session starts here)
 
 1. Install: if the user already runs the 38f46e2 full bundle, Update WWNet with this commit's `wwnet-arcgis-update`
