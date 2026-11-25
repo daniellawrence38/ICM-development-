@@ -12,8 +12,8 @@ import os
 
 import sqlite3
 
-from . import (capacity, engine, gpenv, gpkg, maplayers, pressure_import, pumpdata, shared, sewer_import, symbology,
-               vendor)
+from . import (capacity, engine, gpenv, gpkg, maplayers, pressure_import, pump_register, pumpdata, shared,
+               sewer_import, symbology, vendor)
 from .messages import Messages
 
 MAX_LINES = 300
@@ -320,7 +320,7 @@ def set_pump_station_data(arcpy, msgs: Messages, gpkg_path: str, ps_id: str, **v
 
     `values`: wet_well_diameter_m, wet_well_area_m2, level_mode, start, stop, overflow,
     emergency_storage_m3, n_duty, n_assist, n_standby, duty_rate_lps, curve_text, curve_order,
-    flow_units, speed_pct, source_note, replace_pumps. Data errors are reported as an "ERROR:" warning
+    flow_units, speed_pct, source_note, replace_pumps, wet_well_floor. Data errors are reported as an "ERROR:" warning
     (never AddError: that would mark the tool as failed) and None is returned."""
     v = dict(values)
     curve_text = v.pop("curve_text", None)
@@ -335,10 +335,7 @@ def set_pump_station_data(arcpy, msgs: Messages, gpkg_path: str, ps_id: str, **v
         msgs.warn(f"ERROR: {exc}")
         return None
     except sqlite3.OperationalError as exc:
-        text = str(exc).lower()
-        if "locked" in text or "busy" in text or "readonly" in text or "read-only" in text:
-            msgs.warn("ERROR: The model GeoPackage is locked by ArcGIS Pro. Close any open attribute tables "
-                      "and remove the model's layers from the map (or use a copy), then run the tool again.")
+        if _warn_if_locked(msgs, exc):
             return None
         raise
     msgs.info(result["summary"])
@@ -347,6 +344,54 @@ def set_pump_station_data(arcpy, msgs: Messages, gpkg_path: str, ps_id: str, **v
     for line in station_report_lines(gpkg_path):
         msgs.info(line)
     return result
+
+
+def _warn_if_locked(msgs: Messages, exc: Exception) -> bool:
+    """True (after an "ERROR:" warning) when `exc` says the GeoPackage is locked / busy / read-only."""
+    text = str(exc).lower()
+    if "locked" in text or "busy" in text or "readonly" in text or "read-only" in text:
+        msgs.warn("ERROR: The model GeoPackage is locked by ArcGIS Pro. Close any open attribute tables "
+                  "and remove the model's layers from the map (or use a copy), then run the tool again.")
+        return True
+    return False
+
+
+def import_pump_station_data(arcpy, msgs: Messages, gpkg_path: str, register: str, config: str | None = None,
+                             preview: bool = False):
+    """Import wet well levels, area, emergency storage and the design pump rate from the pump station register
+    workbook (see pump_register). `preview` validates and reports without writing. Data errors are "ERROR:"
+    warnings (never AddError); returns the pump_register.apply result, or None after such an error."""
+    if preview:
+        msgs.info("PREVIEW — nothing written.")
+    try:
+        cfg = pump_register.load_config(config or None)
+        res = pump_register.apply(gpkg_path, register, cfg, preview=bool(preview))
+    except ValueError as exc:
+        msgs.warn(f"ERROR: {exc}")
+        return None
+    except sqlite3.OperationalError as exc:
+        if _warn_if_locked(msgs, exc):
+            return None
+        raise
+    stations = res["stations"]
+    msgs.info(f"Register: {os.path.basename(str(register))}; matched {len(stations)} of "
+              f"{len(stations) + len(res['unmatched_model'])} model pump station(s); {res['n_register_only']} "
+              "other station(s) in the register (not in this model).")
+    for w in res["warnings"]:
+        msgs.warn(w)
+    for st, line in zip(stations, res["lines"]):
+        (msgs.info if st["status"] == "ok" else msgs.warn)(line)
+        for m in st["messages"]:
+            if m == line or line.endswith(m):
+                continue
+            msgs.warn(m if m.startswith("ERROR:") else f"{st['ps_id']}: {m}")
+    if res["unmatched_model"]:
+        msgs.warn("Model pump station(s) not in the register: " + ", ".join(res["unmatched_model"]) + ".")
+    n = {k: sum(1 for st in stations if st["status"] == k) for k in ("ok", "error", "skipped")}
+    msgs.info(f"Imported {n['ok']} station(s), {n['error']} with errors, {n['skipped']} skipped.")
+    if n["ok"] and not preview:
+        msgs.info("Next: Export To ICM writes their pumps to ICM_Pumps (fixed-rate pump at the design flow).")
+    return res
 
 
 def _table_lines(header: tuple, rows: list) -> list:

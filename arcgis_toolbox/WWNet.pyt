@@ -414,7 +414,9 @@ class SetPumpStationData(_Tool):
     description = ("Enter the hydraulic data of a pump station from its data sheet (wet well size, stop / start / "
                    "overflow levels, pumps and pump curve), which the GIS does not hold. Choose a station created "
                    "by Import Pressure Data; its current values are filled in. The pump curve can be pasted from "
-                   "the data sheet, Excel or InfoWorks ICM.")
+                   "the data sheet, Excel or InfoWorks ICM. The wet well node's invert is the incoming sewer invert: "
+                   "when the real stop level is below it, enter the wet well floor level (m AHD); levels are then "
+                   "checked against it and the node's invert is set to it (blank = unchanged).")
     category = "Data"
 
     def getParameterInfo(self):
@@ -425,6 +427,7 @@ class SetPumpStationData(_Tool):
                 _p("diameter_m", "Wet well diameter (m)", "GPDouble", required=False),
                 _p("area_m2", "Wet well area (m2)", "GPDouble", required=False),
                 _p("level_mode", "Levels are", "GPString", required=False, default="AHD", values=list(LEVEL_MODES)),
+                _p("floor_level", "Wet well floor level (m AHD)", "GPDouble", required=False),
                 _p("stop_level", "Stop level", "GPDouble", required=False),
                 _p("start_level", "Start level", "GPDouble", required=False),
                 _p("overflow_level", "Overflow level", "GPDouble", required=False),
@@ -498,6 +501,7 @@ class SetPumpStationData(_Tool):
             arcpy, msgs, path, _station_id(p.text("station")),
             wet_well_diameter_m=p.val("diameter_m"), wet_well_area_m2=p.val("area_m2"),
             level_mode=LEVEL_MODES.get(p.text("level_mode", "AHD"), "AHD"),
+            wet_well_floor=p.num("floor_level"),
             stop=p.val("stop_level"), start=p.val("start_level"), overflow=p.val("overflow_level"),
             emergency_storage_m3=p.val("emergency_m3"),
             n_duty=int(p.val("n_duty", 1)), n_assist=int(p.val("n_assist", 0)), n_standby=int(p.val("n_standby", 0)),
@@ -505,6 +509,29 @@ class SetPumpStationData(_Tool):
             curve_order=CURVE_ORDERS.get(p.text("curve_order", "flow,head"), "flow_head"),
             flow_units=p.text("flow_units", "L/s"), speed_pct=float(p.val("speed_pct", 100.0)),
             source_note=p.text("source_note"), replace_pumps=p.flag("replace_pumps", True))
+        return path
+
+
+class ImportPumpStationData(_Tool):
+    label = "Import Pump Station Data"
+    description = ("Import pump station data from the pump station register workbook (.xlsx): wet well floor and "
+                   "ground level, stop / start / overflow levels, wet well area, emergency storage and the design "
+                   "pump rate, read from the Level Settings, Civil and Motor and Pump Attributes sheets and matched "
+                   "on the pump station ID (the SAP functional location). The column map is in the TOML template "
+                   "(blank = the bundled watercorp_pump_register.toml). Tick 'Preview only' to check without "
+                   "writing. Re-run after Import Sewer Data (overwrite): it rebuilds the model.")
+    category = "Data"
+
+    def getParameterInfo(self):
+        return [_model_param("WWNet model (existing GeoPackage)"),
+                _p("register", "Pump station register (.xlsx)", "DEFile", filetype=["xlsx", "xlsm"]),
+                _p("config", "Import template (TOML, blank = bundled)", "DEFile", required=False, filetype=["toml"]),
+                _p("preview", "Preview only (write nothing)", "GPBoolean", required=False, default=False),
+                _model_out()]
+
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.import_pump_station_data(arcpy, msgs, path, p.text("register"), p.text("config"), p.flag("preview"))
         return path
 
 
@@ -808,7 +835,8 @@ class Toolbox(object):
         self.label = "WWNet"
         self.alias = "wwnet"
         self.tools = [NewModel, AddModelToMap, ModelSettings, JoinDanglingEnds,
-                      ImportSewerData, ImportPressureData, SetPumpStationData, ImportDiurnalProfile, AssignProfile,
+                      ImportSewerData, ImportPressureData, SetPumpStationData, ImportPumpStationData,
+                      ImportDiurnalProfile, AssignProfile,
                       ExportToICM,
                       CheckModel, RunDesign, RunSimulation, Trace,
                       ShowSimulationRun, CompareSimulationRuns, PlotHydrograph,

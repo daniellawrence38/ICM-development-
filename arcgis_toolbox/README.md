@@ -19,7 +19,8 @@ last Check / Design / Import / Simulation, column `source`).
 | Join Dangling Sewer Ends | Model | Joins dangling downstream ends to the nearest sewer (splits it at a new tee); preview first |
 | Import Sewer Data | Data | Water Corporation gravity sewer layers -> new model with connection point loads (see below) |
 | Import Pressure Data | Data | Pump stations + pressure mains into an existing model (see below) |
-| Set Pump Station Data | Data | Wet well, levels, pumps and pump curve from the data sheet |
+| Set Pump Station Data | Data | Wet well, levels (optional wet well floor level), pumps and pump curve from the data sheet |
+| Import Pump Station Data | Data | Wet well floor / levels / area, emergency storage and design pump rate from the pump station register workbook (see below); preview first |
 | Import Diurnal Profile | Data | Profile from CSV / TXT or text pasted from ICM (Time / Factor); mean checked, not changed |
 | Assign Profile | Data | Sets the profile of the node loads of the selected nodes, selected node loads / sub-catchments, or all |
 | Export To ICM | Data | Nodes, gravity sewers, rising mains and pumps with InfoWorks ICM field names (file gdb + CSV + mapping notes) |
@@ -233,10 +234,41 @@ Keep the toolbox inside the repository: `wwnet_arcgis/shared.py` then imports `.
 - The toolbox stores no credentials, makes no network connections, runs no `.exe` or subprocess, and never
   renames or replaces binaries at start-up.
 
+## Pump station register
+
+**Import Pump Station Data** fills the pump data the GIS does not hold from the Water Corporation pump station register
+workbook (`.xlsx` / `.xlsm`), for every model pump station whose `ps_id` equals a SAP functional location (or a
+sub-location such as `S0037310-PMP01`). Logic: `wwnet_arcgis/pump_register.py` (workbook reader `xlsx.py`, stdlib only).
+
+**Columns used** (defaults, all in `templates/import/watercorp_pump_register.toml`; leave the *Import template*
+parameter blank to use the bundled copy, or point it at an edited one): functional location in column C of every sheet.
+*Level Settings*: ground level E, overflow F, stop G, high level alarm L, start P, base (wet well floor) T (depths below
+top of slab, m). *Civil*: wet well storage R (m3 between the alarm and the overflow level), emergency storage AB (m3).
+*Motor and Pump Attributes*: design flow AF, design head AG. Units (`m` / `mm`, `L/s` / `m3/h` / `ML/d`), sheet names,
+duty / standby counts and the sub-location separators are in the TOML too; a bad value is reported with its TOML key.
+
+**What it writes** (through the same code as Set Pump Station Data): the wet well floor and ground level (the wet well
+node's invert and surface level), stop / start / overflow levels (AHD = ground - depth), wet well area (storage divided by
+alarm-to-overflow depth), emergency storage, and one duty pump at the design flow with the standby count. An existing pump
+curve is kept (only the duty rate is updated). Messages are prose lines; errors start with `ERROR:` and never fail the tool.
+
+- **Preview only (write nothing)** validates everything and reports; untick it to import.
+- **Re-run after Import Sewer Data (overwrite)**: that rebuilds the model and loses the pump data and the wet well
+  node's invert. Import Pressure Data re-creates its `WW_<ps_id>` wet well nodes, so re-import the register after it too.
+- Several pump rows per station: the first row sets the duty rate; further rows only add standby pumps and rows with
+  different test data are flagged as not used (future enhancement: per-pump rates / curves).
+- Then run **Export To ICM**: the pumps go to `ICM_Pumps` (fixed-rate pump at the design flow).
+- A small example workbook laid out like the real register ships as `templates/demo/pump_register_demo.xlsx`
+  (`examples/demo/` in the repo; made by `tests/make_pump_register_demo.py`); Self Test imports it.
+
+**Set Pump Station Data** has an optional *Wet well floor level (m AHD)*. The wet well node's invert is the incoming
+sewer invert, so real stop levels below it need the floor: when given, levels are validated against it and the node's
+invert is set to it. Blank leaves the node as it is.
+
 ## Editing GeoPackages in Pro
 - Pro reads GeoPackage tables as `file.gpkg\main.<table>`; `fid` is the ObjectID.
 - The engine opens the file itself: save edits in Pro before Check / Design / Simulate (each tool reminds you).
-- Tools that write with sqlite (Import Pressure Data, Set Pump Station Data, Join Dangling Sewer Ends) fail while
+- Tools that write with sqlite (Import Pressure Data, Set Pump Station Data, Import Pump Station Data, Join Dangling Sewer Ends) fail while
   Pro holds a lock: close attribute tables / remove the model's layers first.
 - Result and issue layers are rewritten by the tools: treat them as read-only.
 

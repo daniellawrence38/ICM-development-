@@ -38,11 +38,16 @@ def params(t):
     return t.getParameterInfo()
 
 
+def by(ps):
+    return {x.name: x for x in ps}
+
+
 def test_parameters(pyt):
     t = pyt.SetPumpStationData()
     assert t.label == "Set Pump Station Data" and t.category == "Data"
     p = {x.name: x for x in params(t)}
-    assert list(p) == ["gpkg", "station", "diameter_m", "area_m2", "level_mode", "stop_level", "start_level",
+    assert list(p) == ["gpkg", "station", "diameter_m", "area_m2", "level_mode", "floor_level", "stop_level",
+                       "start_level",
                        "overflow_level", "emergency_m3", "n_duty", "n_assist", "n_standby", "duty_rate",
                        "pump_curve", "curve_order", "flow_units", "speed_pct", "source_note", "replace_pumps",
                        "out_gpkg"]
@@ -52,6 +57,8 @@ def test_parameters(pyt):
         [1, 0, 0, 100.0, True]
     assert p["n_duty"].datatype == "GPLong" and p["level_mode"].filter.list == ["AHD", "Depth above wet well invert"]
     assert p["curve_order"].filter.list == ["flow,head", "head,flow"] and p["flow_units"].filter.list == ["L/s", "m3/h", "m3/s"]
+    assert p["floor_level"].datatype == "GPDouble" and p["floor_level"].parameterType == "Optional"
+    assert p["floor_level"].value is None and "invert" in t.description and "floor" in t.description
     assert "Required" == p["station"].parameterType and p["pump_curve"].parameterType == "Optional"
 
 
@@ -69,10 +76,11 @@ def test_update_parameters_fills_stations_and_prefills(pyt, model):
     assert (v["stop_level"], v["start_level"], v["overflow_level"]) == (18.5, 19.5, 20.5)
     assert (v["n_duty"], v["n_assist"], v["n_standby"]) == (1, 0, 1) and v["duty_rate"] == 25.0
     assert v["pump_curve"] == "0\t30\n15\t25\n30\t10"
+    assert v["floor_level"] is None        # never prefilled
     ps[1].hasBeenValidated = True
-    ps[3].value = 9.0                      # user edit after validation is not overwritten
+    by(ps)["area_m2"].value = 9.0          # user edit after validation is not overwritten
     t.updateParameters(ps)
-    assert ps[3].value == 9.0
+    assert by(ps)["area_m2"].value == 9.0
     # a station without data: defaults, empty fields
     ps[1].hasBeenValidated = False
     ps[1].value = "PS2"
@@ -93,24 +101,26 @@ def test_update_parameters_bad_gpkg_and_stale_station(pyt, model, tmp_path):
 def test_update_messages_curve(pyt):
     t = pyt.SetPumpStationData()
     ps = params(t)
+    q = by(ps)
+    curve = by(ps)["pump_curve"]
     t.updateMessages(ps)                                  # no curve: nothing
-    assert ps[13].message is None
-    ps[13].value = "0\t30\n10\t40"
+    assert q["pump_curve"].message is None
+    q["pump_curve"].value = "0\t30\n10\t40"
     t.updateMessages(ps)
-    assert ps[13].message_level == "error" and "strictly decrease" in ps[13].message
-    ps[13].clearMessage()
-    ps[13].value = "10\t30\n20\t10"
+    assert q["pump_curve"].message_level == "error" and "strictly decrease" in q["pump_curve"].message
+    q["pump_curve"].clearMessage()
+    q["pump_curve"].value = "10\t30\n20\t10"
     t.updateMessages(ps)
-    assert ps[13].message_level == "warning" and "not zero flow" in ps[13].message
-    ps[13].clearMessage()
-    ps[13].value = "30\t0\n10\t36"
-    ps[14].value = "head,flow"
-    ps[15].value = "m3/h"
+    assert q["pump_curve"].message_level == "warning" and "not zero flow" in q["pump_curve"].message
+    q["pump_curve"].clearMessage()
+    q["pump_curve"].value = "30\t0\n10\t36"
+    q["curve_order"].value = "head,flow"
+    q["flow_units"].value = "m3/h"
     t.updateMessages(ps)
-    assert ps[13].message is None
-    ps[13].value = "1 2 3"
+    assert q["pump_curve"].message is None
+    q["pump_curve"].value = "1 2 3"
     t.updateMessages(ps)
-    assert ps[13].message_level == "error" and "expected 2" in ps[13].message
+    assert q["pump_curve"].message_level == "error" and "expected 2" in q["pump_curve"].message
 
 
 def test_execute_writes_gpkg(pyt, model, fake_arcpy):
@@ -118,16 +128,17 @@ def test_execute_writes_gpkg(pyt, model, fake_arcpy):
     pyt.arcpy = a
     t = pyt.SetPumpStationData()
     ps = params(t)
+    q = by(ps)
     ps[0].value = model
     ps[1].value = "PS2"
-    ps[3].value = 4.0
-    ps[4].value = "Depth above wet well invert"
-    ps[5].value, ps[6].value, ps[7].value = 0.5, 1.5, 2.5
-    ps[8].value = 12.0
-    ps[9].value, ps[10].value = 2, 1
-    ps[13].value = "Flow\tHead\n0\t40\n36\t20\n72\t5"
-    ps[15].value = "m3/h"
-    ps[17].value = "Data sheet PS2 rev C"
+    q["area_m2"].value = 4.0
+    q["level_mode"].value = "Depth above wet well invert"
+    q["stop_level"].value, q["start_level"].value, q["overflow_level"].value = 0.5, 1.5, 2.5
+    q["emergency_m3"].value = 12.0
+    q["n_duty"].value, q["n_assist"].value = 2, 1
+    q["pump_curve"].value = "Flow\tHead\n0\t40\n36\t20\n72\t5"
+    q["flow_units"].value = "m3/h"
+    q["source_note"].value = "Data sheet PS2 rev C"
     t.execute(ps, None)
     con = sqlite3.connect(model)
     row = con.execute("SELECT wet_well_area_m2, stop_level, start_level, overflow_level, emergency_storage_m3, "
@@ -151,8 +162,9 @@ def test_execute_data_error_is_warning_not_error(pyt, model, fake_arcpy):
     pyt.arcpy = a
     t = pyt.SetPumpStationData()
     ps = params(t)
+    q = by(ps)
     ps[0].value = model
     ps[1].value = "PS1 — Main PS"
-    ps[3].value, ps[2].value = 7.0, 9.0          # area and diameter disagree
+    q["area_m2"].value, q["diameter_m"].value = 7.0, 9.0          # area and diameter disagree
     t.execute(ps, None)
     assert [lv for lv, _ in a.log] == ["warn"] and a.log[0][1].startswith("ERROR: Wet well area")

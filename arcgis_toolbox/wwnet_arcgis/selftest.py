@@ -65,6 +65,13 @@ def _find_profile(root) -> str:
                             os.path.join(os.path.dirname(root), "templates", "profiles", name)], name)
 
 
+def _find_register(root) -> str:
+    root = os.path.abspath(str(root))
+    name = "pump_register_demo.xlsx"
+    return _first_existing([os.path.join(root, "templates", "demo", name),
+                            os.path.join(os.path.dirname(root), "examples", "demo", name)], name)
+
+
 def _first_node_id(gpkg_path: str) -> str:
     con = sqlite3.connect(gpkg_path)
     try:
@@ -241,6 +248,51 @@ def run(arcpy, msgs, root, out_dir=None, include_map=False, exe=None) -> dict:
         if not d["pumps"] or not any(p["starts"] > 0 for p in d["pumps"]) or "Pump stations" not in text or "Rising mains" not in text:
             raise RuntimeError("pump station results are missing from the simulation messages")
 
+    def step_pump_import(c):
+        src = os.path.join(out_dir, "selftest_pumps.gpkg")
+        if not os.path.isfile(src):
+            raise Skip("no pump station model (the pump station simulation step did not create it)")
+        reg = _find_register(root)
+        igp = os.path.join(out_dir, "selftest_pumps_import.gpkg")
+        shutil.copyfile(src, igp)
+
+        def state_of():
+            con = sqlite3.connect(igp)
+            try:
+                st = con.execute("SELECT stop_level, start_level, overflow_level, wet_well_area_m2, pump_rate_lps "
+                                 "FROM wwn_pump_stations WHERE ps_id='PS1'").fetchone()
+                nd = con.execute("SELECT invert_level, surface_level FROM wwn_nodes WHERE node_id='WW'").fetchone()
+                n_curves = con.execute("SELECT COUNT(*) FROM wwn_pumps WHERE ps_id='PS1' "
+                                       "AND curve_json IS NOT NULL").fetchone()[0]
+            finally:
+                con.close()
+            return st, nd, n_curves
+
+        before = state_of()
+        pc = CapturingMessages()
+        tools_impl.import_pump_station_data(arcpy, pc, igp, reg, None, True)
+        if state_of() != before:
+            raise RuntimeError("the preview changed the model")
+        res = tools_impl.import_pump_station_data(arcpy, pc, igp, reg, None, False)
+        text = "\n".join(t for _, t in pc.lines)
+        st = next((x for x in (res or {}).get("stations", []) if x["ps_id"] == "PS1"), None)
+        if st is None or st["status"] != "ok":
+            raise RuntimeError("PS1 was not imported: " + (text or "no messages"))
+        (stop, start, ovf, area, rate), (inv, surf), n_curves = state_of()
+        if not (abs(inv - 21.9) < 1e-6 and inv < before[1][0] and abs(surf - 25.5) < 1e-6
+                and abs(stop - 22.5) < 1e-6 and abs(start - 23.0) < 1e-6 and abs(ovf - 24.5) < 1e-6
+                and abs(area - 7.0) < 1e-6 and rate == 25.0):
+            raise RuntimeError(f"unexpected values written: floor {inv}, ground {surf}, stop {stop}, start {start}, "
+                               f"overflow {ovf}, area {area}, rate {rate}")
+        if not n_curves or "existing pump curve kept" not in text:
+            raise RuntimeError("the existing pump curve was not kept")
+        for lv, t in pc.lines:
+            if "ERROR" in t:
+                c.warn(t)
+        c.info(f"Preview wrote nothing; imported PS1 from {os.path.basename(reg)}: floor {inv:.2f} (node invert "
+               f"was {before[1][0]:.2f}), stop {stop:.2f}, start {start:.2f}, overflow {ovf:.2f} m AHD, "
+               f"{area:g} m2, {rate:g} L/s; existing pump curve kept")
+
     def step_export(c):
         need_model()
         tools_impl.export_icm(arcpy, c, copy, os.path.join(out_dir, "icm"))
@@ -280,6 +332,7 @@ def run(arcpy, msgs, root, out_dir=None, include_map=False, exe=None) -> dict:
              ("run simulation (2 h, 1 h warm-up)", step_simulation),
              ("simulation runs: show / compare / hydrograph", step_runs), ("model settings / assign profile", step_settings),
              ("pump station simulation", step_pump_simulation),
+             ("import pump station data (demo register)", step_pump_import),
              ("export to ICM", step_export), ("export to ICM (pump station)", step_pump_export)]
     if include_map:
         steps += [("map: add model to map", step_map_add), ("map: trace with selection", step_map_trace),

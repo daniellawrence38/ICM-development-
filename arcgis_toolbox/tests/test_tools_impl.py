@@ -342,7 +342,8 @@ def test_pyt_tools_parameters_and_categories(fake_arcpy):
     tools = {t().label: t() for t in tb.tools}
     assert list(tools) == ["New Model", "Add Model To Map", "Model Settings", "Join Dangling Sewer Ends",
                            "Import Sewer Data", "Import Pressure Data", "Set Pump Station Data",
-                           "Import Diurnal Profile", "Assign Profile", "Export To ICM", "Check Model", "Run Design",
+                           "Import Pump Station Data", "Import Diurnal Profile", "Assign Profile", "Export To ICM",
+                           "Check Model", "Run Design",
                            "Run Simulation", "Trace", "Show Simulation Run", "Compare Simulation Runs",
                            "Plot Hydrograph", "Pipe Capacity", "Verify Setup", "Self Test", "Update WWNet"]
     assert {t.category for t in tools.values()} == {"Model", "Data", "Analysis", "Results", "Calculators", "Setup"}
