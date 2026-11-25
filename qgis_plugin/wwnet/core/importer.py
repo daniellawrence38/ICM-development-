@@ -1008,8 +1008,19 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         fgrade = to_float(get(s["row"], "flow_grade"))
         if fgrade is not None and fgrade <= 0:
             fgrade = None
+        plens = [_length(segs[i]["line"]) for i in idxs]
+        if flipped:
+            nchain, plens = nchain[::-1], plens[::-1]
+        draw0 = to_float(get(s["row"], "diameter")) if fm.diameter else None
+        dmm = float(draw0) if draw0 is not None and draw0 >= 50 else float(opt.default_dn)
+        cum, acc = [], 0.0
+        for q_ in plens[:-1]:
+            acc += q_
+            cum.append(acc)
         recs[idxs[0]] = {"pid": s["pid"], "us": nchain[0], "ds": nchain[-1], "glen": glen, "length": length,
-                         "fgrade": fgrade, "est": {},
+                         "fgrade": fgrade, "est": {}, "rej": {}, "dmm": dmm,
+                         "dn": min(std, key=lambda x: (abs(x - dmm), x)),
+                         "mid": list(zip(nchain[1:-1], cum)),
                          "ui": level(get(s["row"], "us_invert")), "di": level(get(s["row"], "ds_invert"))}
     if recs:
         _fill_inverts(list(recs.values()), rep)
@@ -1342,72 +1353,155 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     return model, rep
 
 
+def _ds50_min_grades() -> tuple:
+    """(sorted [(dn, 1-in-x)], None) from the DS 50 ruleset, or ([], reason) when it can't be read."""
+    try:
+        from . import ruleset
+        rows = sorted((int(g["dn"]), float(g["min_grade_1in"])) for g in ruleset.load_ruleset()["grades"])
+        if rows:
+            return rows, None
+        return [], "no grade table"
+    except Exception as e:                       # missing / unreadable ruleset: fall back to 1 in 200
+        return [], str(e) or e.__class__.__name__
+
+
 def _fill_inverts(recs: list, rep: ImportReport, max_iter: int = 50):
-    """Estimate missing inverts of oriented sewers (``recs``: dicts with us / ds node, ui / di, length, fgrade,
-    est), never over a real value. (a) one end known: the other = known -/+ length / FLOW_GRADE (downstream
-    lower); (b) both missing: upstream = lowest ds invert of the sewers flowing into the upstream node, downstream
-    = us invert of the single sewer leaving the downstream node, then (a) for what is left. Repeated until
-    nothing changes (bounded). Each estimate is recorded in ``rec["est"][end] = (value, method, category)``."""
+    """Estimate missing inverts of oriented sewers (``recs``: dicts with us / ds node, ui / di, dn, length,
+    fgrade, est, rej, mid), never over a real value. For each missing end, in priority:
+    (1) the other side of the node: ds from the largest-DN outgoing sewer's (or the main's tee) us invert,
+    lifted so the oberts match when the pipe gets bigger; us from the lowest of the incoming ds inverts, each
+    lowered likewise; rejected when it would make the sewer adverse; (2) the other end of the sewer and
+    FLOW_GRADE x length; (3) the other end and the DS 50 minimum grade for the DN. Rule 1 runs to a fixpoint
+    on real / already estimated values before rules 2 / 3 are applied to what is left, and the whole is
+    repeated until nothing changes (bounded). Each estimate is ``rec["est"][end] = (value, method, category)``."""
     by_us: dict = {}
     by_ds: dict = {}
+    tee_on: dict = {}                # node -> [(main rec, fraction along it)] where a main passes through it
     for r in recs:
         by_us.setdefault(r["us"], []).append(r)
         by_ds.setdefault(r["ds"], []).append(r)
+        for nid, x in r.get("mid", ()):
+            tee_on.setdefault(nid, []).append((r, x / r["glen"] if r["glen"] > 0 else 0.0))
+    grades, gerr = _ds50_min_grades()
 
     def put(r, end, v, method, cat):
-        r["ui" if end == "us" else "di"] = round(v, 6)
-        r["est"][end] = (round(v, 6), method, cat)
+        v = round(v, 6)
+        if r["rej"].get(end):
+            method = f"{method}; {r['rej'][end]}"
+        r["ui" if end == "us" else "di"] = v
+        r["est"][end] = (v, method, cat)
 
-    def by_grade(r):
-        g, ln = r["fgrade"], r["length"]
-        if not g or not ln or ln <= 0:
+    def tee_value(m, frac):
+        if m["ui"] is None or m["di"] is None:
+            return None
+        return round(m["ui"] + (m["di"] - m["ui"]) * frac, 6)
+
+    def node_side(r, end):
+        """(value, method) from the other side of the node, or None."""
+        if end == "ds":
+            n = r["ds"]
+            c = [(q["dmm"], q["ui"], f"the outgoing sewer {q['pid']} us invert at node {n}", q["pid"])
+                 for q in by_us.get(n, ()) if q is not r and q["ui"] is not None]
+            for m, fr in tee_on.get(n, ()):
+                t = tee_value(m, fr) if m is not r else None
+                if t is not None:
+                    c.append((m["dmm"], t, f"the main {m['pid']} invert at tee node {n}", m["pid"]))
+            if not c:
+                return None
+            d, v, how, _p = min(c, key=lambda x: (-x[0], x[1]))
+            lift = max(0.0, d - r["dmm"]) / 1000.0
+            if lift > 0:
+                how += f" lifted {_fmt(lift, 3)} m (DN{_fmt(r['dmm'])} into DN{_fmt(d)}, obverts matched)"
+            return v + lift, how
+        n = r["us"]
+        c = [(q["di"] - max(0.0, r["dmm"] - q["dmm"]) / 1000.0, q["pid"], q["dmm"])
+             for q in by_ds.get(n, ()) if q is not r and q["di"] is not None]
+        for m, fr in tee_on.get(n, ()):
+            t = tee_value(m, fr) if m is not r else None
+            if t is not None:
+                c.append((t - max(0.0, r["dmm"] - m["dmm"]) / 1000.0, m["pid"], m["dmm"]))
+        if not c:
+            return None
+        v, pid, _d = min(c)
+        how = f"the incoming sewer {pid} ds invert at node {n}" if len(c) == 1 else \
+            f"the lowest of {len(c)} incoming sewers' ds inverts at node {n} ({pid})"
+        return v, how
+
+    def rule1(r) -> bool:
+        did = False
+        for end in ("us", "ds"):
+            if r["ui" if end == "us" else "di"] is not None or end in r["rej"]:
+                continue
+            res = node_side(r, end)
+            if res is None:
+                continue
+            v, how = res
+            other = r["di"] if end == "us" else r["ui"]
+            if other is not None and ((end == "ds" and v > other + 1e-9) or (end == "us" and v < other - 1e-9)):
+                r["rej"][end] = f"node-side value {_fmt(v, 3)} rejected (adverse)"
+                continue
+            put(r, end, v, how, "node")
+            did = True
+        return did
+
+    def fallback(r) -> bool:
+        if (r["ui"] is None) == (r["di"] is None):
             return False
-        drop = ln / g
-        how = f"FLOW_GRADE 1 in {_fmt(g, 1)} over {_fmt(ln, 1)} m"
-        if r["ui"] is not None and r["di"] is None:
-            put(r, "ds", r["ui"] - drop, f"us invert and {how}", "grade")
-            return True
-        if r["di"] is not None and r["ui"] is None:
-            put(r, "us", r["di"] + drop, f"ds invert and {how}", "grade")
-            return True
-        return False
+        ln = r["length"]
+        if not ln or ln <= 0:
+            return False
+        end = "ds" if r["di"] is None else "us"
+        known, sgn = (r["ui"], -1.0) if end == "ds" else (r["di"], 1.0)
+        kn = "us" if end == "ds" else "ds"
+        g = r["fgrade"]
+        if g:
+            how, cat = f"{kn} invert and FLOW_GRADE 1 in {_fmt(g, 1)} over {_fmt(ln, 1)} m", "grade"
+        else:
+            if grades:
+                g = [x for dn, x in grades if dn <= r["dn"]]
+                g = g[-1] if g else grades[0][1]
+                how = f"{kn} invert and assumed DS 50 minimum grade 1 in {_fmt(g, 1)} over {_fmt(ln, 1)} m"
+            else:
+                g = 200.0
+                how = (f"{kn} invert and assumed 1 in 200 over {_fmt(ln, 1)} m (DS 50 minimum grade table could "
+                       f"not be read: {gerr})")
+            cat = "ds50"
+        put(r, end, known + sgn * ln / g, how, cat)
+        return True
 
     for _ in range(max_iter):
         changed = False
-        for r in recs:
-            if r["ui"] is not None and r["di"] is not None:
-                continue
-            if r["ui"] is None and r["di"] is None:
-                inn = [q["di"] for q in by_ds.get(r["us"], ()) if q is not r and q["di"] is not None]
-                if inn:
-                    put(r, "us", min(inn), f"{len(inn)} adjoining sewer(s) flowing into node {r['us']} "
-                        f"(lowest ds invert)" if len(inn) > 1 else f"the adjoining sewer's ds invert at node "
-                        f"{r['us']}", "adjoining")
-                    changed = True
-                out = [q for q in by_us.get(r["ds"], ()) if q is not r]
-                if len(out) == 1 and out[0]["ui"] is not None:
-                    put(r, "ds", out[0]["ui"], f"the outgoing sewer {out[0]['pid']} us invert at node {r['ds']}",
-                        "adjoining")
-                    changed = True
-            if by_grade(r):
+        while True:                                  # rule 1 on real / estimated values, to a fixpoint
+            step = False
+            for r in recs:
+                if rule1(r):
+                    step = True
+            changed = changed or step
+            if not step:
+                break
+        for r in recs:                               # rules 2 / 3 for what rule 1 found nothing for
+            if fallback(r):
                 changed = True
         if not changed:
             break
     n_sewers = sum(1 for r in recs if r["est"])
     if n_sewers:
-        cats = {"grade": 0, "adjoining": 0}
+        cats = {"node": 0, "grade": 0, "ds50": 0}
         for r in recs:
             for _v, _m, c in r["est"].values():
                 cats[c] += 1
-        rep.count("inverts_estimated", cats["grade"] + cats["adjoining"])
+        tot = sum(cats.values())
+        rep.count("inverts_estimated", tot)
+        rep.count("inverts_estimated_node", cats["node"])
         rep.count("inverts_estimated_grade", cats["grade"])
-        rep.count("inverts_estimated_adjoining", cats["adjoining"])
+        rep.count("inverts_estimated_ds50", cats["ds50"])
         rep.count("sewers_with_estimated_inverts", n_sewers)
         left = sum(1 for r in recs if r["ui"] is None or r["di"] is None)
         rep.diagnostics.append(
-            f"Estimated {cats['grade'] + cats['adjoining']} missing invert(s) in {n_sewers} sewer(s) "
-            f"(INVERT_ESTIMATED): {cats['grade']} from FLOW_GRADE and length, {cats['adjoining']} from adjoining "
-            f"sewers' inverts; {left} sewer(s) still missing an invert (reported by the model check).")
+            f"Estimated {tot} missing invert(s) in {n_sewers} sewer(s) (INVERT_ESTIMATED): {cats['node']} from "
+            f"the invert on the other side of the node, {cats['grade']} from FLOW_GRADE and length, "
+            f"{cats['ds50']} from the DS 50 minimum grade; {left} sewer(s) still missing an invert "
+            "(reported by the model check).")
 
 
 def _report_tee_cycles(segs: list, up_end: dict, tee_nodes: set, tee_by_seg: dict, rep: ImportReport):
