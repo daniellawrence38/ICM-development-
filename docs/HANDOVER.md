@@ -1,6 +1,6 @@
 # WWNet: session handover (2026-11-25)
 
-Branch: **`ccr-153a547e-mtrc3t`** (2026-11-25 session, section 14). It was restarted from `ccr-7bd083b1-j0qlhq`
+Branch: **`main`** (default; the 2026-11-25 session's `ccr-153a547e-mtrc3t` is merged into it, section 14). It was restarted from `ccr-7bd083b1-j0qlhq`
 (38f46e2), which holds BOTH earlier lines of work: the 2026-11-23/24 ArcGIS session (`ccr-54bf38a8-b92qd9`: pressure
 side, Export To ICM, Self Test, Update WWNet; sections 2-11) and the 2026-11-23 review session (schema v3 / toolbox
 UX; **section 12**), merged on 2026-11-24. All older branches (`ccr-7bd083b1-j0qlhq`, `ccr-54bf38a8-b92qd9`,
@@ -378,15 +378,27 @@ Tests: qgis 130 + 1 skipped, toolbox 270.
 - User reported the tee / branch-not-joined problem still occurring (without running Join Dangling Sewer Ends):
   the combined import's 5 m join should cover ends beyond the 0.5 m tee tolerance — confirm on EdenHill.
 
-### Where we stopped (next session starts here)
+### Where we stopped (next session starts here) — end of the 2026-11-25 session
 
-1. Install (latest commit of this branch): if the user already runs the 38f46e2 full bundle, Update WWNet with the `wwnet-arcgis-update`
-   artifact; otherwise (still on 60e8cc8) the full bundle `wwnet-arcgis-bundle-win-py311` (delete the old folder
-   first, §13). Then Self Test (expect the new step PASS) and paste the report.
-2. Run Import Pump Station Data on the real model with **Preview only** first; paste messages. Then for real, then
-   Export To ICM → expect `ICM_Pumps` (Fixpmp at the design flow), then ODIC import incl. the Pump object.
-3. Open questions: `Fixpmp` `discharge` unit in ICM (L/s vs the network's flow unit); whether ODIC can import the
-   head-discharge CSV; export a placeholder pump link for stations with no data (offered, user not yet decided);
-   make Set Pump Station Data failures more visible; export pumps that have counts only (engine/export mismatch).
-4. Then §11 "Where we stopped" items and §8.
+State: all work merged into `main` (now the GitHub default branch). The user's PC: last confirmed build was from
+before c5a612f (Self Test 11:05 with the old demo-register FAIL; EdenHillV5 export failed on long notes, fixed
+9f44d44). **Not yet installed / not yet run in Pro: everything from c5a612f to the latest `main`** — the importer
+fixes (−99.9, status N/D, codes, tee clusters, invert estimation from the other side of the node), hanging pressure
+main ends, wet well at the PS point, 1 m minimum length, chamber floor lowering, Import Network Data.
+
+1. User installs the latest `main` via `wwnet-arcgis-update` + Update WWNet (they are on the post-38f46e2 full
+   bundle: no assistant tools), right-click toolbox › Refresh, runs **Self Test**, pastes the summary lines.
+   Expect PASS for "import pump station data (demo register)" (own demo TOML now).
+2. **Import Network Data** for EdenHill to a NEW GeoPackage (same selection; pump station + pressure main layers;
+   the register workbook; join on, 5 m). Ask for the messages: tee / join counts, SUSPECT_TEE, INVERT_ESTIMATED by
+   rule, hanging rising mains, wet wells left unconnected (WW_), register matches.
+3. **Export To ICM**, then ODIC import incl. the Pump object; ask for the remaining ICM validation errors with
+   node / link ids. Things to watch: "not connected to outfall" from the selection edge (expected), any tee still
+   unjoined (would need a new reproduction), chamber floor lowering count.
+4. Open questions: user's "values < 1 m -> 1 m" was implemented as conduit length (not confirmed); `Fixpmp`
+   `discharge` unit in ICM; whether ODIC imports the head-discharge CSV; placeholder pump link for stations with
+   no data (offered, not decided); Set Pump Station Data failures more visible; pumps with counts only are
+   simulated but not exported; second-pump test data / curves from the register (user: future enhancement);
+   README / handover sections 4-5 tables partly stale (tool count now 23).
+5. Then §11 "Where we stopped" items (ICM pump run comparison) and §8.
 
