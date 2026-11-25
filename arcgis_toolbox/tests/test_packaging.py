@@ -45,7 +45,7 @@ def test_zip_contents_and_no_qgis(tmp_path):
         names = set(zf.namelist())
         top = package.TOP + "/"
         for must in ("WWNet.pyt", "README.md", "templates/schema.sql", "rulesets/ds50_v2r4.toml",
-                     "templates/import/watercorp_sewer.toml", "templates/demo/demo.gpkg", "templates/demo/pump_register_demo.xlsx",
+                     "templates/import/watercorp_sewer.toml", "templates/demo/demo.gpkg", "templates/demo/pump_register_demo.xlsx", "templates/demo/pump_register_demo.toml",
                      "templates/import/watercorp_pump_register.toml", "wwnet_arcgis/pump_register.py",
                      "wwnet_arcgis/xlsx.py", "templates/profiles/example_residential.csv", "wwnet_shared/core/importer.py", "wwnet_shared/core/repair.py",
                      "wwnet_arcgis/sewer_import.py", "wwnet_shared/__init__.py", "wwnet_shared/core/schema.py",
@@ -77,7 +77,7 @@ def test_no_cli_or_python_engine_copies_shipped(tmp_path):
 UPDATE_MUST = (
     "WWNet.pyt", "README.md", "wwnet_arcgis/tools_impl.py", "wwnet_arcgis/sewer_import.py",
     "wwnet_shared/__init__.py", "wwnet_shared/core/schema.py", "wwnet_shared/core/summary.py",
-    "templates/schema.sql", "rulesets/ds50_v2r4.toml", "templates/demo/pump_register_demo.xlsx",
+    "templates/schema.sql", "rulesets/ds50_v2r4.toml", "templates/demo/pump_register_demo.xlsx", "templates/demo/pump_register_demo.toml",
     "wwnet_arcgis/pump_register.py", "wwnet_arcgis/xlsx.py", "templates/import/watercorp_pump_register.toml",
 )
 

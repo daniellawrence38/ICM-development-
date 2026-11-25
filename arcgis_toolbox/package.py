@@ -11,6 +11,7 @@ Layout inside the zip (extract anywhere, then add WWNet.pyt as a toolbox in Pro)
     WWNet-ArcGIS/templates/profiles/*.csv      example diurnal profile (APPROXIMATE)
     WWNet-ArcGIS/templates/demo/demo.gpkg      demo model used by the Self Test tool
     WWNet-ArcGIS/templates/demo/pump_register_demo.xlsx   demo pump station register (Self Test, Import Pump Station Data)
+    WWNet-ArcGIS/templates/demo/pump_register_demo.toml   column map of that demo workbook (Self Test; do not edit)
     WWNet-ArcGIS/rulesets/*.toml
     WWNet-ArcGIS/bin/wwnet.exe                only with --cli <path>
     WWNet-ArcGIS/vendor/...                   only with --vendor-dir <path> (no-install bundle: anthropic,
@@ -94,6 +95,7 @@ def collect(cli: Path | None = None, vendor_dir: Path | None = None, python_only
         files[f"templates/profiles/{p.name}"] = p
     files["templates/demo/demo.gpkg"] = REPO / "examples" / "demo" / "demo.gpkg"
     files["templates/demo/pump_register_demo.xlsx"] = REPO / "examples" / "demo" / "pump_register_demo.xlsx"
+    files["templates/demo/pump_register_demo.toml"] = REPO / "examples" / "demo" / "pump_register_demo.toml"
     for p in sorted((REPO / "rulesets").glob("*.toml")):
         files[f"rulesets/{p.name}"] = p
     if not python_only:

@@ -181,3 +181,13 @@ def test_committed_demo_register_matches_the_generator(tmp_path):
     assert reg["sheets"]["levels"]["rows"][0]["fl"] == "PS1"
     pumps = reg["sheets"]["pumps"]["rows"]
     assert pumps[0]["v"] == pumps[1]["v"] and pumps[2]["v"] == pumps[3]["v"]
+
+
+def test_demo_toml_matches_generator():
+    toml = DEMO_XLSX.with_suffix(".toml")
+    assert toml.read_text(encoding="utf-8") == demo.toml_text()
+    cfg = pump_register.load_config(str(toml))
+    for sk, (name, cols) in demo.COLUMNS.items():
+        assert cfg["sheets"][sk]["name"] == name
+        assert cfg["sheets"][sk]["key"] == cols["key"]
+        assert cfg["sheets"][sk]["cols"] == {k: v for k, v in cols.items() if k != "key"}

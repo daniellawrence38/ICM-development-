@@ -133,3 +133,36 @@ def test_default_out_dir_is_temp(fake_arcpy, tmp_path, monkeypatch):
     res = selftest.run(a, Rec(), _root(tmp_path))
     assert os.path.basename(res["out_dir"]).startswith("wwnet_selftest_")
     assert os.path.dirname(res["out_dir"]) == str(tmp_path)
+
+
+def test_pump_import_step_ignores_edited_user_template(fake_arcpy, wwnet_exe, tmp_path, monkeypatch):
+    """The user is told to edit templates/import/watercorp_pump_register.toml; the Self Test must not depend on it."""
+    selftest, tools_impl = _mods()
+    from conftest import TOOLBOX
+    pr = importlib.import_module("wwnet_arcgis.pump_register")
+    src = (TOOLBOX.parent / "templates" / "import" / "watercorp_pump_register.toml").read_text(encoding="utf-8")
+    assert 'stop = "Q"' in src
+    edited = tmp_path / "edited.toml"
+    edited.write_text(src.replace('stop = "Q"', 'stop = "Z"'), encoding="utf-8")
+    real = pr.load_config
+    monkeypatch.setattr(pr, "load_config", lambda path=None: real(path if path else str(edited)))
+    res = selftest.run(fake_arcpy([]), Rec(), _root(tmp_path), out_dir=str(tmp_path / "st"), exe=wwnet_exe)
+    assert _by(res)["import pump station data (demo register)"]["status"] == "PASS"
+
+
+def test_pump_import_failure_text_has_tool_messages(fake_arcpy, wwnet_exe, tmp_path, monkeypatch):
+    selftest, tools_impl = _mods()
+    real = tools_impl.import_pump_station_data
+
+    def bad(arcpy, msgs, gpkg, register, config=None, preview=False, *a, **kw):
+        r = real(arcpy, msgs, gpkg, register, config, preview, *a, **kw)
+        msgs.error("PS1 not imported: simulated problem")
+        if not preview:
+            return {"stations": [{"ps_id": "PS1", "status": "error"}]}
+        return r
+
+    monkeypatch.setattr(tools_impl, "import_pump_station_data", bad)
+    res = selftest.run(fake_arcpy([]), Rec(), _root(tmp_path), out_dir=str(tmp_path / "st"), exe=wwnet_exe)
+    imp = _by(res)["import pump station data (demo register)"]
+    assert imp["status"] == "FAIL"
+    assert "simulated problem" in imp["error"] and "pump_register_demo.toml" in imp["error"], imp

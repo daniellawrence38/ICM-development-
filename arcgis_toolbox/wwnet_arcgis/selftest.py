@@ -72,6 +72,14 @@ def _find_register(root) -> str:
                             os.path.join(os.path.dirname(root), "examples", "demo", name)], name)
 
 
+def _find_register_config(root) -> str:
+    """The demo workbook's own column map, next to the workbook (never the user-editable import template)."""
+    root = os.path.abspath(str(root))
+    name = "pump_register_demo.toml"
+    return _first_existing([os.path.join(root, "templates", "demo", name),
+                            os.path.join(os.path.dirname(root), "examples", "demo", name)], name)
+
+
 def _first_node_id(gpkg_path: str) -> str:
     con = sqlite3.connect(gpkg_path)
     try:
@@ -253,6 +261,7 @@ def run(arcpy, msgs, root, out_dir=None, include_map=False, exe=None) -> dict:
         if not os.path.isfile(src):
             raise Skip("no pump station model (the pump station simulation step did not create it)")
         reg = _find_register(root)
+        cfg = _find_register_config(root)
         igp = os.path.join(out_dir, "selftest_pumps_import.gpkg")
         shutil.copyfile(src, igp)
 
@@ -270,22 +279,31 @@ def run(arcpy, msgs, root, out_dir=None, include_map=False, exe=None) -> dict:
 
         before = state_of()
         pc = CapturingMessages()
-        tools_impl.import_pump_station_data(arcpy, pc, igp, reg, None, True)
-        if state_of() != before:
-            raise RuntimeError("the preview changed the model")
-        res = tools_impl.import_pump_station_data(arcpy, pc, igp, reg, None, False)
+
+        def why():
+            keep = [t for _, t in pc.lines if "PS1" in t or "ERROR" in t or "not imported" in t]
+            return (f"; column map: {cfg}; workbook: {reg}; tool messages: "
+                    + (" | ".join(keep) if keep else "none"))
+
+        try:
+            tools_impl.import_pump_station_data(arcpy, pc, igp, reg, cfg, True)
+            if state_of() != before:
+                raise RuntimeError("the preview changed the model")
+            res = tools_impl.import_pump_station_data(arcpy, pc, igp, reg, cfg, False)
+        except Exception as e:
+            raise RuntimeError(f"{e}{why()}") from e
         text = "\n".join(t for _, t in pc.lines)
         st = next((x for x in (res or {}).get("stations", []) if x["ps_id"] == "PS1"), None)
         if st is None or st["status"] != "ok":
-            raise RuntimeError("PS1 was not imported: " + (text or "no messages"))
+            raise RuntimeError("PS1 was not imported" + why())
         (stop, start, ovf, area, rate), (inv, surf), n_curves = state_of()
         if not (abs(inv - 21.9) < 1e-6 and inv < before[1][0] and abs(surf - 25.5) < 1e-6
                 and abs(stop - 22.5) < 1e-6 and abs(start - 23.0) < 1e-6 and abs(ovf - 24.5) < 1e-6
                 and abs(area - 7.0) < 1e-6 and rate == 25.0):
             raise RuntimeError(f"unexpected values written: floor {inv}, ground {surf}, stop {stop}, start {start}, "
-                               f"overflow {ovf}, area {area}, rate {rate}")
+                               f"overflow {ovf}, area {area}, rate {rate}" + why())
         if not n_curves or "existing pump curve kept" not in text:
-            raise RuntimeError("the existing pump curve was not kept")
+            raise RuntimeError("the existing pump curve was not kept" + why())
         for lv, t in pc.lines:
             if "ERROR" in t:
                 c.warn(t)
