@@ -571,6 +571,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             clusters[k]["members"].append((si, e))
     jn, en = 0, 0
     singles: list = []               # lone sewer ends: (node id, segment index, end, point)
+    multis: list = []                # coincident-end clusters (>= 2 ends): (node id, members, centroid)
     for cl in clusters:
         pts = cl["pts"]
         c = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
@@ -578,6 +579,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             jn += 1
             nid, note = new_id(f"J{jn}"), "segment junction"
             rep.count("junction_nodes")
+            multis.append((nid, list(cl["members"]), c))
         else:
             en += 1
             nid, note = new_id(f"E{en}"), "dangling end"
@@ -607,7 +609,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     tee_ends: list = []              # (segment index, end) of branch ends joined at a tee (flow into the main)
     tee_nodes: set = set()
     tees: list = []
-    if tee_tol > 0 and singles:
+    leftover: list = []              # multi clusters whose IS / IO members stay behind: (J node id, [members])
+    if tee_tol > 0 and (singles or multis):
         sgrid = _SegGrid(10.0, tee_tol)
         cums: dict = {}
         for si, s in enumerate(segs):
@@ -616,22 +619,60 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 sgrid.add((si, k), a, b)
                 cum.append(cum[-1] + _dist(a, b))
             cums[si] = cum
-        for nid, si, e, pt in singles:
-            if stype_of(segs[si]["row"]) in ("is", "io") and segs[si]["ends"][1 - e] in ac_ids:
-                continue                 # IS / IO upstream end: free by design
-            best = None
+
+        def free_by_design(si, e):
+            return stype_of(segs[si]["row"]) in ("is", "io") and segs[si]["ends"][1 - e] in ac_ids
+
+        def find_tee(pt, skip):
+            """Nearest interior hit of a sewer not in `skip`: (distance, segment, chainage, point). A hit whose
+            projection lies next to the main's own end is the endpoint case, returned as the second value."""
+            best, near_end = None, None
             for (tj, k), a, b in sgrid.candidates(pt):
-                if tj == si:
+                if tj in skip:
                     continue
                 d, t, q = _project(pt, a, b)
-                if d > tee_tol or (best is not None and d >= best[0]):
+                if d > tee_tol:
                     continue
                 tl = segs[tj]["line"]
-                if _dist(q, tl[0]) <= tol or _dist(q, tl[-1]) <= tol:
-                    continue             # near the main's own end: an endpoint case
-                best = (d, tj, cums[tj][k] + t * _dist(a, b), q)
+                for ei, tp in ((0, tl[0]), (1, tl[-1])):
+                    if _dist(q, tp) <= tol:
+                        if near_end is None or d < near_end[0]:
+                            near_end = (d, tj, ei)
+                        break
+                else:
+                    if best is None or d < best[0]:
+                        best = (d, tj, cums[tj][k] + t * _dist(a, b), q)
+            return best, near_end
+
+        for nid, si, e, pt in singles:
+            if free_by_design(si, e):
+                continue                 # IS / IO upstream end: free by design
+            best, near_end = find_tee(pt, {si})
             if best is not None:
                 tees.append((si, e, nid, best[1], best[2], best[3], best[0]))
+            elif near_end is not None:
+                # beyond the snap tolerance of the main's end node, but its projection is next to that node:
+                # join the end to the node, as the endpoint case would
+                tn_id = segs[near_end[1]]["ends"][near_end[2]]
+                if tn_id is not None and tn_id != nid and tn_id in nodes and \
+                        nodes[tn_id].get("notes") != "dangling end":
+                    segs[si]["ends"][e] = tn_id
+                    del nodes[nid], node_pos[nid], node_ref[nid]
+                    rep.count("dangling_ends", -1)
+                    rep.warn("END_FAR_FROM_NODE", "conduit", segs[si]["pid"],
+                             f"end is {_fmt(_dist(pt, node_pos[tn_id]), 2)} m from node {tn_id} but lies on sewer "
+                             f"{segs[near_end[1]]['pid']} next to it; connected there")
+        # clusters of two or more ends: when the cluster point lies on the interior of a sewer that is not
+        # one of its members, the member ends are branches joined to that main (a junction fitting)
+        for nid, members, c in multis:
+            best, _ne = find_tee(c, {si for si, _e in members})
+            if best is None:
+                continue
+            att = [(si, e) for si, e in members if not free_by_design(si, e)]
+            for si, e in att:
+                tees.append((si, e, nid, best[1], best[2], best[3], best[0]))
+            if att and len(att) < len(members):
+                leftover.append((nid, [m for m in members if m not in att]))
     if tees:
         by_t: dict = {}
         for t in tees:
@@ -677,52 +718,30 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                              "ds_id": main["ds_id"], "ends": [chain[r], chain[r + 1]], "parent": tj, "part": r,
                              "full": main["full"]})
                 split_of[tj].append(len(segs) - 1)
+        keep_j = {nid for nid, _m in leftover}
         for si, e, old, tid in assign:
             idx = si if si not in split_of or e == 0 else split_of[si][-1]
             segs[idx]["ends"][e] = tid
             tee_ends.append((idx, e))
-            if old in nodes:
+            if old in nodes and old not in keep_j:
+                rep.count("dangling_ends" if nodes[old].get("notes") == "dangling end" else "junction_nodes", -1)
                 del nodes[old], node_pos[old], node_ref[old]
-                rep.count("dangling_ends", -1)
+        for nid, rest in leftover:       # IS / IO ends that stay: a junction if two or more, else dangling
+            if len(rest) >= 2:
+                continue
+            c = node_pos.pop(nid)
+            del nodes[nid], node_ref[nid]
+            rep.count("junction_nodes", -1)
+            en += 1
+            e_id = new_id(f"E{en}")
+            nodes[e_id] = _clean({"node_id": e_id, "geom": list(c), "node_type": "junction", "status": "existing",
+                                  "data_source": "gis", "notes": "dangling end"})
+            node_pos[e_id], node_ref[e_id] = c, None
+            rep.count("dangling_ends")
+            segs[rest[0][0]]["ends"][rest[0][1]] = e_id
+            singles.append((e_id, rest[0][0], rest[0][1], c))
         rep.count("tee_mains", len(by_t))
         rep.diagnostics.append(f"Tees: {len(tees)} branch end(s) joined mid-line to {len(by_t)} sewer(s).")
-    # Near misses: lone ends still dangling that lie within NEAR_MISS_M of another sewer's mid-line but
-    # beyond the tee tolerance (a joined-looking end that did not join). Reported only.
-    near_miss: list = []
-    still = [t for t in singles if t[0] in nodes]
-    if still:
-        ngrid = _SegGrid(10.0, NEAR_MISS_M)
-        for si, s in enumerate(segs):
-            for k, (a, b) in enumerate(zip(s["line"], s["line"][1:])):
-                ngrid.add((si, k), a, b)
-        for nid, si, e, pt in still:
-            if stype_of(segs[si]["row"]) in ("is", "io") and segs[si]["ends"][1 - e] in ac_ids:
-                continue                 # IS / IO upstream end: free by design
-            best = None
-            for (tj, k), a, b in ngrid.candidates(pt):
-                if segs[tj]["parent"] == segs[si]["parent"]:
-                    continue
-                d, _t, q = _project(pt, a, b)
-                if d > NEAR_MISS_M or (best is not None and d >= best[0]):
-                    continue
-                tl = segs[tj]["line"]
-                if _dist(q, tl[0]) <= tol or _dist(q, tl[-1]) <= tol:
-                    continue             # next to a chamber / node: the snap case, not a tee
-                best = (d, tj)
-            if best is not None:
-                near_miss.append((best[0], nid, segs[best[1]]["pid"]))
-    if near_miss:
-        near_miss.sort()
-        rep.count("possible_missed_tees", len(near_miss))
-        rep.diagnostics.append(
-            f"Possible missed tees: {len(near_miss)} lone sewer end(s) lie within {_fmt(NEAR_MISS_M, 1)} m of "
-            f"another sewer's mid-line but beyond the tee join distance ({_fmt(tee_tol, 2)} m).")
-        for d, nid, cid in near_miss[:20]:
-            rep.diagnostics.append(
-                f"  possible missed tee: {nid} {_fmt(d, 2)} m from {cid} - run Join Dangling Sewer Ends or "
-                "re-import with a larger tee join distance")
-        if len(near_miss) > 20:
-            rep.diagnostics.append(f"  ... {len(near_miss) - 20} more not listed.")
     parents: dict = {}
     for si, s in enumerate(segs):
         parents.setdefault(s["parent"], []).append(si)
@@ -1052,6 +1071,56 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             rep.warn("TEE_ADVERSE", "conduit", cid, f"ds invert {di:.3f} is below the main's interpolated invert "
                      f"{inv:.3f} at the tee ({nid}): data quality")
 
+    # Near misses: lone ends still dangling (and no-chamber clusters that only receive flow) that lie within
+    # NEAR_MISS_M of another sewer's mid-line but beyond the tee tolerance (a joined-looking end that did not
+    # join). Reported only. Runs after the direction rules, which decide which clusters are inflow-only.
+    cond_us = {c["us_node_id"] for c in conduits}
+    cond_ds = {c["ds_node_id"] for c in conduits}
+    inflow_only: list = []           # (node id, members, centroid) of J clusters nothing flows out of
+    for nid, members, c in multis:
+        if nid in nodes and node_ref.get(nid) is None and nid in cond_ds and nid not in cond_us:
+            inflow_only.append((nid, members, c))
+            nodes[nid]["notes"] = "segment junction; inflow only, no downstream sewer"
+            rep.count("dangling_ends")
+            rep.count("inflow_only_junctions")
+    near_miss: list = []
+    still = [(t[0], {t[1]}, t[3], t[1], t[2]) for t in singles if t[0] in nodes]
+    still += [(nid, {si for si, _e in m}, c, m[0][0], m[0][1]) for nid, m, c in inflow_only]
+    if still:
+        ngrid = _SegGrid(10.0, NEAR_MISS_M)
+        for si, s in enumerate(segs):
+            for k, (a, b) in enumerate(zip(s["line"], s["line"][1:])):
+                ngrid.add((si, k), a, b)
+        for nid, msegs, pt, si, e in still:
+            if len(msegs) == 1 and stype_of(segs[si]["row"]) in ("is", "io") and segs[si]["ends"][1 - e] in ac_ids:
+                continue                 # IS / IO upstream end: free by design
+            mparents = {segs[i]["parent"] for i in msegs}
+            best = None
+            for (tj, k), a, b in ngrid.candidates(pt):
+                if segs[tj]["parent"] in mparents:
+                    continue
+                d, _t, q = _project(pt, a, b)
+                if d > NEAR_MISS_M or (best is not None and d >= best[0]):
+                    continue
+                tl = segs[tj]["line"]
+                if _dist(q, tl[0]) <= tol or _dist(q, tl[-1]) <= tol:
+                    continue             # next to a chamber / node: the snap case, not a tee
+                best = (d, tj)
+            if best is not None:
+                near_miss.append((best[0], nid, segs[best[1]]["pid"]))
+    if near_miss:
+        near_miss.sort()
+        rep.count("possible_missed_tees", len(near_miss))
+        rep.diagnostics.append(
+            f"Possible missed tees: {len(near_miss)} lone sewer end(s) lie within {_fmt(NEAR_MISS_M, 1)} m of "
+            f"another sewer's mid-line but beyond the tee join distance ({_fmt(tee_tol, 2)} m).")
+        for d, nid, cid in near_miss[:20]:
+            rep.diagnostics.append(
+                f"  possible missed tee: {nid} {_fmt(d, 2)} m from {cid} - run Join Dangling Sewer Ends or "
+                "re-import with a larger tee join distance")
+        if len(near_miss) > 20:
+            rep.diagnostics.append(f"  ... {len(near_miss) - 20} more not listed.")
+
     if dn_unmapped:
         rep.count("dn_assumed", dn_unmapped)
         rep.warn("DN_NOT_MAPPED", "import", "", f"NO DIAMETER FIELD MAPPED: DN {opt.default_dn} ASSUMED for all "
@@ -1091,7 +1160,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             n["node_type"], n["notes"] = t
             rep.count("is_io_ends")
     dang = {nid for nid, n in nodes.items() if n.get("notes") in ("dangling end",) or
-            n.get("notes", "").startswith(("inspection shaft (IS", "inspection opening (IO"))}
+            n.get("notes", "").startswith(("inspection shaft (IS", "inspection opening (IO", "segment junction; inflow only"))}
     n_isio = n_dead = 0
     other: list = []
     for c in conduits:

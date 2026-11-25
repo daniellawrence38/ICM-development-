@@ -784,3 +784,172 @@ def test_possible_missed_tee_diagnostic():
     # 8 m away: not reported
     _m, rep = build_model(acs, [], [main, tseg("BR", [(40, 20), (40, 8.0)], None, None, 21.0, 20.5)])
     assert "possible_missed_tees" not in rep.counts
+
+
+# ---------------------------------------------------------------- several branch ends at one point on a main
+
+def _tee_main_world(extra_acs=(), main_line=((0, 0), (100, 0))):
+    acs = [ac("A", 0, 0, 25.0), ac("B", 100, 0, 25.0), ac("C", 40, 20, top=30.0), ac("D", 40, -20, top=30.0),
+           *extra_acs]
+    return acs, tseg("M", list(main_line), "A", "B", 20.0, 19.0, LENGTH=100.0)
+
+
+def _no_dangling(rep):
+    assert rep.counts.get("dangling_ends", 0) == 0 and rep.counts.get("dangling_other", 0) == 0
+    assert "DIRECTION_UNKNOWN" not in codes_of(rep)
+
+
+@pytest.mark.parametrize("rev1,rev2,rev_main", [(False, False, False), (True, False, False), (False, True, True),
+                                                (True, True, True)])
+def test_two_branches_opposite_sides_split_main(rev1, rev2, rev_main, tmp_path):
+    ml = [(100, 0), (0, 0)] if rev_main else [(0, 0), (100, 0)]
+    acs, main = _tee_main_world(main_line=ml)
+    l1, l2 = [(40, 20), (40, 0.2)], [(40, -20), (40, -0.2)]
+    sew = [main, tseg("B1", l1[::-1] if rev1 else l1, None, None, 21.0, 20.5, LENGTH=20.0),
+           tseg("B2", l2[::-1] if rev2 else l2, None, None, 21.0, 20.5, LENGTH=20.0)]
+    model, rep = build_model(acs, [], sew)
+    c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
+    assert sorted(c) == ["B1", "B2", "M", "M~2"] and sorted(n) == ["A", "B", "C", "D", "T1"]
+    assert c["M"]["us_node_id"] == "A" and c["M"]["ds_node_id"] == c["M~2"]["us_node_id"] == "T1"
+    assert c["M~2"]["ds_node_id"] == "B"
+    assert (c["B1"]["us_node_id"], c["B1"]["ds_node_id"]) == ("C", "T1")
+    assert (c["B2"]["us_node_id"], c["B2"]["ds_node_id"]) == ("D", "T1")
+    assert [c[k]["length_m"] for k in ("M", "M~2")] == pytest.approx([40, 60])
+    assert c["M"]["ds_invert"] == pytest.approx(19.6) and c["M~2"]["us_invert"] == pytest.approx(19.6)
+    assert (c["B1"]["us_invert"], c["B1"]["ds_invert"]) == (21.0, 20.5)      # branch inverts kept
+    assert n["T1"]["notes"].startswith("tee (mid-line junction)") and n["T1"]["invert_level"] == pytest.approx(19.6)
+    assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 2
+    assert rep.counts.get("junction_nodes", 0) == 0 and rep.counts["direction_tee"] == 2
+    assert codes_of(rep).count("TEE_JOINED") == 2 and "TEE_ADVERSE" not in codes_of(rep)
+    _no_dangling(rep)
+    assert any(x.startswith("Tees: 2 branch end(s) joined mid-line to 1 sewer(s)") for x in rep.summary_lines(0))
+    assert "0 segment junction(s)" in rep.summary_lines(0)[0]
+    _check_clean(model, tmp_path)
+
+
+def test_two_branches_same_side_and_three_branches():
+    acs, main = _tee_main_world()
+    sew = [main, tseg("B1", [(40, 20), (40, 0.2)], None, None, 21.0, 20.5),
+           tseg("B2", [(40.3, 20), (40.3, 0.2)], None, None, 21.0, 20.5)]
+    model, rep = build_model(acs, [], sew)
+    c = by_id(model["conduits"], "conduit_id")
+    assert sorted(c) == ["B1", "B2", "M", "M~2"] and c["B1"]["ds_node_id"] == c["B2"]["ds_node_id"] == "T1"
+    assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 2
+    _no_dangling(rep)
+    acs, main = _tee_main_world()
+    sew = [main, tseg("B1", [(40, 20), (40, 0.2)], None, None, 21.0, 20.5),
+           tseg("B2", [(40, -20), (40, -0.2)], None, None, 21.0, 20.5),
+           tseg("B3", [(40.3, 20), (40.3, 0.2)], None, None, 21.0, 20.5)]
+    model, rep = build_model(acs, [], sew)
+    c = by_id(model["conduits"], "conduit_id")
+    assert sorted(c) == ["B1", "B2", "B3", "M", "M~2"]
+    assert {c[k]["ds_node_id"] for k in ("B1", "B2", "B3")} == {"T1"}
+    assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 3 and rep.counts["conduits"] == 5
+    assert rep.counts["direction_tee"] == 3
+    _no_dangling(rep)
+
+
+def test_two_branches_on_segmented_main_tee_mid_segment():
+    acs, _ = _tee_main_world()
+    segs = [tseg("M1", [(0, 0), (30, 0)], "A", "B", 20.0, 19.7), tseg("M2", [(30, 0), (60, 0)], "A", "B", 19.7, 19.4),
+            tseg("M3", [(60, 0), (100, 0)], "A", "B", 19.4, 19.0)]
+    sew = segs + [tseg("B1", [(40, 20), (40, 0.2)], None, None, 21.0, 20.5),
+                  tseg("B2", [(40, -20), (40, -0.2)], None, None, 21.0, 20.5)]
+    model, rep = build_model(acs, [], sew)
+    c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
+    assert sorted(c) == ["B1", "B2", "M1", "M2", "M2~2", "M3"]
+    assert c["M2"]["ds_node_id"] == c["M2~2"]["us_node_id"] == "T1" and c["M2"]["us_node_id"] == "J1"
+    assert c["B1"]["ds_node_id"] == c["B2"]["ds_node_id"] == "T1"
+    assert c["M2"]["ds_invert"] == pytest.approx(19.6)              # 19.7 -> 19.4 over 30 m, 10 m in
+    assert n["T1"]["geom"] == [40.0, 0.0] and "J1" in n and "J2" in n
+    assert rep.counts["tee_junctions"] == 1 and rep.counts["junction_nodes"] == 2
+    _no_dangling(rep)
+
+
+def test_segment_joint_with_third_branch_end_stays_a_junction():
+    acs = [ac("A", 0, 0, 25.0), ac("B", 100, 0, 25.0), ac("C", 30, 20, top=30.0)]
+    segs = [tseg("M1", [(0, 0), (30, 0)], "A", "B", 20.0, 19.7), tseg("M2", [(30, 0), (100, 0)], "A", "B", 19.7, 19.0),
+            tseg("BR", [(30.2, 20), (30.2, 0.3)], "C", None, 21.0, 20.5)]
+    model, rep = build_model(acs, [], segs)
+    c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
+    assert sorted(c) == ["BR", "M1", "M2"] and sorted(n) == ["A", "B", "C", "J1"]
+    assert c["M1"]["ds_node_id"] == c["M2"]["us_node_id"] == c["BR"]["ds_node_id"] == "J1"
+    assert rep.counts["junction_nodes"] == 1 and rep.counts.get("tee_junctions", 0) == 0
+    assert rep.counts.get("dangling_ends", 0) == 0 and "inflow_only_junctions" not in rep.counts
+    # a plain two-segment joint too
+    model, rep = build_model(acs, [], segs[:2])
+    assert rep.counts["junction_nodes"] == 1 and rep.counts.get("tee_junctions", 0) == 0
+
+
+def test_two_ends_of_a_run_meeting_on_a_main_are_joined_to_it(tmp_path):
+    """Decision: a cluster on another sewer's interior is a junction fitting whatever its members are; two
+    segments of a branch run that meet on a main are both joined to it (a crossing without a connection
+    cannot be told from two branches by geometry)."""
+    acs, main = _tee_main_world()
+    sew = [main, tseg("R1", [(40, 20), (40, 0.1)], "C", None, 21.0, 20.5),
+           tseg("R2", [(40, -0.1), (40, -20)], None, "D", 20.5, 21.0)]
+    model, rep = build_model(acs, [], sew)
+    c = by_id(model["conduits"], "conduit_id")
+    assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 2
+    assert c["R1"]["ds_node_id"] == "T1" and "T1" in {c["R2"]["us_node_id"], c["R2"]["ds_node_id"]}
+    assert "M~2" in c
+
+
+def test_is_sewer_member_of_cluster_stays_free_while_branch_joins_main():
+    acs, main = _tee_main_world()
+    # IS1 runs from chamber D to the cluster point: its end there is the free upstream end by design
+    is_sew = tseg("IS1", [(40, -20), (40, -0.2)], None, None, 20.5, 20.0, MAINTYPE="E- inspection shaft")
+    sew = [main, tseg("B1", [(40, 20), (40, 0.2)], None, None, 21.0, 20.5), is_sew]
+    model, rep = build_model(acs, [], sew)
+    c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
+    assert c["B1"]["ds_node_id"] == "T1" and rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 1
+    assert c["IS1"]["ds_node_id"] == "D"
+    us = n[c["IS1"]["us_node_id"]]
+    assert us["node_type"] == "is_end" and us["node_id"] not in ("T1", "J1")
+    assert rep.counts["dangling_is_io"] == 1 and rep.counts.get("junction_nodes", 0) == 0
+    assert rep.counts["dangling_ends"] == 1 and rep.counts["dangling_other"] == 0
+
+
+def test_end_beside_main_end_node_beyond_snap_joins_that_node():
+    acs = [ac("A", 0, 0, 25.0), ac("B", 100, 0, 25.0), ac("C", 0.45, 20, top=30.0)]
+    main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0)
+    # end 0.54 m from chamber A (> snap 0.5) but only 0.3 m off the main, projecting 0.45 m from A
+    sew = [main, tseg("BR", [(0.45, 20), (0.45, 0.3)], "C", None, 21.0, 20.5)]
+    model, rep = build_model(acs, [], sew)
+    c = by_id(model["conduits"], "conduit_id")
+    assert sorted(c) == ["BR", "M"] and c["BR"]["ds_node_id"] == "A" and c["BR"]["us_node_id"] == "C"
+    assert rep.counts.get("dangling_ends", 0) == 0 and rep.counts.get("tee_junctions", 0) == 0
+    assert "END_FAR_FROM_NODE" in codes_of(rep) and len(model["nodes"]) == 3
+    # a lone end near the main's end node but beyond the tee tolerance stays dangling
+    sew = [main, tseg("BR", [(0.45, 20), (0.45, 0.8)], "C", None, 21.0, 20.5)]
+    _m, rep = build_model(acs, [], sew)
+    assert rep.counts["dangling_ends"] == 1 and "END_FAR_FROM_NODE" not in codes_of(rep)
+
+
+def test_inflow_only_cluster_is_reported_as_dangling_and_possible_missed_tee():
+    acs = [ac("A", 0, 0, 25.0), ac("B", 100, 0, 25.0), ac("C", 40, 20, top=30.0), ac("D", 40, 30, top=30.0)]
+    main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0)
+    # two sewers end together 2.0 m from the main (> tee 0.5, < 5 m): nothing flows out
+    sew = [main, tseg("B1", [(40, 20), (40.2, 2.0)], "C", None, 21.0, 20.5),
+           tseg("B2", [(39.8, 2.0), (40, 30)], None, "D", 20.5, 21.0)]
+    sew[2] = tseg("B2", [(40, 30), (39.8, 2.0)], "D", None, 21.0, 20.5)
+    model, rep = build_model(acs, [], sew)
+    c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
+    assert rep.counts.get("tee_junctions", 0) == 0 and rep.counts["junction_nodes"] == 1
+    j = n[c["B1"]["ds_node_id"]]
+    assert j["notes"].startswith("segment junction; inflow only") and j["node_id"] == "J1"
+    assert rep.counts["dangling_ends"] == 1 and rep.counts["dangling_other"] == 2    # one per inflow-only sewer
+    assert codes_of(rep).count("DANGLING_END") == 2
+    lines = rep.summary_lines(0)
+    assert "1 dangling end(s)" in lines[0]
+    assert rep.counts["possible_missed_tees"] == 1
+    assert any("possible missed tee: J1 2 m from M" in x for x in lines), lines
+
+
+def test_inflow_only_junction_far_from_any_main_is_dangling_without_missed_tee():
+    acs = [ac("C", 40, 20, top=30.0), ac("D", 40, 60, top=30.0)]
+    sew = [tseg("B1", [(40, 20), (40, 39.9)], "C", None, 21.0, 20.5),
+           tseg("B2", [(40, 60), (40, 40.1)], "D", None, 21.0, 20.5)]
+    _m, rep = build_model(acs, [], sew)
+    assert rep.counts["dangling_ends"] == 1 and rep.counts["dangling_other"] == 2
+    assert "1 dangling end(s)" in rep.summary_lines(0)[0] and "possible_missed_tees" not in rep.counts
