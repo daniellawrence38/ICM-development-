@@ -11,6 +11,7 @@ Output: ``(model_dict, ImportReport)``. ``model_dict`` is the JSON form accepted
 from __future__ import annotations
 
 import datetime as _dt
+import itertools
 import json
 import math
 import re
@@ -609,6 +610,9 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     tee_ends: list = []              # (segment index, end) of branch ends joined at a tee (flow into the main)
     tee_nodes: set = set()
     tees: list = []
+    cross_cand: dict = {}            # J node id -> (main pid, pids of a possible pass-through pair)
+    tee_cross: dict = {}             # tee node id -> (J node id, main pid, pair pids) for the invert plausibility check
+    tee_end_inv: dict = {}           # tee node -> [(pid, invert at the tee)] of unsplit conduits touching it
     leftover: list = []              # multi clusters whose IS / IO members stay behind: (J node id, [members])
     if tee_tol > 0 and (singles or multis):
         sgrid = _SegGrid(10.0, tee_tol)
@@ -669,6 +673,23 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             if best is None:
                 continue
             att = [(si, e) for si, e in members if not free_by_design(si, e)]
+            # a run split where it crosses the main: the end of one segment and the start of the next segment
+            # of the same run (same non-blank us / ds manhole ids) are a continuing run, not two branches
+            through: set = set()
+            for (si, e), (sj, f) in itertools.combinations(att, 2):
+                a_, b_ = segs[si], segs[sj]
+                if si != sj and e != f and a_["us_id"] and a_["ds_id"] and \
+                        (a_["us_id"], a_["ds_id"]) == (b_["us_id"], b_["ds_id"]) \
+                        and (si, e) not in through and (sj, f) not in through:
+                    through.update({(si, e), (sj, f)})
+            # blank / differing ids: a pair of opposite ends is a possible crossing, checked on the inverts later
+            pair_pids: set = set()
+            for (si, e), (sj, f) in itertools.combinations([m for m in att if m not in through], 2):
+                if si != sj and e != f:
+                    pair_pids.update({segs[si]["pid"], segs[sj]["pid"]})
+            att = [m for m in att if m not in through]
+            if pair_pids and att:
+                cross_cand[nid] = (segs[best[1]]["pid"], pair_pids)
             for si, e in att:
                 tees.append((si, e, nid, best[1], best[2], best[3], best[0]))
             if att and len(att) < len(members):
@@ -702,6 +723,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 tids.append(tid)
                 rep.count("tee_junctions")
                 for t in g:
+                    if t[2] in cross_cand:
+                        tee_cross[tid] = (t[2],) + cross_cand[t[2]]
                     assign.append((t[0], t[1], t[2], tid))
                     rep.count("tee_branch_ends")
                     rep.warn("TEE_JOINED", "conduit", segs[t[0]]["pid"], f"end joined mid-line to sewer "
@@ -1048,6 +1071,10 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 cond_ids.add(cid)
             piece_cids.append(cid)
             pus, pds = nchain[j], nchain[j + 1]
+            if len(pieces) == 1:
+                for tn_, iv_ in ((pus, pui), (pds, pdi)):
+                    if tn_ in tee_nodes and iv_ is not None:
+                        tee_end_inv.setdefault(tn_, []).append((pid, iv_))
             if pui is not None:
                 outgoing.setdefault(pus, []).append(pui)
             if pdi is not None:
@@ -1120,6 +1147,16 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 "re-import with a larger tee join distance")
         if len(near_miss) > 20:
             rep.diagnostics.append(f"  ... {len(near_miss) - 20} more not listed.")
+
+    for tid, (jn_id, mpid, pids) in tee_cross.items():
+        mi = tee_inv.get(tid)
+        far = [(p, v) for p, v in tee_end_inv.get(tid, ()) if p in pids and mi is not None and abs(v - mi) > 1.0]
+        if far:
+            rep.count("possible_crossing_tees")
+            rep.diagnostics.append(
+                f"possible crossing joined as a tee: {jn_id} on {mpid} (now {tid}): "
+                + ", ".join(f"{p} invert {v:.2f}" for p, v in far)
+                + f" vs main {mi:.2f} at the point; check whether these sewers cross the main without connecting")
 
     if dn_unmapped:
         rep.count("dn_assumed", dn_unmapped)

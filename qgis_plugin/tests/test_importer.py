@@ -953,3 +953,48 @@ def test_inflow_only_junction_far_from_any_main_is_dangling_without_missed_tee()
     _m, rep = build_model(acs, [], sew)
     assert rep.counts["dangling_ends"] == 1 and rep.counts["dangling_other"] == 2
     assert "1 dangling end(s)" in rep.summary_lines(0)[0] and "possible_missed_tees" not in rep.counts
+
+
+# ---------------------------------------------------------------- a run split where it crosses a main
+
+def _crossing_world(us1, ds1, us2, ds2, inv_hi=21.0, inv_lo=20.5):
+    acs, main = _tee_main_world()
+    sew = [main, tseg("R1", [(40, 20), (40, 0.1)], us1, ds1, inv_hi, inv_hi - 0.25),
+           tseg("R2", [(40, -0.1), (40, -20)], us2, ds2, inv_hi - 0.25, inv_lo - 0.5)]
+    return acs, sew
+
+
+def test_run_split_at_crossing_with_same_ids_stays_a_continuing_junction():
+    acs, sew = _crossing_world("C", "D", "C", "D")
+    model, rep = build_model(acs, [], sew)
+    c, n = by_id(model["conduits"], "conduit_id"), by_id(model["nodes"], "node_id")
+    assert sorted(c) == ["M", "R1", "R2"] and "M~2" not in c
+    assert rep.counts.get("tee_junctions", 0) == 0 and rep.counts["junction_nodes"] == 1
+    assert c["R1"]["us_node_id"] == "C" and c["R1"]["ds_node_id"] == c["R2"]["us_node_id"] == "J1"
+    assert c["R2"]["ds_node_id"] == "D" and (c["M"]["us_node_id"], c["M"]["ds_node_id"]) == ("A", "B")
+    assert "possible_crossing_tees" not in rep.counts and rep.counts.get("dangling_ends", 0) == 0
+
+
+def test_blank_ids_crossing_far_from_main_invert_is_tee_with_diagnostic():
+    acs, sew = _crossing_world(None, None, None, None, inv_hi=23.0, inv_lo=22.5)    # main invert ~19.6 at 40 m
+    model, rep = build_model(acs, [], sew)
+    assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 2
+    assert rep.counts["possible_crossing_tees"] == 1
+    assert any(x.startswith("possible crossing joined as a tee: J1 on M") for x in rep.diagnostics), rep.diagnostics
+    # inverts near the main's: a junction fitting, no diagnostic
+    acs, sew = _crossing_world(None, None, None, None, inv_hi=20.1, inv_lo=19.6)
+    _m, rep = build_model(acs, [], sew)
+    assert rep.counts["tee_junctions"] == 1 and "possible_crossing_tees" not in rep.counts
+
+
+def test_pass_through_pair_stays_junction_while_genuine_branch_tees():
+    acs, sew = _crossing_world("C", "D", "C", "D")
+    acs.append(ac("E", 40.2, 25, top=30.0))
+    sew.append(tseg("BR", [(40.2, 25), (40.2, 0.2)], "E", None, 21.0, 20.5))
+    model, rep = build_model(acs, [], sew)
+    c = by_id(model["conduits"], "conduit_id")
+    assert sorted(c) == ["BR", "M", "M~2", "R1", "R2"]
+    assert c["BR"]["ds_node_id"] == "T1" and c["M"]["ds_node_id"] == "T1"
+    assert c["R1"]["ds_node_id"] == c["R2"]["us_node_id"] == "J1" and "T1" not in (c["R1"]["ds_node_id"],)
+    assert rep.counts["tee_junctions"] == 1 and rep.counts["tee_branch_ends"] == 1
+    assert rep.counts["junction_nodes"] == 1

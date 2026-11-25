@@ -298,8 +298,27 @@ column C of every sheet (SAP sub-locations `S0037310-...` also match). Layout fr
 - Self Test step "import pump station data (demo register)" (`examples/demo/pump_register_demo.xlsx`, shipped as
   `templates/demo/`, generator `tests/make_pump_register_demo.py`).
 
-Commits: 0927ae3 xlsx reader; 1a3529b core; b65778b text values; 18c0288 WIP + the completing commit. Tests: toolbox
+Commits: 0927ae3 xlsx reader; 1a3529b core; b65778b text values; 18c0288 WIP, 25a28db tool; 39604b5 stop = Q;
+3ae03e0 Self Test own demo column map; 9b8c0af WIP + the tee commit. Tests: toolbox
 266, plugin 103 + 1 skipped (needs `anthropic`), pyflakes clean. Toolbox now 22 tools. Python only since 38f46e2.
+
+### Tees: branch ends meeting a main at one point (Import Sewer Data fix)
+
+User report from ICM: "not connected to outfall" where sewers join others without a manhole; "the tool inserts a
+break node but doesn't break the conduit". Root cause (`importer.py` step 3): two or more branch ends meeting at
+one point on a main formed a multi-end cluster = "segment junction" J<n>; only LONE ends were tested against other
+sewers' interiors, so the main stayed whole and J had only inflows (silent in WWNet; Export To ICM wrote J as a
+dangling Break). Fixed: multi-end clusters are tee-tested too (main split, inverts interpolated by chainage, all
+branch ends on the tee node); inflow-only no-chamber J clusters now count as dangling ends and get the possible
+missed tee check; a lone end next to a main's own end node (beyond snap, projection within tol of the node) joins
+that node (END_FAR_FROM_NODE). Crossing guard: two pieces of one run (opposite ends, same non-blank US/DS manhole
+ids) meeting on a main stay a J junction (not teed); with blank ids they tee but "possible crossing joined as a
+tee" is reported when their inverts differ from the main's by > 1 m. Single tees, segmented mains, IS tees and
+Join Dangling Sewer Ends were already correct (Join Dangling Sewer Ends also fixes the paired case on existing
+models). Tests: qgis 118 + 1 skipped, toolbox 270. **The user must re-import (Import Sewer Data) to get the fix on
+an existing model, then re-run Import Pressure Data and Import Pump Station Data** (rebuild loses pump data), or
+run Join Dangling Sewer Ends (preview off) on the existing model. Also still open: "unconnected to outfall" caused
+by mains outside the selection (expected; select the whole catchment down to the outlet).
 
 ### Where we stopped (next session starts here)
 
