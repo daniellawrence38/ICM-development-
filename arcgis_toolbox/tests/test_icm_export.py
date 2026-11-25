@@ -504,3 +504,38 @@ def test_node_without_geometry_has_blank_csv_xy(fake_arcpy, demo_gpkg, tmp_path)
     with open(r["nodes_csv"], newline="") as fh:
         n5 = next(x for x in csv.DictReader(fh) if x["node_id"] == "N05")
     assert n5["x"] == n5["y"] == ""
+
+
+def test_export_icm_long_notes_fit_the_gdb_field(fake_arcpy, demo_gpkg, tmp_path):
+    """A merged run lists its segments in notes (user's EdenHill model: 'Field length exceeded. Field: notes');
+    text longer than the gdb field is cut to fit, the CSV keeps all of it."""
+    long_notes = "BEECHBORO RD/CHEDWORTH WY DIVERSION; segments: " + ", ".join(str(51829000 + i) for i in range(400))
+    con = sqlite3.connect(demo_gpkg)
+    con.execute("UPDATE wwn_conduits SET notes=? WHERE conduit_id='P01'", (long_notes,))
+    con.execute("UPDATE wwn_nodes SET notes=? WHERE node_id='N01'", (long_notes,))
+    con.commit()
+    con.close()
+    assert len(long_notes) > icm_export.NOTES_LENGTH
+    a = fake_arcpy([])
+    out = tmp_path / "icm"
+    r = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(out))
+    gdb = str(out / "demo_ICM.gdb")
+    for table, key, val in (("ICM_Conduits", "wwn_conduit_id", "P01"), ("ICM_Nodes", "node_id", "N01")):
+        fc = a.memory[os.path.join(gdb, table)]
+        assert fc["lengths"]["notes"] == icm_export.NOTES_LENGTH
+        row = next(x for x in fc["rows"] if x[key] == val)
+        assert len(row["notes"]) == icm_export.NOTES_LENGTH and row["notes"].endswith(" ...")
+    with open(r["conduits_csv"], newline="") as fh:
+        assert next(x for x in csv.DictReader(fh) if x["wwn_conduit_id"] == "P01")["notes"] == long_notes
+
+
+def test_fake_arcpy_rejects_text_longer_than_the_field(fake_arcpy, tmp_path):
+    a = fake_arcpy([])
+    a.management.CreateFileGDB(str(tmp_path), "t.gdb")
+    gdb = os.path.join(str(tmp_path), "t.gdb")
+    a.management.CreateFeatureclass(gdb, "T", "POINT")
+    fc = os.path.join(gdb, "T")
+    a.management.AddFields(fc, [["notes", "TEXT", "", 10]])
+    with pytest.raises(RuntimeError, match="Field length exceeded"):
+        with a.da.InsertCursor(fc, ["notes", "SHAPE@"]) as ins:
+            ins.insertRow(["x" * 11, None])

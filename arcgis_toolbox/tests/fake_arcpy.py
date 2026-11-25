@@ -326,6 +326,11 @@ def make_fake(layers=None, map_name="Map"):
 
         def insertRow(self, row):
             if self.path in a.memory:
+                lengths = a.memory[self.path].get("lengths", {})
+                for f, v in zip(self.fields, row):     # like Pro: text longer than the field fails the insert
+                    if isinstance(v, str) and f in lengths and len(v) > lengths[f]:
+                        raise RuntimeError(f"The row contains a bad value. [Field length exceeded. Field: {f}. "
+                                           f"Value: {v[:60]}]")
                 a.memory[self.path]["rows"].append(dict(zip(self.fields, row)))
             else:
                 a.inserted.append(row)
@@ -387,6 +392,9 @@ def make_fake(layers=None, map_name="Map"):
                     low in [f.lower() for f, _ in a.memory[table]["fields"]]:
                 raise RuntimeError(f"ERROR 000012: {name} already exists  Failed to execute (AddField)")
             a.memory[table]["fields"].append((name, ftype))
+            if (ftype or "").upper() == "TEXT":       # Pro's default text length is 255
+                ln = kw.get("field_length") or (args[2] if len(args) > 2 and args[2] not in ("", None) else 255)
+                a.memory[table].setdefault("lengths", {})[name] = int(ln)
         else:
             a.added.append(("field", name))
 
@@ -394,8 +402,9 @@ def make_fake(layers=None, map_name="Map"):
 
     def add_fields(table, desc, *args, **kw):
         a.addfields_calls += 1
-        for ent in desc:
-            add_field(table, ent[0], ent[1])
+        for ent in desc:     # [name, type, alias, length, ...] like Pro's AddFields
+            ln = ent[3] if len(ent) > 3 and ent[3] not in ("", None) else None
+            add_field(table, ent[0], ent[1], **({"field_length": ln} if ln else {}))
 
     a.dem_fn = lambda x, y: "NoData"
     a.cell_calls = []

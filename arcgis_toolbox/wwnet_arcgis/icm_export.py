@@ -717,6 +717,26 @@ def link_geometry_fn(arcpy, sr, geo: dict, node_xy: dict):
     return fn
 
 
+NOTES_LENGTH = 2000          # gdb text field length of "notes" (merged runs list their segments)
+TEXT_LENGTH = 254            # every other text field (ids, codes, sources)
+
+
+def text_length(name: str) -> int:
+    return NOTES_LENGTH if name == "notes" else TEXT_LENGTH
+
+
+def _values(row: dict, fields: list) -> list:
+    """Row values in field order; text longer than its gdb field is cut to fit (ending " ...") instead of
+    failing the insert (Pro: "Field length exceeded"). The CSV files keep the full text."""
+    out = []
+    for f, typ in fields:
+        v = row.get(f)
+        if typ == "TEXT" and isinstance(v, str) and len(v) > text_length(f):
+            v = v[:text_length(f) - 4] + " ..."
+        out.append(v)
+    return out
+
+
 def write_gdb(arcpy, gdb: str, table: str, geom_type: str, fields: list, rows: list, key: str,
               src_ds: str | None, src_key: str | None, sr, timings: dict | None = None, extra_geom=None) -> dict:
     """Create <gdb>\\<table> (replacing it) and fill it with `rows`, taking geometry from `src_ds`
@@ -738,7 +758,7 @@ def write_gdb(arcpy, gdb: str, table: str, geom_type: str, fields: list, rows: l
     t0 = pc()
     arcpy.management.CreateFeatureclass(gdb, table, geom_type, spatial_reference=sr)
     tm["create"] = pc() - t0
-    desc = [[name, typ, "", (255 if name == "notes" else 64) if typ == "TEXT" else ""] for name, typ in fields]
+    desc = [[name, typ, "", text_length(name) if typ == "TEXT" else ""] for name, typ in fields]
     t0 = pc()
     try:
         add_fields = arcpy.management.AddFields
@@ -749,7 +769,7 @@ def write_gdb(arcpy, gdb: str, table: str, geom_type: str, fields: list, rows: l
     else:
         for name, typ in fields:
             if typ == "TEXT":
-                arcpy.management.AddField(fc, name, "TEXT", field_length=255 if name == "notes" else 64)
+                arcpy.management.AddField(fc, name, "TEXT", field_length=text_length(name))
             else:
                 arcpy.management.AddField(fc, name, typ)
     tm["fields"] = pc() - t0
@@ -766,13 +786,13 @@ def write_gdb(arcpy, gdb: str, table: str, geom_type: str, fields: list, rows: l
                     r = by_id.get(rec[0])
                     if r is None:
                         continue
-                    ins.insertRow([r.get(f) for f, _ in fields] + [rec[1]])
+                    ins.insertRow(_values(r, fields) + [rec[1]])
                     p = _xy(rec[2]) if geom_type == "POINT" else None
                     if p is not None:
                         xy[rec[0]] = p
         for r in extras:
             g = extra_geom(r, xy) if extra_geom is not None else None
-            ins.insertRow([r.get(f) for f, _ in fields] + [g])
+            ins.insertRow(_values(r, fields) + [g])
             p = _first_xy(g) if geom_type == "POINT" else None
             if p is not None:
                 xy[r[key]] = p
