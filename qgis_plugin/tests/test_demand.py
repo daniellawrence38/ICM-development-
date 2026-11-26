@@ -60,6 +60,9 @@ def test_parse_rcode():
     assert dm.parse_rcode("r 17.5") == (17.5, "")
     assert dm.parse_rcode("R20/40") == (20.0, "dual")
     assert dm.parse_rcode("R20/R60") == (20.0, "dual")
+    assert dm.parse_rcode("R20/40", split="higher") == (40.0, "dual")
+    assert dm.parse_rcode("R40/20", split="lower") == (20.0, "dual")      # order does not matter
+    assert dm.parse_rcode("R30", split="higher") == (30.0, "")
     assert dm.parse_rcode("R-AC3") == (None, "unknown")
     assert dm.parse_rcode("R-AC3", {"RAC3": "R80"}) == (80.0, "")
 
@@ -199,7 +202,7 @@ def test_calculate_classes_rcodes_and_flags(rules):
     assert sum(s["net_area_ha"] for s in res.subcatchments if s["subcatchment_id"].endswith("-IND")) \
         == pytest.approx(1.0, abs=1e-4)
     text = "\n".join(res.lines)
-    for word in ("Zones: 11 polygon(s)", "'Airfield Odd'", "dual coded", "outside every R-Codes polygon",
+    for word in ("Zones: 11 polygon(s)", "'Airfield Odd'", "split coded (lower code used)", "outside every R-Codes polygon",
                  "Existing ADWF", "0.25 ha in 1 polygon(s) outside the model area", "150-300 m from a model sewer",
                  "  industrial by zone (area loaded): 'Light Industry' 1.00 ha",
                  "  zero by zone (area read): 'Local Road' 0.10 ha", "R-Codes layer values (2 polygon(s)): "):
@@ -248,3 +251,17 @@ def test_template_is_found_and_listed_classes_are_valid():
     assert cfg["rules"] and all(len(r) == 2 for r in cfg["rules"])
     assert {r[1] for r in cfg["rules"]} <= set(dm.CLASSES)
     assert math.isclose(dm.Options().max_distance_m, 150.0)
+
+
+def test_split_code_lower_or_higher(rules):
+    zones = [{"id": 1, "zone": "Residential", "rings": [cw(0, 0, 100, 100)]}]
+    rc = [{"id": "a", "rcode": "R20/40", "rings": [cw(-5, -5, 105, 105)]}]
+    lo = dm.calculate(zones, rc, sewers(), rules)
+    hi = dm.calculate(zones, rc, sewers(), rules, dm.Options(split_code="higher"))
+    assert {s["rcode"] for s in lo.subcatchments} == {"R20"} and {s["rcode"] for s in hi.subcatchments} == {"R40"}
+    assert hi.totals["adwf_total_lps"] == pytest.approx(1.0 * 120 * 180 / 86400)
+    assert "split coded (higher code used)" in "\n".join(hi.lines)
+    assert all("(higher split code)" in s["notes"] for s in hi.subcatchments)
+    assert hi.polygons[0]["rcode_source"] == "R20/40" and hi.polygons[0]["ds50_rcode"] == "R40"
+    with pytest.raises(ValueError, match="split_code"):
+        dm.calculate(zones, rc, sewers(), rules, dm.Options(split_code="middle"))

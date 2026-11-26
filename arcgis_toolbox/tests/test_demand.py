@@ -234,12 +234,15 @@ def test_tool_parameters_update_and_execute(pyt, world):
     assert t.label == "Calculate Existing Demand" and t.category == "Data"
     ps = t.getParameterInfo()
     p = {x.name: x for x in ps}
-    assert list(p) == ["gpkg", "zones_layer", "zone_field", "rcodes_layer", "rcode_field", "use_selected", "preview",
+    assert list(p) == ["gpkg", "zones_layer", "zone_field", "rcodes_layer", "rcode_field", "split_code",
+                       "use_selected", "preview",
                        "add_to_map", "max_distance", "ground", "region", "replace_cp", "config", "out_gpkg"]
     assert p["zone_field"].parameterDependencies == ["zones_layer"]
     assert p["rcode_field"].parameterDependencies == ["rcodes_layer"]
     assert p["max_distance"].value == 150.0 and p["replace_cp"].value is True and p["preview"].value is False
     assert p["ground"].filter.list == list(pyt.DEMAND_GROUND) and p["region"].filter.list == list(pyt.DEMAND_REGION)
+    assert p["split_code"].filter.list == list(pyt.DEMAND_SPLIT) and p["split_code"].value.startswith("Lower")
+    assert list(pyt.DEMAND_SPLIT.values()) == ["lower", "higher"]
     for word in ("DPLH-071", "DPLH-070", "DS 50", "R15", "LU-<node>-<class>"):
         assert word in t.description
     p["gpkg"].value = gp
@@ -247,6 +250,11 @@ def test_tool_parameters_update_and_execute(pyt, world):
     t.updateParameters(ps)
     assert p["zone_field"].value == "ZONE" and p["rcode_field"].value == "R_CODE_NO"
     p["add_to_map"].value = False
+    p["split_code"].value = list(pyt.DEMAND_SPLIT)[1]
     t.execute(ps, None)
     assert p["out_gpkg"].value == gp
     assert q(gp, "SELECT count(*) FROM wwn_subcatchments WHERE subcatchment_id LIKE 'LU-%'")[0][0] > 0
+    # higher split code: R20/40 -> R40 (lower gives R20, see test_writes_subcatchments_review_layer_and_issues)
+    codes = {r[0] for r in q(gp, "SELECT rcode FROM wwn_subcatchments WHERE subcatchment_id LIKE 'LU-%' "
+                                 "AND land_use='residential'")}
+    assert "R40" in codes and "R20" not in codes

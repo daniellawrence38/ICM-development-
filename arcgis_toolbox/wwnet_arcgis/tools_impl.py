@@ -404,7 +404,7 @@ def calculate_existing_demand(arcpy, msgs: Messages, gpkg_path: str, zones_layer
                               rcodes_layer=None, rcode_field: str | None = None, use_selected: bool = True,
                               max_distance: float | None = 150.0, ground: str = "dry", region: str = "auto",
                               replace_cp_loads: bool = True, config: str | None = None, preview: bool = False,
-                              add_to_map: bool = True):
+                              add_to_map: bool = True, split_code: str = "lower"):
     """Existing dry weather demand from Local Planning Scheme zones (DPLH-071) and R-Codes (DPLH-070): DS 50
     loading per node as wwn_subcatchments LU-* rows + the review layer wwn_land_use (see demand_import).
     Returns the demand.Result, or None after an "ERROR:" warning (bad template / locked GeoPackage)."""
@@ -425,7 +425,8 @@ def calculate_existing_demand(arcpy, msgs: Messages, gpkg_path: str, zones_layer
         return None
     opts = dm.Options(max_distance_m=float(max_distance if max_distance is not None else 150.0),
                       ground=GROUND.get(str(ground or "dry").lower(), "dry"),
-                      region=REGIONS.get(str(region or "auto").lower()))
+                      region=REGIONS.get(str(region or "auto").lower()),
+                      split_code="higher" if str(split_code or "lower").lower() == "higher" else "lower")
     if preview:
         msgs.info("PREVIEW — nothing written.")
     sewers = di.read_sewers(gpkg_path)

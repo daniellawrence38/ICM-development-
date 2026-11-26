@@ -316,7 +316,8 @@ at nodes, so per-node loading gives the same pipe flows with no extra model obje
    rural residential, utilities, unzoned, blank zone). A zone matching no rule is flagged `ZONE_UNMATCHED` and
    loaded as residential **R15**; the messages list those zone names with their area.
 2. Residential polygons take the code of the **R-Codes polygon (DPLH-070)** they fall in, point by point (a block
-   across two codes is split): dual codes (R20/40) use the base code; no code or below R15 -> R15 (DS 50 4.2.1(c));
+   across two codes is split): split codes (R20/40) use the **lower** code (as built, default) or the **higher** code
+   (as permitted; tool parameter); no code or below R15 -> R15 (DS 50 4.2.1(c));
    codes between table rows -> the next higher row; R-AC and other text codes -> R15 unless mapped in
    `[rcode_aliases]`.
 3. DS 50 Tables 4.1 / 4.2 (persons per net ha x L/person/day) and 4.3 (L/net ha/day), dry or wet ground, south or

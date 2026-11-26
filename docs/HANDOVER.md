@@ -464,6 +464,18 @@ OUTSIDE_MODEL (counted, no issue); R-code notes on the loaded area only and spli
 polygon vs blank code; R-Codes field values listed; per-class zone name breakdown (area loaded); "no connection
 point loads" line. Shared core 187 + 1 skipped, toolbox 309.
 
+### Second run and split coding (2026-11-26)
+
+Second preview (EdenHillv8): commercial = 'Special use' 250.7 ha loaded (~27 L/s of 32.6), 'Public purposes' 23,
+'Education' 6.9, 'General commercial' 6.7 ...; residential 'Residential' 615, 'Residential development' 342,
+'Medium and high density residential' 225 ha; 340 ha residential outside every R-Codes polygon (~= the 'Residential
+development' area: structure plan codes not in DPLH-070 -> R15). R-Codes values: R20 219, R20/40 150, R40 143,
+R20/35 126, R20/50 115 ... (field `rcode_no`). 36 near misses (64 ha), 311 outside (643 ha). 28.7 s.
+User (2026-11-26): "Add a field for the split zoning, to select higher or lower density" -> tool parameter
+*Split-coded R-codes* (lower = as built, default; higher = as permitted; min / max of the two codes, so order does
+not matter; `Options.split_code`); "Commercial should have flow as per ds50" -> read as: keep Special use etc. as
+commercial at the DS 50 Table 4.3 rate (no change). 'Residential development' default code: not answered (R15).
+
 ### Where we stopped (next session starts here) — end of the 2026-11-26 session
 
 1. User installs the latest session branch build (Update WWNet) and re-runs the EdenHill preview: check the

@@ -633,6 +633,8 @@ class ImportPumpStationData(_Tool):
 
 
 DEMAND_GROUND = {"Dry ground": "dry", "Wet ground (high groundwater)": "wet"}
+DEMAND_SPLIT = {"Lower code (as built, e.g. R20 of R20/40)": "lower",
+                "Higher code (as permitted, e.g. R40 of R20/40)": "higher"}
 DEMAND_REGION = {"From the model location": "auto", "South of 26°S (DS 50 Table 4.1)": "south",
                  "North of 26°S (DS 50 Table 4.2)": "north"}
 
@@ -646,7 +648,8 @@ class CalculateExistingDemand(_Tool):
                    "hectare. The area is shared out to the nearest model sewers (their upstream node), summed "
                    "per node and written as sub-catchments LU-<node>-<class>, which Run Design and Run Simulation "
                    "load. The Land use loading layer shows each polygon's class, R-code, area loaded, ADWF, nodes "
-                   "and flags. Unmatched zones are flagged and loaded as R15.")
+                   "and flags. Unmatched zones are flagged and loaded as R15. Split-coded R-codes (R20/40) use "
+                   "the lower or the higher code (parameter).")
     category = "Data"
 
     def getParameterInfo(self):
@@ -659,6 +662,8 @@ class CalculateExistingDemand(_Tool):
         rf = _p("rcode_field", "R-code field", "Field", required=False)
         rf.parameterDependencies = ["rcodes_layer"]
         return [_model_param("WWNet model (existing GeoPackage)"), zl, zf, rl, rf,
+                _p("split_code", "Split-coded R-codes (e.g. R20/40): density to use", "GPString", required=False,
+                   default=list(DEMAND_SPLIT)[0], values=list(DEMAND_SPLIT)),
                 _p("use_selected", "Use selected polygons only (none selected = those within the model area)",
                    "GPBoolean", required=False, default=True),
                 _p("preview", "Preview only (write nothing)", "GPBoolean", required=False, default=False),
@@ -693,7 +698,8 @@ class CalculateExistingDemand(_Tool):
             p.text("rcode_field"), p.flag("use_selected", True), p.num("max_distance", 150.0),
             DEMAND_GROUND.get(p.text("ground", "Dry ground"), "dry"),
             DEMAND_REGION.get(p.text("region", "From the model location"), "auto"), p.flag("replace_cp", True),
-            p.text("config"), p.flag("preview"), p.flag("add_to_map", True))
+            p.text("config"), p.flag("preview"), p.flag("add_to_map", True),
+            DEMAND_SPLIT.get(p.text("split_code", ""), "lower"))
         return path
 
 

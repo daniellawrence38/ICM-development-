@@ -10,7 +10,8 @@ Method (one zone polygon at a time):
    roads, open space, conservation, rural ...). No rule matched -> ZONE_UNMATCHED, loaded as residential R15.
 2. Sample the polygon on a square grid (~50 points, spacing 2-20 m); each sample point carries an equal
    share of the polygon's exact area. Zero-flow polygons are not sampled.
-3. Residential samples take the R-code of the R-Code polygon they fall in (base code of a dual code; DS 50
+3. Residential samples take the R-code of the R-Code polygon they fall in (split code R20/40: the lower or the
+   higher code, Options.split_code; DS 50
    4.2.1(c): R15 when there is no code or it is below R15; otherwise the next higher DS 50 table row).
    residential_or_commercial samples are residential where an R-code exists, else commercial.
 4. Each sample goes to the nearest model sewer within the maximum distance and loads that sewer's UPSTREAM
@@ -94,9 +95,13 @@ def _norm_code(text) -> str:
     return re.sub(r"[^A-Z0-9./]", "", str(text or "").upper())
 
 
-def parse_rcode(value, aliases: dict | None = None) -> tuple:
+SPLIT_CODES = ("lower", "higher")
+
+
+def parse_rcode(value, aliases: dict | None = None, split: str = "lower") -> tuple:
     """(R number or None, note) for an R-code field value: 20, '20', 'R20', 'R12.5', 'R20/40' or 'R20/R40'
-    (dual code: the base code), an alias from the template (e.g. R-AC3). note: '' | 'dual' | 'unknown' | 'none'."""
+    (split / dual code: the lower code, or the higher one with split='higher'), an alias from the template
+    (e.g. R-AC3). note: '' | 'dual' | 'unknown' | 'none'."""
     if value is None:
         return None, "none"
     if isinstance(value, (int, float)):
@@ -113,6 +118,9 @@ def parse_rcode(value, aliases: dict | None = None) -> tuple:
     if not m:
         return None, "unknown"
     n = float(m.group(1))
+    if m.group(2):
+        lo, hi = sorted((n, float(m.group(2))))
+        n = hi if split == "higher" else lo
     if n <= 0:
         return None, "none"
     return n, "dual" if m.group(2) else ""
@@ -401,6 +409,7 @@ class Options:
     min_spacing_m: float = 2.0
     max_spacing_m: float = 20.0
     target_samples: int = 50             # per polygon: 200 gave the same totals at 4x the run time
+    split_code: str = "lower"            # split-coded R-codes (R20/40): "lower" (as built) or "higher" (permitted)
 
 
 @dataclass
@@ -425,6 +434,8 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
     """zones: [{'id', 'zone', 'rings'}]; rcodes: [{'id', 'rcode', 'rings'}];
     sewers: [{'conduit_id', 'us_node_id', 'coords'}] (EPSG:7850, metres)."""
     opts = opts or Options()
+    if opts.split_code not in SPLIT_CODES:
+        raise ValueError(f"split_code must be one of {SPLIT_CODES} (got {opts.split_code!r})")
     sew = [s for s in sewers if s.get("coords") and len(s["coords"]) >= 2]
     region = (opts.region or "").lower() or None
     if region is None:
@@ -436,7 +447,7 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
     far_index = None                     # coarse index for the distance of polygons that are not loaded
     rpolys, rvalues = [], {}
     for r in rcodes or ():
-        n, note = parse_rcode(r.get("rcode"), rules.rcode_aliases)
+        n, note = parse_rcode(r.get("rcode"), rules.rcode_aliases, opts.split_code)
         rpolys.append(((n, note, r.get("rcode"), r.get("id")), Rings(r.get("rings"))))
         k = str(r.get("rcode")).strip() if r.get("rcode") is not None and str(r.get("rcode")).strip() else "(blank)"
         rvalues[k] = rvalues.get(k, 0) + 1
@@ -598,6 +609,8 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
         note = f"Existing demand (land use), DS 50 {rates.ground} / {rates.region}: zone {zones_txt}"
         if ld["codes"]:
             note += f"; LPS code {', '.join(sorted(ld['codes']))} -> DS 50 {ld['rcode']}"
+            if any("/" in c for c in ld["codes"]):
+                note += f" ({opts.split_code} split code)"
         subs.append({"subcatchment_id": f"{ID_PREFIX}{node}-{suffix}", "outlet_node_id": node,
                      "net_area_ha": round(ld["area"] / 1e4, 6), "land_use": ld["land_use"], "rcode": ld["rcode"],
                      "ground": rates.ground, "region": rates.region, "status": "existing",
@@ -659,7 +672,7 @@ def summary_lines(t: dict, rates: Rates, opts: Options) -> list:
     if t["above_table_ha"] > 1e-6:
         notes.append(f"{ha(t['above_table_ha'])} coded above the table (highest row used)")
     if t["dual_ha"] > 1e-6:
-        notes.append(f"{ha(t['dual_ha'])} dual coded (base code used)")
+        notes.append(f"{ha(t['dual_ha'])} split coded ({opts.split_code} code used)")
     if t["overlap_ha"] > 1e-6:
         notes.append(f"{ha(t['overlap_ha'])} under overlapping R-code polygons (highest code used)")
     if t["unknown_codes"]:
