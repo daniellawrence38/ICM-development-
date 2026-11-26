@@ -515,6 +515,13 @@ the subcatchment": sub-catchments were system_type foul, nodes / conduits had no
 `system_type` field in NODE / CONDUIT / PUMP_FIELDS; the user's saved ODIC configs must map it). "Nothing in the
 export about the subcatchments": unclear (messages? notes?) — asked for the export messages.
 
+Export with run 117 (EdenHillv8, 2026-11-26 14:26): 8,701 nodes, 8,650 sewers, 19 rising mains, 12 pumps, 7,710
+sub-catchments; population 100,347 at 180 L/p/d, trade flow 33.42 L/s, ADWF 242.48 L/s (= Calculate Existing Demand).
+123 s (GP create / fields / delete 4-14 s per table). Still open from the messages: 3,973 nodes without ground level
+(no DEM given this time); 7 stations with no pump data (6 WW_<numeric id> stations from pump stations without a
+SAP_ID: the register cannot match them; S2004007) and S0030035 without a rising main: their wet wells have no outlet,
+so with loads on they will fill / flood in ICM; 9 hanging rising main discharges; 7 dangling sewer ends.
+
 ### Where we stopped (next session starts here) — end of the 2026-11-26 session
 
 1. Demand is written for EdenHillv8 (242 L/s). Next: user installs the update, runs Export To ICM on EdenHillv8,
