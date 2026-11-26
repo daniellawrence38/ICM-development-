@@ -479,11 +479,26 @@ take an optional third value, a default R-code used only where DPLH-070 has no c
 (class, rule, default)); bundled rule ["residential development", "residential", "R30"] ahead of "residential".
 Summary line "the zone's default code where the R-Codes layer has none: 'Residential development' R30 x ha".
 
+### Third run, written (EdenHillv8, 2026-11-26)
+
+R30 default applied to 339.97 ha ('Residential development'); only 0.19 ha residential left outside every R-Codes
+polygon. DS 50 rows loaded: R15 12.5, R20 551.8, R25 231.1, R30 371.5, R40 15.3 ha. ADWF 242.48 L/s (residential
+209.06, commercial 32.62, industrial 0.79), lower split code. Written: 8,260 LU-* rows on 7,710 nodes, 1,047
+polygons in the Land use loading layer.
+
+ICM subcatchments without a boundary (ICM help, checked 2026-11-26): imported subcatchments with no boundary get a
+dummy circle of `total_area` centred on the subcatchment; `contributing_area` must be entered (0 allowed) and
+governs runoff; `x` / `y` = centroid. Foul flow = population x connectivity x per capita flow of the wastewater
+profile + additional foul flow; trade flow x trade profile; base flow constant. So the ICM export can be a point
+table per loaded node (no Voronoi needed). Exact ODIC mapping for a point layer still to confirm in ICM.
+
 ### Where we stopped (next session starts here) — end of the 2026-11-26 session
 
-1. User installs the latest session branch build (Update WWNet) and re-runs the EdenHill preview: check the
-   commercial breakdown (Public purposes / Private clubs area: golf courses, large reserves?), the R-code split
-   (outside polygons vs blank values; R-Codes field values) and the NOT_LOADED near misses. Ask for the messages: zone areas by class, the unmatched zone names (to add to the
+1. Demand is written for EdenHillv8 (242 L/s). Proposed next build, awaiting the user's go-ahead: Export To ICM
+   `ICM_Subcatchments` (one per loaded node: population = area x DS 50 persons/ha, wastewater profile 1 (180
+   L/hd/d set in the ICM Waste Water event), trade flow L/s for commercial / industrial with trade profile 1,
+   contributing_area 0, total_area = loaded area, x / y at the node). The 36 NOT_LOADED near misses (64 ha) are
+   for the user to check on the map. Ask for the messages: zone areas by class, the unmatched zone names (to add to the
    TOML), R-code notes (no code / dual / unknown codes such as R-AC), area not loaded, the ADWF total and the
    comparison with the connection point total. Check the actual DPLH-071 / DPLH-070 field names picked.
 2. Then untick Preview, check the Land use loading layer (classes, nodes, flags), Run Simulation and compare with the
