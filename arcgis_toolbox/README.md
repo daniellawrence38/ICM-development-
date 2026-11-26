@@ -323,12 +323,18 @@ at nodes, so per-node loading gives the same pipe flows with no extra model obje
    north of 26 deg S (from the model location unless chosen). The polygon area is treated as net area.
 4. The polygon is sampled (~50 points, 2-20 m apart); each point goes to the **nearest model sewer within the
    maximum distance (150 m)** and loads that sewer's upstream node (the connection point rule). Points further away
-   (outside the model area, unsewered) are not loaded: `PARTLY_LOADED` / `NOT_LOADED` flags.
+   are not loaded. A polygon with no model sewer within twice that distance is `OUTSIDE_MODEL` (normal at the edges
+   of the rectangular area read; counted, no warning); one 150-300 m away is `NOT_LOADED` and listed as a warning
+   with its distance (unsewered, or sewers missing from the model?); `PARTLY_LOADED` when > 5 % is lost.
 5. Per node and class one `wwn_subcatchments` row `LU-<node>-<class>` (e.g. `LU-N123-R20`, `LU-N123-IND`), no
    geometry, status existing. Re-running replaces the `LU-*` rows. **Run Design** (GSDF) and **Run Simulation**
    (daily flow / 86400 with the profile) load them; other sub-catchments are kept (warned: double counting).
 6. **Connection point loads** from Import Sewer Data (connections x 630 L/d) are replaced by default (the messages
    compare both totals); untick *Replace the connection point loads* to keep both. Manual node loads stay.
+
+The messages list the area per class and, per class, the zone names with their area loaded (check what makes up
+"commercial"), the R-code notes on the loaded area (outside every R-Codes polygon / blank code / below R15 / dual /
+unrecognised) and the values found in the R-Codes layer's field.
 
 The **Land use loading** layer (`wwn_land_use`, rewritten each run) shows every zone polygon read with its class,
 LPS and DS 50 codes, area, area loaded, ADWF, the nodes it loads and its flags; issues go to the Issues layer

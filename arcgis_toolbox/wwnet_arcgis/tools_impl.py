@@ -463,6 +463,9 @@ def calculate_existing_demand(arcpy, msgs: Messages, gpkg_path: str, zones_layer
     if before["other_subcatchments"]:
         msgs.warn(f"The model has {before['other_subcatchments']} other sub-catchment(s) (not LU-*): they are kept "
                   "and ALSO load the network. Delete them if the land-use loading covers the same area.")
+    if not before["cp_rows"]:
+        msgs.info(f"The model has no connection point loads (nothing to replace or compare; land use: "
+                  f"{res.totals['adwf_total_lps']:.2f} L/s).")
     if preview:
         if before["cp_rows"]:
             msgs.info(cp_note + (": would be REPLACED." if replace_cp_loads else ": would be KEPT (both load the "

@@ -32,6 +32,9 @@ def rules():
     ("Tourism", "hotel_motel"), ("District Centre", "residential_or_commercial"),
     ("Mixed Use", "residential_or_commercial"), ("Special Use", "commercial"), ("Unzoned", "zero"),
     (None, "zero"), ("", "zero"), ("Broadacre", ""), ("Something Else", ""),
+    ("Special purpose", "commercial"), ("Service station", "commercial"), ("General commercial", "commercial"),
+    ("Medium and high density residential", "residential"), ("Residential development", "residential"),
+    ("Private clubs and institutions", "commercial"), ("Public purposes", "commercial"), ("Business", "commercial"),
 ])
 def test_bundled_zone_rules(rules, zone, klass):
     assert rules.classify(zone)[0] == klass
@@ -159,6 +162,7 @@ def test_calculate_classes_rcodes_and_flags(rules):
         {"id": 8, "zone": "Residential", "rings": [cw(far, far, far + 50, far + 50)]},   # beyond 150 m
         {"id": 9, "zone": "Residential", "rings": []},                            # no geometry
         {"id": 10, "zone": "Residential", "rings": [cw(20, 0, 40, 10)]},          # R-AC3 unknown -> R15
+        {"id": 11, "zone": "Residential", "rings": [cw(0, 300, 50, 320)]},       # 200 m from S2: near miss
     ]
     rc = [{"id": "a", "rcode": "R20/40", "rings": [cw(-5, -5, 50, 105)]},
           {"id": "b", "rcode": "R-AC3", "rings": [cw(20, 0, 40, 10)]}]
@@ -172,15 +176,21 @@ def test_calculate_classes_rcodes_and_flags(rules):
     assert rows["4"]["ds50_rcode"] == "IND" and rows["4"]["nodes"].startswith("C ")
     assert rows["5"]["ds50_rcode"] == "R20" and rows["6"]["ds50_rcode"] == "COM"
     assert rows["7"]["flags"] == "ZONE_UNMATCHED" and rows["7"]["ds50_rcode"] == "R15"
-    assert rows["8"]["flags"] == "NOT_LOADED" and rows["8"]["loaded_ha"] == 0
+    assert rows["8"]["flags"] == "OUTSIDE_MODEL" and rows["8"]["loaded_ha"] == 0     # no warning: model edge
+    assert rows["11"]["flags"] == "NOT_LOADED"
     assert rows["10"]["ds50_rcode"] == "R20"     # overlapping: R20/40 also covers it, the highest code wins
     codes = {i["code"] for i in res.issues}
     assert codes == {"ZONE_UNMATCHED", "LAND_USE_NOT_LOADED"}
+    near = next(i for i in res.issues if i["code"] == "LAND_USE_NOT_LOADED")
+    assert near["object_id"] == "11" and "nearest model sewer 20" in near["message"]   # from the sample points
     assert all("x" in i and "y" in i for i in res.issues)
     t = res.totals
     assert t["unmatched"] == {"Airfield Odd": [1, pytest.approx(0.04)]}
-    assert t["dual_ha"] > 0 and t["no_rcode_ha"] == pytest.approx(0.75, abs=0.02)  # polygons 2 and 8 and t["overlap_ha"] > 0
-    assert t["not_loaded_ha"] == pytest.approx(0.25)
+    # R-code notes count loaded area only: polygon 2 (polygons 8 and 11 are not loaded)
+    assert t["dual_ha"] > 0 and t["no_rcode_ha"] == pytest.approx(0.5, abs=0.02) and t["overlap_ha"] > 0
+    assert t["not_loaded_ha"] == pytest.approx(0.25 + 0.1)
+    assert (t["outside_n"], t["near_n"]) == (1, 1) and t["outside_ha"] == pytest.approx(0.25)
+    assert t["rcode_values"] == {"R20/40": 1, "R-AC3": 1}
     ids = [s["subcatchment_id"] for s in res.subcatchments]
     assert len(ids) == len(set(ids)) and "LU-C-IND" in ids
     ind = next(s for s in res.subcatchments if s["subcatchment_id"] == "LU-C-IND")
@@ -189,8 +199,10 @@ def test_calculate_classes_rcodes_and_flags(rules):
     assert sum(s["net_area_ha"] for s in res.subcatchments if s["subcatchment_id"].endswith("-IND")) \
         == pytest.approx(1.0, abs=1e-4)
     text = "\n".join(res.lines)
-    for word in ("Zones: 10 polygon(s)", "'Airfield Odd'", "dual coded", "no R-code", "Existing ADWF",
-                 "not loaded (further than 150 m"):
+    for word in ("Zones: 11 polygon(s)", "'Airfield Odd'", "dual coded", "outside every R-Codes polygon",
+                 "Existing ADWF", "0.25 ha in 1 polygon(s) outside the model area", "150-300 m from a model sewer",
+                 "  industrial by zone (area loaded): 'Light Industry' 1.00 ha",
+                 "  zero by zone (area read): 'Local Road' 0.10 ha", "R-Codes layer values (2 polygon(s)): "):
         assert word in text
 
 

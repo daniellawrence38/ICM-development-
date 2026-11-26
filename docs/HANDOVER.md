@@ -449,10 +449,26 @@ Built (Python only, no Rust change -> `wwnet-arcgis-update` + Update WWNet, then
 - Tests: shared core 179 + 1 skipped (43 new in `qgis_plugin/tests/test_demand.py`), toolbox 309 (11 new in
   `arcgis_toolbox/tests/test_demand.py`; fake arcpy now returns polygons with None-separated holes and OID@).
 
+### First real run (EdenHill, preview, 2026-11-26) and the follow-up
+
+User's preview: 1,047 zones (2,681 ha: residential 1,710, commercial 456, industrial 128, zero 376), 1,326
+R-Codes polygons (so block-sized, not suburb-sized as first described), 53 s in Pro. Loaded 1,485 ha on 7,710
+nodes (8,264 rows), ADWF 205 L/s (residential 172, commercial 32, industrial 0.8). Zone names are the DPLH
+standardised ones ('Medium and high density residential', 'Residential development', 'General commercial',
+'Light industry', 'General industry', 'Business', 'Public purposes', 'Private clubs and institutions'); unmatched
+'Special purpose' and 'Service station' -> now commercial. 428 ha residential "no R-code" and 113 ha below R15
+(counted on the read area then). No connection point loads in that model (the comparison line did not print).
+353 NOT_LOADED warnings, nearly all polygons in the rectangular read area beyond the network.
+Fixed: NOT_LOADED only when a model sewer is within 2 x the maximum distance (warning with the distance), else
+OUTSIDE_MODEL (counted, no issue); R-code notes on the loaded area only and split into outside every R-Codes
+polygon vs blank code; R-Codes field values listed; per-class zone name breakdown (area loaded); "no connection
+point loads" line. Shared core 187 + 1 skipped, toolbox 309.
+
 ### Where we stopped (next session starts here) — end of the 2026-11-26 session
 
-1. User installs the latest `main` (Update WWNet), Refresh, then runs **Calculate Existing Demand** on EdenHill with
-   **Preview only** ticked first. Ask for the messages: zone areas by class, the unmatched zone names (to add to the
+1. User installs the latest session branch build (Update WWNet) and re-runs the EdenHill preview: check the
+   commercial breakdown (Public purposes / Private clubs area: golf courses, large reserves?), the R-code split
+   (outside polygons vs blank values; R-Codes field values) and the NOT_LOADED near misses. Ask for the messages: zone areas by class, the unmatched zone names (to add to the
    TOML), R-code notes (no code / dual / unknown codes such as R-AC), area not loaded, the ADWF total and the
    comparison with the connection point total. Check the actual DPLH-071 / DPLH-070 field names picked.
 2. Then untick Preview, check the Land use loading layer (classes, nodes, flags), Run Simulation and compare with the

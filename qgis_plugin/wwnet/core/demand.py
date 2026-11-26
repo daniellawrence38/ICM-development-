@@ -433,18 +433,24 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
     rates = load_rates(region, opts.ground, rs)
     us_node = {s["conduit_id"]: s["us_node_id"] for s in sew}
     sindex = SewerIndex([(s["conduit_id"], s["coords"]) for s in sew])
-    rpolys = []
+    far_index = None                     # coarse index for the distance of polygons that are not loaded
+    rpolys, rvalues = [], {}
     for r in rcodes or ():
         n, note = parse_rcode(r.get("rcode"), rules.rcode_aliases)
         rpolys.append(((n, note, r.get("rcode"), r.get("id")), Rings(r.get("rings"))))
+        k = str(r.get("rcode")).strip() if r.get("rcode") is not None and str(r.get("rcode")).strip() else "(blank)"
+        rvalues[k] = rvalues.get(k, 0) + 1
     rindex = PolygonIndex(rpolys)
+    near_m = 2.0 * opts.max_distance_m
 
     loads: dict = {}          # (node, suffix) -> {'area': m2, 'land_use', 'rcode', 'zones': set, 'codes': set}
     review, issues = [], []
     t = {"zone_polygons": len(zones), "area_ha": {}, "loaded_ha": 0.0, "not_loaded_ha": 0.0, "adwf_lps": {},
          "unmatched": {}, "blank": 0, "rcode_ha": {}, "no_rcode_ha": 0.0, "below_min_ha": 0.0,
          "next_higher_ha": 0.0, "above_table_ha": 0.0, "unknown_codes": {}, "dual_ha": 0.0, "overlap_ha": 0.0,
-         "rcode_polygons": len(rpolys), "empty_geometry": 0}
+         "rcode_polygons": len(rpolys), "empty_geometry": 0, "rcode_values": rvalues, "blank_rcode_ha": 0.0,
+         "zone_names": {}, "outside_ha": 0.0, "outside_n": 0, "near_ha": 0.0, "near_n": 0, "partly_lost_ha": 0.0,
+         "near_m": near_m}
 
     for z in zones:
         zid, ztext = z.get("id"), z.get("zone")
@@ -467,6 +473,9 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
             u[0] += 1
             u[1] += area / 1e4
         t["area_ha"][klass] = t["area_ha"].get(klass, 0.0) + area / 1e4
+        zname = str(ztext).strip() if ztext is not None and str(ztext).strip() else "(blank)"
+        zn = t["zone_names"].setdefault(klass, {}).setdefault(zname, [0.0, 0.0])   # [area read, area loaded] ha
+        zn[0] += area / 1e4
         row = {"polygon_id": str(zid), "zone": None if ztext is None else str(ztext), "zone_class": klass,
                "rcode_source": None, "ds50_rcode": None, "area_ha": area / 1e4, "loaded_ha": 0.0, "adwf_lps": 0.0,
                "nodes": None, "flags": None, "polygons": poly.polygons()}
@@ -481,7 +490,7 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
         lost = 0.0
         sha = share / 1e4
         for p in pts:
-            raw = None
+            raw, diag = None, []
             if unmatched:
                 trow = rates.row_for(MIN_RCODE)
                 suffix, land_use, rcode = trow[1], "residential", trow[1]
@@ -489,7 +498,7 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
             elif klass in ("residential", "residential_or_commercial"):
                 found = rindex.find(*p)
                 if len(found) > 1:
-                    t["overlap_ha"] += sha
+                    diag.append("overlap_ha")
                 coded = [f for f in found if f[0] is not None]
                 n, note, raw, _rid = (max(coded, key=lambda f: f[0]) if coded
                                       else found[0] if found else (None, "none", None, None))
@@ -499,15 +508,14 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
                     lps_ha = rates.non_residential_lps_per_ha(key)
                 else:
                     if note == "unknown":
-                        k = str(raw).strip()
-                        t["unknown_codes"][k] = t["unknown_codes"].get(k, 0.0) + sha
+                        diag.append(("unknown", str(raw).strip()))
                     elif n is None:
-                        t["no_rcode_ha"] += sha
+                        diag.append("blank_rcode_ha" if found else "no_rcode_ha")
                     if note == "dual":
-                        t["dual_ha"] += sha
+                        diag.append("dual_ha")
                     trow, rnote = rates.residential_row(n)
                     if rnote in ("below_min", "next_higher", "above_table"):
-                        t[f"{rnote}_ha"] += sha
+                        diag.append(f"{rnote}_ha")
                     suffix, land_use, rcode = trow[1], "residential", trow[1]
                     lps_ha = rates.residential_lps_per_ha(trow)
                     if raw is not None and str(raw).strip():
@@ -525,6 +533,11 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
             if ref is None:
                 lost += share
                 continue
+            for d in diag:
+                if isinstance(d, tuple):
+                    t["unknown_codes"][d[1]] = t["unknown_codes"].get(d[1], 0.0) + sha
+                else:
+                    t[d] += sha
             node = us_node[ref]
             per_node[node] = per_node.get(node, 0.0) + share
             rows_used.add(rcode or suffix)
@@ -543,6 +556,7 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
         row["loaded_ha"] = loaded / 1e4
         t["loaded_ha"] += loaded / 1e4
         t["not_loaded_ha"] += lost / 1e4
+        zn[1] += loaded / 1e4
         row["rcode_source"] = "; ".join(sorted(src_codes)) or None
         row["ds50_rcode"] = "; ".join(sorted(rows_used)) or None
         if per_node:
@@ -550,12 +564,25 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
             text = "; ".join(f"{n} {a / 1e4:.2f} ha" for n, a in parts[:12])
             row["nodes"] = text + (f"; ... (+{len(parts) - 12} more)" if len(parts) > 12 else "")
         if lost >= area - 1e-6:
-            flags.append("NOT_LOADED")
-            issues.append(_issue("warning", "LAND_USE_NOT_LOADED", zid,
-                                 f"zone '{ztext}' ({area / 1e4:.2f} ha): no model sewer within "
-                                 f"{opts.max_distance_m:g} m; not loaded", centre))
+            if far_index is None:
+                far_index = SewerIndex([(s["conduit_id"], s["coords"]) for s in sew], cell=100.0)
+            step = max(1, len(pts) // 4)
+            ds = [d for d in (far_index.nearest(q, near_m)[1] for q in pts[::step]) if d is not None]
+            if ds:
+                flags.append("NOT_LOADED")
+                t["near_ha"] += area / 1e4
+                t["near_n"] += 1
+                issues.append(_issue("warning", "LAND_USE_NOT_LOADED", zid,
+                                     f"zone '{ztext}' ({area / 1e4:.2f} ha): nearest model sewer {min(ds):.0f} m, "
+                                     f"beyond the {opts.max_distance_m:g} m maximum: not loaded (unsewered, or "
+                                     "sewers missing from the model?)", centre))
+            else:
+                flags.append("OUTSIDE_MODEL")
+                t["outside_ha"] += area / 1e4
+                t["outside_n"] += 1
         elif lost > 0.05 * area:
             flags.append("PARTLY_LOADED")
+            t["partly_lost_ha"] += lost / 1e4
             issues.append(_issue("info", "LAND_USE_PARTLY_LOADED", zid,
                                  f"zone '{ztext}': {lost / 1e4:.2f} of {area / 1e4:.2f} ha is further than "
                                  f"{opts.max_distance_m:g} m from a model sewer; that part is not loaded", centre))
@@ -597,6 +624,17 @@ def summary_lines(t: dict, rates: Rates, opts: Options) -> list:
     if t["blank"]:
         lines.append(f"{t['blank']} zone polygon(s) with a blank zone: zero flow (flag ZONE_BLANK; set "
                      "options.blank_zone_class in the template to change).")
+    for k in order:
+        names = t["zone_names"].get(k)
+        if not names:
+            continue
+        idx = 0 if k == "zero" else 1
+        items = sorted(names.items(), key=lambda kv: -kv[1][idx])
+        what = "area read" if k == "zero" else "area loaded"
+        shown = ", ".join(f"'{n}' {ha(v[idx])}" for n, v in items[:8] if v[idx] > 0.005)
+        more = f", ... (+{len(items) - 8} more)" if len(items) > 8 else ""
+        if shown:
+            lines.append(f"  {k.replace('_', ' ')} by zone ({what}): {shown}{more}")
     if t["unmatched"]:
         items = sorted(t["unmatched"].items(), key=lambda kv: -kv[1][1])
         shown = "; ".join(f"'{k}' {v[0]} polygon(s) {ha(v[1])}" for k, v in items[:15])
@@ -611,7 +649,9 @@ def summary_lines(t: dict, rates: Rates, opts: Options) -> list:
             f"{k} {ha(v)}" for k, v in sorted(t["rcode_ha"].items(), key=rkey)) + ".")
     notes = []
     if t["no_rcode_ha"] > 1e-6:
-        notes.append(f"{ha(t['no_rcode_ha'])} with no R-code (R15, DS 50 4.2.1(c))")
+        notes.append(f"{ha(t['no_rcode_ha'])} outside every R-Codes polygon (R15, DS 50 4.2.1(c))")
+    if t["blank_rcode_ha"] > 1e-6:
+        notes.append(f"{ha(t['blank_rcode_ha'])} in R-Codes polygons with a blank / zero code (R15)")
     if t["below_min_ha"] > 1e-6:
         notes.append(f"{ha(t['below_min_ha'])} coded below R15 (R15 used, DS 50 4.2.1(c))")
     if t["next_higher_ha"] > 1e-6:
@@ -626,12 +666,20 @@ def summary_lines(t: dict, rates: Rates, opts: Options) -> list:
         notes.append("codes not recognised (R15 used; add them to [rcode_aliases]): "
                      + ", ".join(f"'{k}' {ha(v)}" for k, v in sorted(t["unknown_codes"].items())))
     if notes:
-        lines.append("R-codes: " + "; ".join(notes) + ".")
+        lines.append("R-codes (area loaded): " + "; ".join(notes) + ".")
+    if t["rcode_values"]:
+        vals = sorted(t["rcode_values"].items(), key=lambda kv: -kv[1])
+        lines.append(f"R-Codes layer values ({t['rcode_polygons']} polygon(s)): "
+                     + ", ".join(f"'{k}' {v}" for k, v in vals[:15])
+                     + (f", ... (+{len(vals) - 15} more)" if len(vals) > 15 else "") + ".")
     if not t["rcode_polygons"]:
         lines.append("No R-code polygons were read: every residential zone is loaded as R15.")
     lines.append(f"Loaded {ha(t['loaded_ha'])} on {t['nodes']} node(s) as {t['subcatchments']} sub-catchment "
-                 f"row(s); {ha(t['not_loaded_ha'])} not loaded (further than {opts.max_distance_m:g} m from a model "
-                 "sewer: outside the model area or unsewered).")
+                 f"row(s). Not loaded: {ha(t['outside_ha'])} in {t['outside_n']} polygon(s) outside the model area "
+                 f"(no model sewer within {t['near_m']:g} m: normal at the edges of the area read, flag OUTSIDE_MODEL); "
+                 f"{ha(t['near_ha'])} in {t['near_n']} polygon(s) {opts.max_distance_m:g}-{t['near_m']:g} m from a "
+                 f"model sewer (unsewered or sewers missing? listed as warnings, flag NOT_LOADED); "
+                 f"{ha(t['partly_lost_ha'])} of partly loaded polygons (flag PARTLY_LOADED).")
     by = ", ".join(f"{k} {v:.2f}" for k, v in sorted(t["adwf_lps"].items(), key=lambda kv: -kv[1]))
     lines.append(f"Existing ADWF (DS 50 daily flow / 86400, {rates.ground} ground, {rates.region} of 26 deg S): "
                  f"{t['adwf_total_lps']:.2f} L/s" + (f" ({by})" if by else "") + ".")

@@ -57,7 +57,8 @@ rules = [
   ["hospital", "commercial"], ["health", "commercial"], ["medical", "commercial"],
   ["place of worship", "commercial"], ["religious", "commercial"], ["institution", "commercial"],
   ["institutional", "commercial"], ["special use", "commercial"], ["special uses", "commercial"],
-  ["airport", "commercial"], ["defence", "commercial"],
+  ["airport", "commercial"], ["defence", "commercial"], ["special purpose", "commercial"],
+  ["service station", "commercial"],
   # --- residential (R-code from the R-Codes layer; R15 where there is none)
   ["residential", "residential"], ["urban development", "residential"], ["urban", "residential"],
   ["development", "residential"], ["townsite", "residential"],
