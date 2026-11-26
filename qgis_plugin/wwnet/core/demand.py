@@ -59,7 +59,7 @@ def _words(text) -> str:
 
 @dataclass
 class Rules:
-    rules: list                                  # [(padded words, class)]
+    rules: list                                  # [(padded words, class, default R number or None)]
     rcode_aliases: dict = field(default_factory=dict)   # normalised code text -> code, e.g. 'RAC3' -> 'R80'
     blank_class: str = "zero"
 
@@ -68,10 +68,20 @@ class Rules:
         cfg = load_template() if cfg is None else cfg
         rules = []
         for item in cfg.get("rules", []):
+            if len(item) not in (2, 3):
+                raise ValueError(f"zone rule {list(item)!r}: use [words, class] or [words, class, default R-code]")
             pat, klass = str(item[0]), str(item[1]).strip().lower()
             if klass not in CLASSES:
                 raise ValueError(f"zone rule {pat!r}: unknown class {klass!r} (use one of {', '.join(CLASSES)})")
-            rules.append((_words(pat), klass))
+            default = None
+            if len(item) == 3 and str(item[2]).strip():
+                if klass not in ("residential", "residential_or_commercial"):
+                    raise ValueError(f"zone rule {pat!r}: a default R-code needs class residential or "
+                                     "residential_or_commercial")
+                default, note = parse_rcode(item[2])
+                if default is None or note == "dual":
+                    raise ValueError(f"zone rule {pat!r}: default R-code {item[2]!r} is not a single code like R30")
+            rules.append((_words(pat), klass, default))
         aliases = {_norm_code(k): str(v).strip() for k, v in (cfg.get("rcode_aliases") or {}).items()}
         blank = str((cfg.get("options") or {}).get("blank_zone_class", "zero")).strip().lower()
         if blank not in CLASSES:
@@ -79,14 +89,15 @@ class Rules:
         return cls(rules, aliases, blank)
 
     def classify(self, zone) -> tuple:
-        """(class, rule words or '' ) for a zone text; ('', '') when no rule matches; blank text -> blank_class."""
+        """(class, rule words, default R number or None) for a zone text; ('', '', None) when no rule matches;
+        blank text -> (blank_class, '(blank)', None). The default R-code applies where the R-Codes layer has none."""
         w = _words(zone)
         if not w.strip():
-            return self.blank_class, "(blank)"
-        for pat, klass in self.rules:
+            return self.blank_class, "(blank)", None
+        for pat, klass, *rest in self.rules:
             if pat in w:
-                return klass, pat.strip()
-        return "", ""
+                return klass, pat.strip(), (rest[0] if rest else None)
+        return "", "", None
 
 
 # ------------------------------------------------------------------ R-codes
@@ -461,12 +472,12 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
          "next_higher_ha": 0.0, "above_table_ha": 0.0, "unknown_codes": {}, "dual_ha": 0.0, "overlap_ha": 0.0,
          "rcode_polygons": len(rpolys), "empty_geometry": 0, "rcode_values": rvalues, "blank_rcode_ha": 0.0,
          "zone_names": {}, "outside_ha": 0.0, "outside_n": 0, "near_ha": 0.0, "near_n": 0, "partly_lost_ha": 0.0,
-         "near_m": near_m}
+         "near_m": near_m, "zone_default_ha": {}}
 
     for z in zones:
         zid, ztext = z.get("id"), z.get("zone")
         poly = Rings(z.get("rings"))
-        klass, rule = rules.classify(ztext)
+        klass, rule, zdefault = rules.classify(ztext)
         flags = []
         if not poly:
             t["empty_geometry"] += 1
@@ -513,6 +524,9 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
                 coded = [f for f in found if f[0] is not None]
                 n, note, raw, _rid = (max(coded, key=lambda f: f[0]) if coded
                                       else found[0] if found else (None, "none", None, None))
+                if n is None and note != "unknown" and zdefault is not None:
+                    n, note, raw = zdefault, "", f"{fmt_code(zdefault)} (zone default)"
+                    diag.append(("zone_default", f"'{str(ztext).strip()}' {fmt_code(zdefault)}"))
                 if klass == "residential_or_commercial" and n is None:
                     land_use, key, suffix = NON_RES["commercial"]
                     rcode, raw = None, None
@@ -546,7 +560,8 @@ def calculate(zones, rcodes, sewers, rules: Rules, opts: Options | None = None, 
                 continue
             for d in diag:
                 if isinstance(d, tuple):
-                    t["unknown_codes"][d[1]] = t["unknown_codes"].get(d[1], 0.0) + sha
+                    bucket = t["unknown_codes"] if d[0] == "unknown" else t["zone_default_ha"]
+                    bucket[d[1]] = bucket.get(d[1], 0.0) + sha
                 else:
                     t[d] += sha
             node = us_node[ref]
@@ -663,6 +678,9 @@ def summary_lines(t: dict, rates: Rates, opts: Options) -> list:
     notes = []
     if t["no_rcode_ha"] > 1e-6:
         notes.append(f"{ha(t['no_rcode_ha'])} outside every R-Codes polygon (R15, DS 50 4.2.1(c))")
+    if t["zone_default_ha"]:
+        notes.append("the zone's default code where the R-Codes layer has none: " + ", ".join(
+            f"{k} {ha(v)}" for k, v in sorted(t["zone_default_ha"].items())))
     if t["blank_rcode_ha"] > 1e-6:
         notes.append(f"{ha(t['blank_rcode_ha'])} in R-Codes polygons with a blank / zero code (R15)")
     if t["below_min_ha"] > 1e-6:

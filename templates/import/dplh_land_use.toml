@@ -13,6 +13,8 @@
 # text in that order as whole words ("road" matches "Local Road" but not "Broadacre"). The FIRST matching rule
 # wins, so specific rules come before general ones ("rural residential" before "residential").
 # A zone matching no rule is flagged ZONE_UNMATCHED and loaded as residential R15; the tool lists those names.
+# A residential rule may carry a third value, a default R-code, used where the R-Codes layer has no code (e.g.
+# structure plan areas, whose codes are not in DPLH-070); without one such areas are R15 (DS 50 4.2.1(c)).
 
 rules = [
   # --- before the general words they contain
@@ -21,6 +23,7 @@ rules = [
   ["rural small holdings", "zero"],
   ["special rural", "zero"],
   ["rural townsite", "residential"],
+  ["residential development", "residential", "R30"],   # structure plan areas: R30 where DPLH-070 has no code (user)
   ["urban deferred", "zero"],             # not yet developed
   ["private clubs", "commercial"],        # "Private Clubs, Institutions and Recreation"
   ["private community", "commercial"],

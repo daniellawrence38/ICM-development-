@@ -46,6 +46,13 @@ def test_rules_whole_words_first_match_and_bad_class():
     assert r.classify("Road / Residential")[0] == "zero"               # first rule wins
     with pytest.raises(ValueError, match="unknown class"):
         dm.Rules.from_template({"rules": [["x", "houses"]]})
+    with pytest.raises(ValueError, match="default R-code needs class residential"):
+        dm.Rules.from_template({"rules": [["x", "commercial", "R30"]]})
+    with pytest.raises(ValueError, match="not a single code"):
+        dm.Rules.from_template({"rules": [["x", "residential", "R20/40"]]})
+    with pytest.raises(ValueError, match="use \\[words, class\\]"):
+        dm.Rules.from_template({"rules": [["x"]]})
+    assert dm.Rules.from_template({"rules": [["x", "residential", ""]]}).classify("x") == ("residential", "x", None)
     with pytest.raises(ValueError, match="blank_zone_class"):
         dm.Rules.from_template({"rules": [], "options": {"blank_zone_class": "nope"}})
 
@@ -248,7 +255,9 @@ def test_multipolygon_blob_round_trip():
 
 def test_template_is_found_and_listed_classes_are_valid():
     cfg = dm.load_template()
-    assert cfg["rules"] and all(len(r) == 2 for r in cfg["rules"])
+    assert cfg["rules"] and all(len(r) in (2, 3) for r in cfg["rules"])
+    assert dm.Rules.from_template(cfg).classify("Residential development") == ("residential",
+                                                                                "residential development", 30.0)
     assert {r[1] for r in cfg["rules"]} <= set(dm.CLASSES)
     assert math.isclose(dm.Options().max_distance_m, 150.0)
 
@@ -265,3 +274,20 @@ def test_split_code_lower_or_higher(rules):
     assert hi.polygons[0]["rcode_source"] == "R20/40" and hi.polygons[0]["ds50_rcode"] == "R40"
     with pytest.raises(ValueError, match="split_code"):
         dm.calculate(zones, rc, sewers(), rules, dm.Options(split_code="middle"))
+
+
+def test_zone_default_rcode_only_where_the_layer_has_none(rules):
+    # bundled rule: 'Residential development' -> R30 where DPLH-070 has no code (user, 2026-11-26)
+    zones = [{"id": 1, "zone": "Residential development", "rings": [cw(0, 0, 50, 100)]},
+             {"id": 2, "zone": "Residential development", "rings": [cw(50, 0, 100, 100)]},
+             {"id": 3, "zone": "Residential", "rings": [cw(0, 0, 100, 10)]}]
+    rc = [{"id": "a", "rcode": "R20", "rings": [cw(50, -5, 105, 105)]}]      # covers polygon 2 only
+    res = dm.calculate(zones, rc, sewers(), rules)
+    rows = {r["polygon_id"]: r for r in res.polygons}
+    assert rows["1"]["ds50_rcode"] == "R30" and rows["1"]["rcode_source"] == "R30 (zone default)"
+    assert rows["2"]["ds50_rcode"] == "R20"                  # the layer's code wins
+    assert "R15" in rows["3"]["ds50_rcode"]                  # 'Residential' has no default: R15 where uncoded
+    assert res.totals["zone_default_ha"] == {"'Residential development' R30": pytest.approx(0.5, abs=0.03)}
+    assert res.totals["no_rcode_ha"] < 0.1                   # only polygon 3's uncoded part
+    assert "the zone's default code where the R-Codes layer has none: 'Residential development' R30" \
+        in "\n".join(res.lines)

@@ -474,7 +474,10 @@ R20/35 126, R20/50 115 ... (field `rcode_no`). 36 near misses (64 ha), 311 outsi
 User (2026-11-26): "Add a field for the split zoning, to select higher or lower density" -> tool parameter
 *Split-coded R-codes* (lower = as built, default; higher = as permitted; min / max of the two codes, so order does
 not matter; `Options.split_code`); "Commercial should have flow as per ds50" -> read as: keep Special use etc. as
-commercial at the DS 50 Table 4.3 rate (no change). 'Residential development' default code: not answered (R15).
+commercial at the DS 50 Table 4.3 rate (no change). User: "R30 for residential development zone" -> zone rules
+take an optional third value, a default R-code used only where DPLH-070 has no code (`Rules.classify` returns
+(class, rule, default)); bundled rule ["residential development", "residential", "R30"] ahead of "residential".
+Summary line "the zone's default code where the R-Codes layer has none: 'Residential development' R30 x ha".
 
 ### Where we stopped (next session starts here) — end of the 2026-11-26 session
 
