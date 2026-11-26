@@ -632,6 +632,71 @@ class ImportPumpStationData(_Tool):
         return path
 
 
+DEMAND_GROUND = {"Dry ground": "dry", "Wet ground (high groundwater)": "wet"}
+DEMAND_REGION = {"From the model location": "auto", "South of 26°S (DS 50 Table 4.1)": "south",
+                 "North of 26°S (DS 50 Table 4.2)": "north"}
+
+
+class CalculateExistingDemand(_Tool):
+    label = "Calculate Existing Demand"
+    description = ("Existing dry weather flow from land use: each Local Planning Scheme zone polygon (DPLH-071) is "
+                   "classified from its Zone (rules in dplh_land_use.toml: residential, commercial, industrial, "
+                   "hotel/motel or zero flow for roads, open space, conservation, rural); residential zones take "
+                   "the R-code of the R-Codes layer (DPLH-070). DS 50 Tables 4.1-4.3 give the flow per net "
+                   "hectare. The area is shared out to the nearest model sewers (their upstream node), summed "
+                   "per node and written as sub-catchments LU-<node>-<class>, which Run Design and Run Simulation "
+                   "load. The Land use loading layer shows each polygon's class, R-code, area loaded, ADWF, nodes "
+                   "and flags. Unmatched zones are flagged and loaded as R15.")
+    category = "Data"
+
+    def getParameterInfo(self):
+        zl = _p("zones_layer", "Local Planning Scheme zones and reserves (DPLH-071)", "GPFeatureLayer")
+        zl.filter.list = ["Polygon"]
+        zf = _p("zone_field", "Zone field", "Field")
+        zf.parameterDependencies = ["zones_layer"]
+        rl = _p("rcodes_layer", "Local Planning Scheme R-Codes (DPLH-070)", "GPFeatureLayer", required=False)
+        rl.filter.list = ["Polygon"]
+        rf = _p("rcode_field", "R-code field", "Field", required=False)
+        rf.parameterDependencies = ["rcodes_layer"]
+        return [_model_param("WWNet model (existing GeoPackage)"), zl, zf, rl, rf,
+                _p("use_selected", "Use selected polygons only (none selected = those within the model area)",
+                   "GPBoolean", required=False, default=True),
+                _p("preview", "Preview only (write nothing)", "GPBoolean", required=False, default=False),
+                _p("add_to_map", "Add / refresh layers on map", "GPBoolean", required=False, default=True),
+                _p("max_distance", "Maximum distance from a model sewer (m; further = not loaded)", "GPDouble",
+                   required=False, default=150.0, category="Options"),
+                _p("ground", "DS 50 ground condition", "GPString", required=False, default="Dry ground",
+                   values=list(DEMAND_GROUND), category="Options"),
+                _p("region", "DS 50 region", "GPString", required=False, default="From the model location",
+                   values=list(DEMAND_REGION), category="Options"),
+                _p("replace_cp", "Replace the connection point loads from Import Sewer Data (avoids double "
+                   "counting)", "GPBoolean", required=False, default=True, category="Options"),
+                _p("config", "Zone rules (TOML, blank = bundled dplh_land_use.toml)", "DEFile", required=False,
+                   filetype=["toml"], category="Options"),
+                _model_out()]
+
+    def update(self, p):
+        from wwnet_arcgis import demand_import as di
+        from wwnet_arcgis import sewer_import as si
+        for layer, field, pick in (("zones_layer", "zone_field", di.default_zone_field),
+                                   ("rcodes_layer", "rcode_field", di.default_rcode_field)):
+            if p.fresh(layer) and not getattr(p[field], "altered", False):
+                try:
+                    p[field].value = pick(si.layer_field_names(arcpy, _source(p[layer]))) or None
+                except Exception:  # noqa: BLE001
+                    pass
+
+    def run(self, p, msgs):
+        path = p.text("gpkg")
+        impl.calculate_existing_demand(
+            arcpy, msgs, path, _source(p["zones_layer"]), p.text("zone_field"), _source(p["rcodes_layer"]),
+            p.text("rcode_field"), p.flag("use_selected", True), p.num("max_distance", 150.0),
+            DEMAND_GROUND.get(p.text("ground", "Dry ground"), "dry"),
+            DEMAND_REGION.get(p.text("region", "From the model location"), "auto"), p.flag("replace_cp", True),
+            p.text("config"), p.flag("preview"), p.flag("add_to_map", True))
+        return path
+
+
 class JoinDanglingEnds(_Tool):
     label = "Join Dangling Sewer Ends"
     description = ("Repair dangling downstream ends (junction / inspection shaft / inspection opening nodes that "
@@ -933,6 +998,7 @@ class Toolbox(object):
         self.alias = "wwnet"
         self.tools = [NewModel, AddModelToMap, ModelSettings, JoinDanglingEnds,
                       ImportNetworkData, ImportSewerData, ImportPressureData, SetPumpStationData, ImportPumpStationData,
+                      CalculateExistingDemand,
                       ImportDiurnalProfile, AssignProfile,
                       ExportToICM,
                       CheckModel, RunDesign, RunSimulation, Trace,

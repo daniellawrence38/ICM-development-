@@ -132,4 +132,4 @@ def test_every_pyt_execute_reactivates_vendor():
     assert src.count("def execute(self, parameters, messages):\n        _vendor.activate(_HERE)") == 1
     assert src.count('"""Not the base execute: the update must not import (and so lock) the modules it replaces."""\n'
                      '        _vendor.activate(_HERE)') == 1
-    assert "impl = _impl()" in src and src.count("(_Tool):") == 23
+    assert "impl = _impl()" in src and src.count("(_Tool):") == 24

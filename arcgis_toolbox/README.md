@@ -22,6 +22,7 @@ last Check / Design / Import / Simulation, column `source`).
 | Import Pressure Data | Data | Pump stations + pressure mains into an existing model (see below) |
 | Set Pump Station Data | Data | Wet well, levels (optional wet well floor level), pumps and pump curve from the data sheet |
 | Import Pump Station Data | Data | Wet well floor / levels / area, emergency storage and design pump rate from the pump station register workbook (see below); preview first |
+| Calculate Existing Demand | Data | Existing dry weather flow from land use: DPLH-071 zones + DPLH-070 R-Codes -> DS 50 loading per node (sub-catchments `LU-<node>-<class>`) and the Land use loading review layer (see below); preview first |
 | Import Diurnal Profile | Data | Profile from CSV / TXT or text pasted from ICM (Time / Factor); mean checked, not changed |
 | Assign Profile | Data | Sets the profile of the node loads of the selected nodes, selected node loads / sub-catchments, or all |
 | Export To ICM | Data | Nodes, gravity sewers, rising mains and pumps with InfoWorks ICM field names (file gdb + CSV + mapping notes) |
@@ -303,10 +304,41 @@ curve is kept (only the duty rate is updated). Messages are prose lines; errors 
 sewer invert, so real stop levels below it need the floor: when given, levels are validated against it and the node's
 invert is set to it. Blank leaves the node as it is.
 
+## Calculate Existing Demand
+
+Existing dry weather flow from land use and area, loaded per node (never per connection: ICM and SWMM only take inflow
+at nodes, so per-node loading gives the same pipe flows with no extra model objects).
+
+1. Each **Local Planning Scheme zone polygon (DPLH-071)** is classified from its *Zone* text by the rules in
+   `templates/import/dplh_land_use.toml` (first rule whose words occur in the zone wins): residential,
+   residential_or_commercial (centres, mixed use: residential where an R-code exists, else commercial), commercial,
+   hotel_motel, perth_cba, industrial, or **zero** (roads, rail, open space, conservation, waterways, rural / farm,
+   rural residential, utilities, unzoned, blank zone). A zone matching no rule is flagged `ZONE_UNMATCHED` and
+   loaded as residential **R15**; the messages list those zone names with their area.
+2. Residential polygons take the code of the **R-Codes polygon (DPLH-070)** they fall in, point by point (a block
+   across two codes is split): dual codes (R20/40) use the base code; no code or below R15 -> R15 (DS 50 4.2.1(c));
+   codes between table rows -> the next higher row; R-AC and other text codes -> R15 unless mapped in
+   `[rcode_aliases]`.
+3. DS 50 Tables 4.1 / 4.2 (persons per net ha x L/person/day) and 4.3 (L/net ha/day), dry or wet ground, south or
+   north of 26 deg S (from the model location unless chosen). The polygon area is treated as net area.
+4. The polygon is sampled (~50 points, 2-20 m apart); each point goes to the **nearest model sewer within the
+   maximum distance (150 m)** and loads that sewer's upstream node (the connection point rule). Points further away
+   (outside the model area, unsewered) are not loaded: `PARTLY_LOADED` / `NOT_LOADED` flags.
+5. Per node and class one `wwn_subcatchments` row `LU-<node>-<class>` (e.g. `LU-N123-R20`, `LU-N123-IND`), no
+   geometry, status existing. Re-running replaces the `LU-*` rows. **Run Design** (GSDF) and **Run Simulation**
+   (daily flow / 86400 with the profile) load them; other sub-catchments are kept (warned: double counting).
+6. **Connection point loads** from Import Sewer Data (connections x 630 L/d) are replaced by default (the messages
+   compare both totals); untick *Replace the connection point loads* to keep both. Manual node loads stay.
+
+The **Land use loading** layer (`wwn_land_use`, rewritten each run) shows every zone polygon read with its class,
+LPS and DS 50 codes, area, area loaded, ADWF, the nodes it loads and its flags; issues go to the Issues layer
+(source `demand`). Zones are read within the model extent + the maximum distance (or the selected polygons). Export To
+ICM does not export sub-catchments yet.
+
 ## Editing GeoPackages in Pro
 - Pro reads GeoPackage tables as `file.gpkg\main.<table>`; `fid` is the ObjectID.
 - The engine opens the file itself: save edits in Pro before Check / Design / Simulate (each tool reminds you).
-- Tools that write with sqlite (Import Pressure Data, Set Pump Station Data, Import Pump Station Data, Join Dangling Sewer Ends) fail while
+- Tools that write with sqlite (Import Pressure Data, Set Pump Station Data, Import Pump Station Data, Calculate Existing Demand, Join Dangling Sewer Ends) fail while
   Pro holds a lock: close attribute tables / remove the model's layers first.
 - Result and issue layers are rewritten by the tools: treat them as read-only.
 

@@ -5,8 +5,8 @@ Branch: **`main`** (default; the 2026-11-25 session's `ccr-153a547e-mtrc3t` is m
 side, Export To ICM, Self Test, Update WWNet; sections 2-11) and the 2026-11-23 review session (schema v3 / toolbox
 UX; **section 12**), merged on 2026-11-24. All older branches (`ccr-7bd083b1-j0qlhq`, `ccr-54bf38a8-b92qd9`,
 `ccr-472a9a6a-he69zu`, `ccr-974cdaeb-c682le`) are contained in this one: continue here.
-**Start here: section 14 (pump station register import, where we stopped), then 13 (antivirus, assistant removed),
-12 (what the merge changed) and 11.**
+**Start here: section 15 (existing demand from land use, 2026-11-26, where we stopped), then 14 (pump station register
+import), 13 (antivirus, assistant removed), 12 (what the merge changed) and 11.**
 **Session workflow (from 2026-11-25):** `main` holds the latest working code (created at 0b59caa; the user is
 setting it as the GitHub default branch, replacing `ccr-974cdaeb-c682le`). New sessions start from `main` in the
 personal cloud environment `ICM-development-`, whose setup script builds `.venv` (pytest, pyflakes, maturin,
@@ -73,6 +73,7 @@ Key ArcGIS modules: `tools_impl.py` (tool logic), `engine.py` (wwnet_native call
 | **Import Pressure Data** | Data | new, **not yet run on real data** |
 | **Set Pump Station Data** | Data | new, not yet run in Pro (manual entry: wet well dia/area, levels AHD or depth, duty/assist/standby, rate or pasted curve); 2026-11-25: optional wet well floor level (§14) |
 | **Import Pump Station Data** | Data | 2026-11-25 (§14): pump station register .xlsx → levels / floor / area / storage / design rate; not yet run in Pro |
+| **Calculate Existing Demand** | Data | 2026-11-26 (§15): DPLH-071 zones + DPLH-070 R-codes -> DS 50 loading per node (`LU-*` sub-catchments) + Land use loading layer; not yet run in Pro |
 | Import Diurnal Profile | Data | fake-tested; Self Test PASS in Pro |
 | **Export To ICM** | Data | **verified: gravity model loads into ICM 2024.5 and runs.** Terminal chambers → Outfall; dangling ends stay Break (warned); DEM fill of missing ground levels; GDA2020 or GDA94 output. **2026-11-24: rising mains + pumps now exported (§11), not yet run in Pro / ICM** |
 | Run Design | Analysis | verified |
@@ -402,3 +403,64 @@ main ends, wet well at the PS point, 1 m minimum length, chamber floor lowering,
    README / handover sections 4-5 tables partly stale (tool count now 23).
 5. Then §11 "Where we stopped" items (ICM pump run comparison) and §8.
 
+## 15. 2026-11-26: existing demand from land use (Calculate Existing Demand)
+
+User's question: how best to load existing demand without a load per connection point slowing ICM. Answer given:
+ICM / SWMM take inflow only at nodes, so per-connection loading gives the same pipe flows as summing per node
+(lossless); run time is driven by the hydraulic network (links, short conduits, timestep), not foul loads.
+Recommended ICM form (next step, not built): one ICM subcatchment per loaded node (population + wastewater profile;
+trade flow + trade profile for non-residential; base flow for infiltration), per-capita flow and diurnal shape in the
+Waste Water event (calibration in one place). Unconfirmed: whether ODIC accepts subcatchments without a boundary
+polygon (test 3 rows; else Voronoi cells per node). If ICM run time ever is a problem, the lever is network
+simplification (drop reticulation, push loads to the first retained node), optional only (infill makes DN150 the
+constraint).
+
+User's method and data (2026-11-26): **DPLH-071 Local Planning Scheme Zones and Reserves** (field *Zone*; block-sized
+polygons) gives the area and the use; residential zones take the code from **DPLH-070 Local Planning Scheme R-Codes**
+(field "R code number"; suburb-sized polygons); non-residential zones -> closest DS 50 class, **no match -> flag and
+R15**; zero flow for roads, parks, conservation reserves, farm. Flow monitoring calibration: **disregarded for now**
+(user).
+
+Built (Python only, no Rust change -> `wwnet-arcgis-update` + Update WWNet, then right-click toolbox > Refresh):
+- `qgis_plugin/wwnet/core/demand.py` (pure): `Rules` (zone text -> class, whole-word first-match rules from
+  `templates/import/dplh_land_use.toml`), `parse_rcode` (number / R20 / dual R20/40 -> base / aliases), `Rates`
+  (DS 50 Tables 4.1-4.3 from the ruleset; R15 minimum, next higher row, highest row above the table, as
+  `wwnet-rules::residential_rate`), `Rings` (even-odd polygon with banded edges: area, scanline, contains, OGC
+  polygons), `sample_points` (~50 per polygon, 2-20 m), `SewerIndex` (ring search), `calculate`.
+  Allocation: each sample -> nearest model sewer within 150 m -> that sewer's US node (same rule as connection
+  points); beyond -> not loaded (PARTLY_LOADED / NOT_LOADED). Per node + class one `wwn_subcatchments` row
+  `LU-<node>-<R-code row | COM | IND | HOT | CBA>`, net_area_ha = allocated area, no geometry, status existing, notes
+  with zones and LPS -> DS 50 codes. residential_or_commercial (centre, mixed use): residential where an R-code
+  exists, else commercial. Blank zone -> zero (ZONE_BLANK; `options.blank_zone_class`). Rural residential /
+  smallholdings -> zero (assumed unsewered; my call, tell the user). Region from the mean sewer northing
+  (26 deg S = N 7,124,316 on the CM). Perth CBA not auto-mapped (comment in the TOML).
+- `arcgis_toolbox/wwnet_arcgis/demand_import.py`: polygon rings from Pro shapes (None-separated holes), zones read
+  with a spatial filter on the sewer extent + max distance (or the selection), R-codes on the zones' extent;
+  `write_result` in one transaction: replace LU-* rows, delete `wwn_node_loads` source=connection_points (default;
+  manual loads kept), rewrite `wwn_land_use` (Python-created MULTIPOLYGON feature table "Land use loading", NOT in
+  `templates/schema.sql`, so no Rust rebuild), replace `wwn_issues` source **`demand`** rows directly (the engine's
+  `store_issues` only accepts check / design / import / simulate).
+- Tool **Calculate Existing Demand** (Data; 24 tools): zones layer + Zone field, R-Codes layer + R-code field
+  (defaults picked from the field names), use selected, preview, max distance 150 m, dry / wet, region, replace
+  connection point loads, zone rules TOML. Symbology `style_land_use` (zone_class colours).
+- Verified here: the engine's simulated inflow rises by exactly the Python ADWF total (test); design / simulate /
+  upgrade / check run on a model with the new rows and table. Benchmark: 6,750 zone polygons, 3,375 sewers, 12
+  R-code polygons of 4,000 vertices: 2.5 s (50 samples; 200 gave the same total at 9 s).
+- Tests: shared core 179 + 1 skipped (43 new in `qgis_plugin/tests/test_demand.py`), toolbox 309 (11 new in
+  `arcgis_toolbox/tests/test_demand.py`; fake arcpy now returns polygons with None-separated holes and OID@).
+
+### Where we stopped (next session starts here) — end of the 2026-11-26 session
+
+1. User installs the latest `main` (Update WWNet), Refresh, then runs **Calculate Existing Demand** on EdenHill with
+   **Preview only** ticked first. Ask for the messages: zone areas by class, the unmatched zone names (to add to the
+   TOML), R-code notes (no code / dual / unknown codes such as R-AC), area not loaded, the ADWF total and the
+   comparison with the connection point total. Check the actual DPLH-071 / DPLH-070 field names picked.
+2. Then untick Preview, check the Land use loading layer (classes, nodes, flags), Run Simulation and compare with the
+   connection point loading run (Compare Simulation Runs).
+3. Next build step (agreed approach, not built): **Export To ICM sub-catchments**, one per loaded node (population =
+   area x persons/ha and a wastewater profile for residential; trade flow for non-residential), plus the ODIC
+   field mapping; confirm boundary-less subcatchments in ICM first.
+4. Open questions for the user: rural residential / smallholdings as zero (assumed unsewered); R-AC code equivalents
+   (`[rcode_aliases]`, left empty); DS 50 rates are design rates (180 L/p/d) applied as existing flow — confirm that
+   is intended, or give existing-flow rates; QGIS plugin has no front end for this yet (core is shared).
+5. Section 14's open items (install, Self Test, Import Network Data on EdenHill, ICM pumps) are still open.

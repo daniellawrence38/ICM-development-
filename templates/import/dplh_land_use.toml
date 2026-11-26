@@ -1,0 +1,76 @@
+# Existing demand template: Local Planning Scheme zones (DPLH-071 'Zone') -> DS 50 loading class.
+# Used by the Calculate Existing Demand tool (qgis_plugin/wwnet/core/demand.py). Edit freely; copy it and pick
+# the copy in the tool's "Zone rules" parameter to keep your edits through updates.
+#
+# Classes:
+#   residential                R-code from the R-Codes layer (DPLH-070), DS 50 Table 4.1 / 4.2
+#   residential_or_commercial  residential where the R-Codes layer has a code, else commercial
+#   commercial                 DS 50 Table 4.3 "suburban commercial, school, hospital, public"
+#   hotel_motel | perth_cba | industrial   DS 50 Table 4.3
+#   zero                       no flow (roads, open space, conservation, rural, utilities ...)
+#
+# Matching: the zone text is lower-cased and split into words; a rule matches when its words occur in the zone
+# text in that order as whole words ("road" matches "Local Road" but not "Broadacre"). The FIRST matching rule
+# wins, so specific rules come before general ones ("rural residential" before "residential").
+# A zone matching no rule is flagged ZONE_UNMATCHED and loaded as residential R15; the tool lists those names.
+
+rules = [
+  # --- before the general words they contain
+  ["rural residential", "zero"],          # large lots, normally unsewered: change to "residential" where sewered
+  ["rural smallholdings", "zero"],
+  ["rural small holdings", "zero"],
+  ["special rural", "zero"],
+  ["rural townsite", "residential"],
+  ["urban deferred", "zero"],             # not yet developed
+  ["private clubs", "commercial"],        # "Private Clubs, Institutions and Recreation"
+  ["private community", "commercial"],
+  ["mixed business", "commercial"],
+  ["car park", "zero"],
+  ["parking", "zero"],
+  # --- roads and rail
+  ["road", "zero"], ["roads", "zero"], ["highway", "zero"], ["freeway", "zero"], ["street", "zero"],
+  ["railway", "zero"], ["railways", "zero"], ["rail", "zero"],
+  # --- open space, conservation, water
+  ["open space", "zero"], ["parks and recreation", "zero"], ["recreation", "zero"], ["conservation", "zero"],
+  ["natural area", "zero"], ["natural areas", "zero"], ["bush forever", "zero"], ["foreshore", "zero"],
+  ["waterway", "zero"], ["waterways", "zero"], ["drainage", "zero"], ["wetland", "zero"], ["lake", "zero"],
+  ["river", "zero"], ["beach", "zero"], ["state forest", "zero"], ["forest", "zero"],
+  ["water catchment", "zero"], ["catchment", "zero"], ["cemetery", "zero"],
+  # --- rural and farming
+  ["rural", "zero"], ["farm", "zero"], ["farming", "zero"], ["farmland", "zero"], ["agriculture", "zero"], ["agricultural", "zero"],
+  # --- utilities and unzoned land
+  ["infrastructure services", "zero"], ["public utilities", "zero"], ["public utility", "zero"],
+  ["utilities", "zero"], ["unzoned", "zero"], ["no zone", "zero"],
+  # --- industry
+  ["industry", "industrial"], ["industrial", "industrial"], ["port", "industrial"],
+  # --- tourism
+  ["tourism", "hotel_motel"], ["tourist", "hotel_motel"], ["caravan", "hotel_motel"], ["resort", "hotel_motel"],
+  ["hotel", "hotel_motel"], ["motel", "hotel_motel"],
+  # --- centres and mixed use: often carry R-AC / high R-codes
+  ["mixed use", "residential_or_commercial"], ["centre", "residential_or_commercial"],
+  ["center", "residential_or_commercial"],
+  # --- commercial, community and public purposes
+  ["commercial", "commercial"], ["business", "commercial"], ["office", "commercial"], ["showroom", "commercial"],
+  ["retail", "commercial"], ["shop", "commercial"], ["public purposes", "commercial"],
+  ["public purpose", "commercial"], ["civic", "commercial"], ["community", "commercial"],
+  ["education", "commercial"], ["school", "commercial"], ["university", "commercial"],
+  ["hospital", "commercial"], ["health", "commercial"], ["medical", "commercial"],
+  ["place of worship", "commercial"], ["religious", "commercial"], ["institution", "commercial"],
+  ["institutional", "commercial"], ["special use", "commercial"], ["special uses", "commercial"],
+  ["airport", "commercial"], ["defence", "commercial"],
+  # --- residential (R-code from the R-Codes layer; R15 where there is none)
+  ["residential", "residential"], ["urban development", "residential"], ["urban", "residential"],
+  ["development", "residential"], ["townsite", "residential"],
+  # Perth CBA (DS 50 Table 4.3, south only) is not matched automatically: add e.g. ["city centre", "perth_cba"]
+  # ABOVE the "centre" rule for a City of Perth model.
+]
+
+[rcode_aliases]
+# Codes the R-Codes layer may hold that are not R<number> (normalised: upper case, no spaces or hyphens).
+# Map them to the DS 50 table code to use; unmapped codes are loaded as R15 and listed by the tool.
+# Examples (CHECK the equivalents for your area before using them):
+# RAC0 = "R160"
+# RAC3 = "R80"
+
+[options]
+blank_zone_class = "zero"   # zone text blank / null: usually unzoned road reserve

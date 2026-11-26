@@ -12,6 +12,8 @@ DN = {150: "#4c9be8", 225: "#2e7d32", 300: "#f9a825", 375: "#ef6c00", 450: "#c62
 DEFAULT = "#8c8c8c"
 LAND_USE = {"residential": "#ffeb96", "commercial": "#6496ff", "hotel_motel": "#ff96c8",
             "perth_cba": "#c864ff", "industrial": "#aaaaaa"}
+#: Calculate Existing Demand review layer: zone class (land use classes + mixed and zero-flow zones)
+LAND_USE_CLASS = {**LAND_USE, "residential_or_commercial": "#ffc864", "zero": "#e6e6e6"}
 PUMP_STATION = "#d81b60"
 RISING_MAIN = "#c2185b"
 #: design result (pass / warn / fail; info is coloured as pass)

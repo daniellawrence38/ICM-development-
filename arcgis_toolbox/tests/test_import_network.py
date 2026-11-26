@@ -262,7 +262,7 @@ def test_pyt_tool_parameters(world):
     assert t.label == "Import Network Data" and t.category == "Data"
     tools = [x().label for x in mod.Toolbox().tools]
     assert tools.index("Import Network Data") < tools.index("Import Sewer Data") \
-        < tools.index("Import Pressure Data") and len(tools) == 23
+        < tools.index("Import Pressure Data") and len(tools) == 24
     params = t.getParameterInfo()
     names = [p.name for p in params]
     assert len(set(names)) == len(names)

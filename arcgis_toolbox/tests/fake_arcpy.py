@@ -137,6 +137,35 @@ class FakeShape:
         return _Part(NS(X=x, Y=y) for x, y in self.coords)
 
 
+class FakePolygonShape:
+    """arcpy.Polygon stand-in as a cursor returns it: one part per exterior ring, the part's array holding
+    the exterior then each hole after a None separator (as Pro does)."""
+
+    def __init__(self, rings):
+        self.rings = [list(r) for r in rings]
+        parts, cur = [], None
+        for r in self.rings:
+            if cur is None or _signed(r) < 0:      # clockwise ring = a new exterior (Esri convention)
+                cur = _Part(NS(X=x, Y=y) for x, y in r)
+                parts.append(cur)
+            else:
+                cur.append(None)
+                cur.extend(NS(X=x, Y=y) for x, y in r)
+        self._parts = parts
+        self.partCount = len(parts)
+
+    def getPart(self, i):
+        return self._parts[i]
+
+
+def _signed(r):
+    return 0.5 * sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(r, r[1:] + r[:1]))
+
+
+def _is_polygon(g):
+    return bool(g) and isinstance(g[0], list) and bool(g[0]) and isinstance(g[0][0], (tuple, list))
+
+
 class FakePointGeometry:
     """arcpy.PointGeometry stand-in (strict: needs a Point with X / Y)."""
 
@@ -169,13 +198,17 @@ class _SrcCursor(_MemCursor):
                 if f == "SHAPE@XY":
                     out.append(tuple(g) if g is not None else None)
                 elif f == "SHAPE@":
-                    out.append(FakeShape(g) if g is not None else None)
+                    out.append(None if g is None else FakePolygonShape(g) if _is_polygon(g) else FakeShape(g))
+                elif f == "OID@":
+                    out.append(r.get("OID@"))
                 else:
                     out.append(r.get(f))
             yield out
 
 
 def _in_bbox(g, x0, y0, x1, y1):
+    if _is_polygon(g):
+        g = [p for ring in g for p in ring]
     pts = [g] if isinstance(g[0], (int, float)) else g
     if isinstance(g[0], (int, float)):
         return x0 <= g[0] <= x1 and y0 <= g[1] <= y1

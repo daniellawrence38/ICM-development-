@@ -42,6 +42,9 @@ unless the engine errors.
 
 - `wwn_node_loads`: dry weather loads per node (`adwf_lps`, or `connections` x `adwf_per_connection_lpd` / 86400).
 - `wwn_subcatchments.adwf_lps` / `profile_id`: manual ADWF per catchment; when set it replaces the land-use / R-code loading.
+- ArcGIS *Calculate Existing Demand* (`qgis_plugin/wwnet/core/demand.py`): Local Planning Scheme zones (DPLH-071) and
+  R-Codes (DPLH-070) -> DS 50 land-use loading per node as `wwn_subcatchments` rows `LU-<node>-<class>` (rules in
+  `templates/import/dplh_land_use.toml`), review layer `wwn_land_use`.
 - `wwn_meta`: `adwf_per_connection_lpd` (630), `peaking_factor` (1.5), `default_profile`.
 - `wwnet design`: GSDF contribution of any ADWF = ADWF x `peaking_factor`; conduits report accumulated `adwf_lps` (CLI column ADWF).
 - `wwnet profile import <gpkg> <id> <csv> [--normalise] [--no-default]` (Python: `wwnet_native.import_profile`) imports a diurnal profile
