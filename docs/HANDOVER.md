@@ -492,13 +492,29 @@ governs runoff; `x` / `y` = centroid. Foul flow = population x connectivity x pe
 profile + additional foul flow; trade flow x trade profile; base flow constant. So the ICM export can be a point
 table per loaded node (no Voronoi needed). Exact ODIC mapping for a point layer still to confirm in ICM.
 
+### Export To ICM: foul sub-catchments (2026-11-26)
+
+User: "Go ahead, same trade profiles for commercial and industrial". `icm_export.subcatchments()`: ONE ICM
+sub-catchment per loaded node, aggregating every load the engine simulates: LU-* and other wwn_subcatchments
+(residential -> population = net area x DS 50 persons/ha, scaled to the wastewater profile's per capita flow when a
+row's L/p/d differs, i.e. wet ground; commercial / industrial -> trade_flow L/s, trade profile 1 for both; manual
+adwf_lps -> additional_foul_flow), wwn_node_loads (adwf_lps or connections x adwf_per_connection_lpd ->
+additional_foul_flow). Fields (ICM names): subcatchment_id = node_id, system_type foul, total_area (ha; 0.01 for
+load-only nodes), contributing_area 0, connectivity 100, population, wastewater_profile 1, trade_flow, trade_profile
+1, additional_foul_flow, x / y (= node, output SR) + wwn_adwf_lps, wwn_residential/commercial/industrial_ha,
+wwn_rcodes, notes. Not exported (warned): outlet not a node, no net area (polygon only), extra_flow_lps (design
+only). Broadacre: gross x 0.75. ICM_Subcatchments point fc (geometry = node point) + CSV; stale table / CSV removed
+when there are no loads. Notes: ODIC order nodes > conduits > pumps > sub-catchments; Waste Water / Trade Waste event
+set-up; flows L/s. Test: after Calculate Existing Demand on the demo, the exported wwn_adwf_lps total = the engine's
+simulated inflow (rel 1e-4). Toolbox 313, shared core 189 + 1 skipped.
+
 ### Where we stopped (next session starts here) — end of the 2026-11-26 session
 
-1. Demand is written for EdenHillv8 (242 L/s). Proposed next build, awaiting the user's go-ahead: Export To ICM
-   `ICM_Subcatchments` (one per loaded node: population = area x DS 50 persons/ha, wastewater profile 1 (180
-   L/hd/d set in the ICM Waste Water event), trade flow L/s for commercial / industrial with trade profile 1,
-   contributing_area 0, total_area = loaded area, x / y at the node). The 36 NOT_LOADED near misses (64 ha) are
-   for the user to check on the map. Ask for the messages: zone areas by class, the unmatched zone names (to add to the
+1. Demand is written for EdenHillv8 (242 L/s). Next: user installs the update, runs Export To ICM on EdenHillv8,
+   imports ICM_Subcatchments with ODIC (object type Subcatchment) after nodes / conduits, creates the Waste Water
+   (profile 1, 180 l/hd/d) and Trade Waste (profile 1) events, and reports: ODIC field mapping problems (point layer
+   for sub-catchments? units), validation errors, and the total ADWF ICM shows vs 242.48 L/s. The 36 NOT_LOADED near
+   misses (64 ha) are for the user to check on the map. Ask for the messages: zone areas by class, the unmatched zone names (to add to the
    TOML), R-code notes (no code / dual / unknown codes such as R-AC), area not loaded, the ADWF total and the
    comparison with the connection point total. Check the actual DPLH-071 / DPLH-070 field names picked.
 2. Then untick Preview, check the Land use loading layer (classes, nodes, flags), Run Simulation and compare with the

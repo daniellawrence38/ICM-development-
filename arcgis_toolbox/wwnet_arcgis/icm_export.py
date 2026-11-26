@@ -67,6 +67,20 @@ PUMP_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "
                ("head_discharge_id", "TEXT"), ("wwn_pump_id", "TEXT"), ("wwn_ps_id", "TEXT"), ("wwn_role", "TEXT"),
                ("notes", "TEXT")]
 HEAD_DISCHARGE_FIELDS = [("head_discharge_id", "TEXT"), ("head", "DOUBLE"), ("discharge", "DOUBLE")]
+# One foul sub-catchment per loaded node (all WWNet loads on that node: land-use LU-* rows, other sub-catchments,
+# node loads). Residential -> population (wastewater profile 1); commercial / industrial -> trade flow (trade profile 1);
+# manual ADWF and node loads -> additional foul flow (wastewater profile 1). Points at the node: ICM draws a circle of
+# total_area for a sub-catchment without a boundary.
+SUBCATCHMENT_FIELDS = [("subcatchment_id", "TEXT"), ("node_id", "TEXT"), ("system_type", "TEXT"),
+                       ("total_area", "DOUBLE"), ("contributing_area", "DOUBLE"), ("connectivity", "DOUBLE"),
+                       ("population", "DOUBLE"), ("wastewater_profile", "LONG"), ("trade_flow", "DOUBLE"),
+                       ("trade_profile", "LONG"), ("additional_foul_flow", "DOUBLE"), ("x", "DOUBLE"),
+                       ("y", "DOUBLE"), ("wwn_adwf_lps", "DOUBLE"), ("wwn_residential_ha", "DOUBLE"),
+                       ("wwn_commercial_ha", "DOUBLE"), ("wwn_industrial_ha", "DOUBLE"), ("wwn_rcodes", "TEXT"),
+                       ("notes", "TEXT")]
+WASTEWATER_PROFILE = 1
+TRADE_PROFILE = 1
+NOMINAL_AREA_HA = 0.01          # total_area of a sub-catchment that only carries node loads (no area)
 
 # Names that clash (case-insensitively) with geodatabase system fields -> AddField ERROR 000012.
 # WWNet node types that, with pipes in and none out, are a sewer end that should have joined another
@@ -77,7 +91,8 @@ RESERVED_FIELDS = {"shape", "objectid", "oid", "fid", "shape_length", "shape_are
 
 
 def check_reserved_fields():
-    bad = [n for n, _ in NODE_FIELDS + CONDUIT_FIELDS + PUMP_FIELDS if n.lower() in RESERVED_FIELDS]
+    bad = [n for n, _ in NODE_FIELDS + CONDUIT_FIELDS + PUMP_FIELDS + SUBCATCHMENT_FIELDS
+           if n.lower() in RESERVED_FIELDS]
     if bad:
         raise RuntimeError(f"ICM export field name(s) clash with reserved geodatabase fields: {bad}")
 
@@ -157,10 +172,13 @@ def build(gpkg_path: str) -> dict:
                               "FROM wwn_conduits WHERE status <> 'abandoned' ORDER BY us_node_id, conduit_id")
         tables = _tables(con)
         skipped = {}
-        if "wwn_subcatchments" in tables:
-            n = con.execute('SELECT COUNT(*) FROM "wwn_subcatchments"').fetchone()[0]
-            if n:
-                skipped["wwn_subcatchments"] = n
+        subs = _rows(con, "SELECT subcatchment_id, outlet_node_id, net_area_ha, gross_area_ha, broadacre, land_use, "
+                          "rcode, ground, region, extra_flow_lps, adwf_lps, profile_id, status FROM wwn_subcatchments "
+                          "WHERE status IS NULL OR status <> 'abandoned' ORDER BY subcatchment_id") \
+            if "wwn_subcatchments" in tables else []
+        loads = _rows(con, "SELECT load_id, node_id, connections, adwf_lps, profile_id FROM wwn_node_loads "
+                           "ORDER BY load_id") if "wwn_node_loads" in tables else []
+        meta = dict(con.execute("SELECT key, value FROM wwn_meta").fetchall()) if "wwn_meta" in tables else {}
         stations = _rows(con, "SELECT ps_id, wet_well_node_id, discharge_node_id, rising_main_id, pump_rate_lps, "
                               "wet_well_area_m2, start_level, stop_level, status, notes FROM wwn_pump_stations "
                               "WHERE status <> 'abandoned' ORDER BY ps_id") if "wwn_pump_stations" in tables else []
@@ -337,14 +355,141 @@ def build(gpkg_path: str) -> dict:
         warnings.append(f"{len(dangling)} sewer end(s) have no downstream pipe and are not chambers (possible missed "
                         "tee / main outside the selection). NOT made outfalls (their flow would leave the network): ICM will "
                         "report them as not connected to an outfall until the join is fixed: " + _ids(dangling))
-    for t, n in skipped.items():
-        if t == "wwn_subcatchments":
-            warnings.append(f"{t}: {n} row(s) NOT exported (sub-catchments not supported yet).")
+    sc = subcatchments(subs, loads, meta, node_ids, warnings)
     counts = {"nodes": len(out_nodes) + len(pres["nodes"]), "conduits": len(out_links),
               "rising_mains": len(pres["conduits"]), "pumps": len(pres["pumps"]),
-              "delivery_nodes": len(pres["nodes"]), "head_discharge_tables": len(pres["hd_ids"])}
+              "delivery_nodes": len(pres["nodes"]), "head_discharge_tables": len(pres["hd_ids"]),
+              "subcatchments": len(sc["rows"])}
     return {"nodes": out_nodes + pres["nodes"], "conduits": out_links + pres["conduits"], "pumps": pres["pumps"],
-            "head_discharge": pres["head_discharge"], "warnings": warnings, "skipped": skipped, "counts": counts}
+            "head_discharge": pres["head_discharge"], "warnings": warnings, "skipped": skipped, "counts": counts,
+            "subcatchments": sc["rows"], "loading": sc["summary"]}
+
+
+def _demand():
+    from . import shared
+    return shared.core("demand")
+
+
+def subcatchments(subs: list, loads: list, meta: dict, node_ids: set, warnings: list) -> dict:
+    """ICM foul sub-catchments, one per loaded node: {'rows': [...], 'summary': {...}}. Flows as the WWNet engine
+    loads them in Run Simulation (DS 50 daily flow / 86400; manual ADWF; node loads). Residential population is the
+    DS 50 persons/ha x area, scaled to the per capita flow of wastewater profile 1 where a row's L/person/day
+    differs (wet ground), so population x per capita flow = the WWNet flow."""
+    dm = _demand()
+    rates_cache = {}
+
+    def rates(region, ground):
+        key = ((region or "south").lower(), (ground or "dry").lower())
+        if key not in rates_cache:
+            rates_cache[key] = dm.load_rates(*key)
+        return rates_cache[key]
+
+    try:
+        per_conn = float(meta.get("adwf_per_connection_lpd") or 630.0)
+    except ValueError:
+        per_conn = 630.0
+    regions = {((r.get("region") or "south").lower(), (r.get("ground") or "dry").lower()) for r in subs} \
+        or {("south", "dry")}
+    main = sorted(regions)[0] if len(regions) == 1 else ("south", "dry")
+    per_capita = rates(*main).row_for(20)[3]
+    if len(regions) > 1:
+        warnings.append(f"Sub-catchments use more than one DS 50 region / ground ({sorted(regions)}): population is "
+                        f"scaled to {per_capita:g} L/person/day (wastewater profile {WASTEWATER_PROFILE}).")
+    nodes: dict = {}
+    missing, no_area, extra, profiles = [], [], [], set()
+
+    def node_row(nid):
+        return nodes.setdefault(nid, {"pop": 0.0, "trade": 0.0, "aff": 0.0, "res": 0.0, "com": 0.0, "ind": 0.0,
+                                      "codes": {}, "src": []})
+
+    for s in subs:
+        nid = s["outlet_node_id"]
+        if nid not in node_ids:
+            missing.append(s["subcatchment_id"])
+            continue
+        if s.get("profile_id"):
+            profiles.add(s["profile_id"])
+        if s.get("extra_flow_lps"):
+            extra.append(s["subcatchment_id"])
+        if s.get("adwf_lps") is not None:
+            if s["adwf_lps"] > 0:
+                n = node_row(nid)
+                n["aff"] += s["adwf_lps"]
+                n["src"].append(f"{s['subcatchment_id']} manual ADWF {s['adwf_lps']:.4g} L/s")
+            continue
+        area = s.get("net_area_ha")
+        if area is None and s.get("broadacre") and s.get("gross_area_ha") is not None:
+            area = s["gross_area_ha"] * 0.75                    # DS 50 4.2.1(k), as the engine
+        if area is None or area <= 0:
+            if area is None:
+                no_area.append(s["subcatchment_id"])
+            continue
+        rt = rates(s.get("region"), s.get("ground"))
+        n = node_row(nid)
+        lu = (s.get("land_use") or "residential").lower()
+        if lu == "residential":
+            num, _note = dm.parse_rcode(s.get("rcode"))
+            row, _rnote = rt.residential_row(num)
+            n["pop"] += area * row[2] * row[3] / per_capita
+            n["res"] += area
+            n["codes"][row[1]] = n["codes"].get(row[1], 0.0) + area
+        else:
+            key = {"commercial": "suburban_commercial_school_hospital_public"}.get(lu, lu)
+            lps_ha = rt.non_residential_lps_per_ha(key)
+            if lps_ha is None:
+                lps_ha = rt.non_residential_lps_per_ha("suburban_commercial_school_hospital_public")
+            n["trade"] += area * lps_ha
+            n["ind" if lu == "industrial" else "com"] += area
+        if not str(s["subcatchment_id"]).startswith(dm.ID_PREFIX):
+            n["src"].append(f"{s['subcatchment_id']} {lu} {area:.4g} ha")
+    for ld in loads:
+        nid = ld["node_id"]
+        a = ld["adwf_lps"] if ld.get("adwf_lps") is not None else (
+            ld["connections"] * per_conn / 86400.0 if ld.get("connections") is not None else None)
+        if a is None or a <= 0 or nid not in node_ids:
+            if a and nid not in node_ids:
+                missing.append(ld["load_id"])
+            continue
+        if ld.get("profile_id"):
+            profiles.add(ld["profile_id"])
+        n = node_row(nid)
+        n["aff"] += a
+        n["src"].append(f"node load {ld['load_id']} {a:.4g} L/s")
+    rows = []
+    for nid in sorted(nodes):
+        n = nodes[nid]
+        adwf = n["pop"] * per_capita / 86400.0 + n["trade"] + n["aff"]
+        if adwf <= 0:
+            continue
+        area = n["res"] + n["com"] + n["ind"]
+        codes = "; ".join(f"{k} {v:.2f} ha" for k, v in sorted(
+            n["codes"].items(), key=lambda kv: dm.parse_rcode(kv[0])[0] or 0))
+        rows.append({"subcatchment_id": nid, "node_id": nid, "system_type": "foul",
+                     "total_area": _r(area if area > 0 else NOMINAL_AREA_HA, 4), "contributing_area": 0.0,
+                     "connectivity": 100.0, "population": _r(n["pop"], 2),
+                     "wastewater_profile": WASTEWATER_PROFILE if (n["pop"] > 0 or n["aff"] > 0) else None,
+                     "trade_flow": _r(n["trade"], 5) if n["trade"] > 0 else None,
+                     "trade_profile": TRADE_PROFILE if n["trade"] > 0 else None,
+                     "additional_foul_flow": _r(n["aff"], 5) if n["aff"] > 0 else None,
+                     "x": None, "y": None, "wwn_adwf_lps": _r(adwf, 5),
+                     "wwn_residential_ha": _r(n["res"], 4), "wwn_commercial_ha": _r(n["com"], 4),
+                     "wwn_industrial_ha": _r(n["ind"], 4), "wwn_rcodes": codes or None,
+                     "notes": "; ".join(n["src"]) or None, "_extra": True, "_geom": nid})
+    if missing:
+        warnings.append(f"{len(missing)} sub-catchment(s) / node load(s) drain to a node that is not in the model: "
+                        "NOT exported (their flow is lost, as in the WWNet engine): " + _ids(missing))
+    if no_area:
+        warnings.append(f"{len(no_area)} sub-catchment(s) have no net area (only a polygon): NOT exported; set "
+                        "net_area_ha: " + _ids(no_area))
+    if extra:
+        warnings.append(f"{len(extra)} sub-catchment(s) have extra_flow_lps (design GSDF only, not simulated): not "
+                        "exported: " + _ids(extra))
+    total = sum(r["wwn_adwf_lps"] for r in rows)
+    summary = {"per_capita_lpd": per_capita, "adwf_lps": total, "profiles": sorted(profiles),
+               "population": sum(r["population"] or 0 for r in rows),
+               "trade_flow_lps": sum(r["trade_flow"] or 0 for r in rows),
+               "additional_foul_flow_lps": sum(r["additional_foul_flow"] or 0 for r in rows)}
+    return {"rows": rows, "summary": summary}
 
 
 def _pressure(out_nodes: list, stations: list, mains: list, pumps: list, next_suffix, warnings: list,
@@ -614,13 +759,15 @@ def write_csv(path: str, fields: list, rows: list, xy: dict | None = None, id_ke
 
 def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, conduits_csv: str,
                warnings: list, pumps_csv: str | None = None, hd_csv: str | None = None,
-               head_discharge: list | None = None) -> str:
+               head_discharge: list | None = None, subcatchments_csv: str | None = None,
+               loading: dict | None = None) -> str:
     lines = [
         f"WWNet -> InfoWorks ICM export of {gpkg_path}",
         f"Coordinate system: {out_sr_label}",
         "",
         "Files",
         f"  {gdb}\\ICM_Nodes, ICM_Conduits" + (", ICM_Pumps" if pumps_csv else "")
+        + (", ICM_Subcatchments" if subcatchments_csv else "")
         + "   (preferred: keeps blank values and pipe vertices)",
         f"  {nodes_csv}   (fallback: x / y columns)",
         f"  {conduits_csv}   (fallback: no geometry; ICM draws straight links between nodes)",
@@ -629,10 +776,12 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
         lines.append(f"  {pumps_csv}   (fallback: pumps)")
     if hd_csv:
         lines.append(f"  {hd_csv}   (pump head-discharge tables)")
+    if subcatchments_csv:
+        lines.append(f"  {subcatchments_csv}   (fallback: sub-catchments with x / y)")
     lines += [
         "",
         "ICM: File > Import > InfoWorks > Open Data Import Centre. Import NODES FIRST, then conduits"
-        + (", then pumps." if pumps_csv else "."),
+        + (", then pumps" if pumps_csv else "") + (", then sub-catchments." if subcatchments_csv else "."),
         "Field names already match ICM's where one exists; check each in the ODIC drop-downs.",
         "",
         "Node table",
@@ -684,7 +833,37 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
                 cur = r["head_discharge_id"]
                 lines.append(f"  {cur}")
             lines.append(f"    {r['head']:g}\t{r['discharge']:g}")
-    lines += ["", "Not exported: sub-catchments / loads, diurnal profiles, standby pumps."]
+    if subcatchments_csv:
+        lo = loading or {}
+        pc = lo.get("per_capita_lpd", 180)
+        lines += [
+            "Sub-catchment table (import after nodes; ODIC object type Subcatchment): dry weather (foul) loads",
+            "  One sub-catchment per loaded node; subcatchment_id = node_id = the node it drains to. Point geometry",
+            "  at the node and x / y: ICM draws a circle of total_area for a sub-catchment without a boundary.",
+            "  system_type = foul | total_area -> Total area (ha; area loaded, 0.01 ha for nodes with node loads only)",
+            "  contributing_area = 0 (no rainfall runoff from these sub-catchments) | connectivity = 100 (%)",
+            f"  population -> Population, with wastewater_profile = {WASTEWATER_PROFILE}: residential (DS 50 persons/ha"
+            f" x area, at {pc:g} L/person/day)",
+            f"  trade_flow -> Trade flow (L/s) with trade_profile = {TRADE_PROFILE}: commercial and industrial "
+            "(DS 50 Table 4.3)",
+            f"  additional_foul_flow -> Additional foul flow (L/s; wastewater profile {WASTEWATER_PROFILE}): manual "
+            "ADWF and node loads",
+            "  Flows are L/s: set the ODIC unit to l/s if ICM's flow unit is m3/s. wwn_* fields: for checking",
+            "  (wwn_adwf_lps = the node's ADWF as WWNet simulates it).",
+            "  In ICM create a Waste Water event with profile "
+            f"{WASTEWATER_PROFILE}: per capita flow {pc:g} l/hd/d and the diurnal",
+            f"  multipliers; and a Trade Waste event with profile {TRADE_PROFILE}: flow scaling factor 1.0 and the "
+            "diurnal multipliers.",
+            "  Run the simulation with both events. Calibrating: change the per capita flow / multipliers there.",
+        ]
+        if lo.get("profiles"):
+            lines.append("  WWNet diurnal profile(s) in use: " + ", ".join(lo["profiles"])
+                         + " (enter their factors in the ICM profiles; not exported)")
+        lines.append(f"  Totals: population {lo.get('population', 0):.0f}, trade flow {lo.get('trade_flow_lps', 0):.2f}"
+                     f" L/s, additional foul flow {lo.get('additional_foul_flow_lps', 0):.2f} L/s, ADWF "
+                     f"{lo.get('adwf_lps', 0):.2f} L/s")
+    lines += ["", "Not exported: diurnal profiles (set them in the ICM Waste Water / Trade Waste events), standby "
+                  "pumps" + ("" if subcatchments_csv else ", loads (the model has none)") + "."]
     if warnings:
         lines += ["", "Warnings"] + [f"  - {w}" for w in warnings]
     return "\n".join(lines) + "\n"
@@ -753,6 +932,24 @@ def node_geometry_fn(arcpy, sr, geo: dict):
             pt = (pt[0] + DELIVERY_OFFSET_M, pt[1])          # keep it off the wet well (ICM: distinct nodes)
         return point_geometry(arcpy, pt, sr)
     return fn
+
+
+def subcatchment_geometry_fn(arcpy, sr, node_xy: dict):
+    """write_gdb `extra_geom` callback: a sub-catchment's point is its node (as written to ICM_Nodes)."""
+    def fn(row, _seen):
+        p = _xy(node_xy.get(row.get("_geom")))
+        return point_geometry(arcpy, p, sr) if p is not None else None
+    return fn
+
+
+def set_subcatchment_xy(rows: list, node_xy: dict) -> int:
+    """x / y of each sub-catchment = its node (output coordinates); returns how many have no node location."""
+    n = 0
+    for r in rows:
+        p = _xy(node_xy.get(r["node_id"]))
+        r["x"], r["y"] = (round(p[0], 3), round(p[1], 3)) if p is not None else (None, None)
+        n += p is None
+    return n
 
 
 def link_geometry_fn(arcpy, sr, geo: dict, node_xy: dict):

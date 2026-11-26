@@ -23,7 +23,15 @@ def test_build_maps_demo_model(demo_gpkg):
     assert (p["us_node_id"], p["link_suffix"], p["ds_node_id"]) == ("N03", "1", "N04")
     assert p["conduit_width"] == p["conduit_height"] == 225 and p["conduit_shape"] == "CIRC"
     assert p["roughness_type"] == "CW" and p["bottom_roughness_CW"] == 1.0 and p["conduit_length"] == 70.0
-    assert any("wwn_subcatchments: 4" in w for w in d["warnings"])
+    # the demo's 4 sub-catchments (residential R20 / R30) -> 4 foul sub-catchments at their outlet nodes
+    sc = {r["subcatchment_id"]: r for r in d["subcatchments"]}
+    assert set(sc) == {"B1", "N02", "B2", "N05"} and d["counts"]["subcatchments"] == 4
+    assert sc["B1"]["population"] == pytest.approx(1.22 * 70, abs=0.01)          # R20: 70 persons / net ha
+    assert sc["N05"]["population"] == pytest.approx(1.43 * 105, abs=0.01)        # R30
+    assert (sc["B1"]["wastewater_profile"], sc["B1"]["trade_profile"], sc["B1"]["contributing_area"]) == (1, None, 0)
+    assert sc["B1"]["system_type"] == "foul" and sc["B1"]["total_area"] == 1.22 and sc["B1"]["wwn_rcodes"] == \
+        "R20 1.22 ha"
+    assert not any("NOT exported" in w for w in d["warnings"])
 
 
 def test_suffixes_unique_and_floor_fallback(demo_gpkg):
@@ -68,7 +76,7 @@ def test_export_icm_writes_gdb_csv_and_notes(fake_arcpy, demo_gpkg, tmp_path):
     with open(r["conduits_csv"], newline="") as fh:
         assert len(list(csv.DictReader(fh))) == 11
     notes = open(r["notes"], encoding="utf-8").read()
-    assert "NODES FIRST" in notes and "wwn_subcatchments" in notes
+    assert "NODES FIRST" in notes and "then sub-catchments" in notes and "Waste Water event" in notes
     assert a.env.geographicTransformations is None                 # GDA2020 out: no transformation
     # second run replaces the feature classes
     tools_impl.export_icm(a, Messages(a), demo_gpkg, str(out))
@@ -109,7 +117,7 @@ def test_fake_add_field_rejects_reserved_and_duplicates():
 def test_write_gdb_uses_one_addfields_per_fc(fake_arcpy, demo_gpkg, tmp_path):
     a = fake_arcpy([])
     tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path))
-    assert a.addfields_calls == 2
+    assert a.addfields_calls == 3                   # nodes, conduits, sub-catchments (the demo has 4)
     assert not [x for x in a.added if x[0] == "field"]
 
 
@@ -429,8 +437,8 @@ def test_export_icm_writes_pumps_and_rising_mains(fake_arcpy, demo_gpkg, tmp_pat
         assert frag in notes, frag
     assert "Not exported: pump stations" not in notes
     info = " ".join(t for k, t in a.log if k == "info")
-    assert "1 rising main(s) and 2 pump(s)" in info and "Timing ICM_Pumps:" in info
-    assert a.addfields_calls == 3
+    assert "1 rising main(s), 2 pump(s) and 4 sub-catchment(s)" in info and "Timing ICM_Pumps:" in info
+    assert a.addfields_calls == 4               # nodes, conduits, pumps, sub-catchments
 
     # re-export after the station is removed: stale pump table and CSVs go
     _edit(demo_gpkg, "DELETE FROM wwn_pumps", "DELETE FROM wwn_pump_stations", "DELETE FROM wwn_rising_mains")

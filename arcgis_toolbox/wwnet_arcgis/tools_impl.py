@@ -1271,8 +1271,8 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
             msgs.info(f"Projecting GDA2020 -> GDA94 with {name}.")
         else:
             msgs.warn("No GDA94 <-> GDA2020 transformation is listed by ArcGIS; coordinates may be ~1.5 m out.")
-    node_tm, conduit_tm, pump_tm, gdb_s = {}, {}, {}, 0.0
-    pumps_csv = hd_csv = None
+    node_tm, conduit_tm, pump_tm, sub_tm, gdb_s = {}, {}, {}, {}, 0.0
+    pumps_csv = hd_csv = subs_csv = None
     with gpenv.quiet(arcpy):
         stem = icm_export.safe_stem(gpkg_path)
         gdb = os.path.join(out_folder, f"{stem}_ICM.gdb")
@@ -1300,6 +1300,23 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
             lap("pumps")
         elif arcpy.Exists(pumps_fc):            # stale table from an earlier export of this model
             arcpy.management.Delete(pumps_fc)
+        subs_fc = os.path.join(gdb, "ICM_Subcatchments")
+        subs_path = os.path.join(out_folder, f"{stem}_ICM_subcatchments.csv")
+        if data["subcatchments"]:
+            no_xy = icm_export.set_subcatchment_xy(data["subcatchments"], xy)
+            if no_xy:
+                data["warnings"].append(f"{no_xy} sub-catchment(s) drain to a node without a location: no x / y.")
+            icm_export.write_gdb(arcpy, gdb, "ICM_Subcatchments", "POINT", icm_export.SUBCATCHMENT_FIELDS,
+                                 data["subcatchments"], "subcatchment_id", None, None, sr, timings=sub_tm,
+                                 extra_geom=icm_export.subcatchment_geometry_fn(arcpy, sr, xy))
+            icm_export.write_csv(subs_path, icm_export.SUBCATCHMENT_FIELDS, data["subcatchments"])
+            subs_csv = subs_path
+            lap("sub-catchments")
+        else:
+            if arcpy.Exists(subs_fc):
+                arcpy.management.Delete(subs_fc)
+            if os.path.isfile(subs_path):
+                os.remove(subs_path)
         nodes_csv = os.path.join(out_folder, f"{stem}_ICM_nodes.csv")
         conduits_csv = os.path.join(out_folder, f"{stem}_ICM_conduits.csv")
         icm_export.write_csv(nodes_csv, icm_export.NODE_FIELDS, data["nodes"], xy=xy)
@@ -1318,14 +1335,23 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
         notes = os.path.join(out_folder, f"{stem}_ICM_import_notes.txt")
         with open(notes, "w", encoding="utf-8") as fh:
             fh.write(icm_export.notes_text(gpkg_path, out_sr_label, gdb, nodes_csv, conduits_csv, data["warnings"],
-                                           pumps_csv=pumps_csv, hd_csv=hd_csv, head_discharge=data["head_discharge"]))
+                                           pumps_csv=pumps_csv, hd_csv=hd_csv, head_discharge=data["head_discharge"],
+                                           subcatchments_csv=subs_csv, loading=data["loading"]))
         k = data["counts"]
         msgs.info(f"Exported {k['nodes']} node(s), {k['conduits']} gravity sewer(s), {k['rising_mains']} rising "
-                  f"main(s) and {k['pumps']} pump(s) in {out_sr_label}.")
+                  f"main(s), {k['pumps']} pump(s) and {k['subcatchments']} sub-catchment(s) in {out_sr_label}.")
+        if data["subcatchments"]:
+            lo = data["loading"]
+            msgs.info(f"Sub-catchments (foul, one per loaded node): population {lo['population']:.0f} at "
+                      f"{lo['per_capita_lpd']:g} L/person/day (wastewater profile {icm_export.WASTEWATER_PROFILE}), "
+                      f"trade flow {lo['trade_flow_lps']:.2f} L/s (trade profile {icm_export.TRADE_PROFILE}), "
+                      f"additional foul flow {lo['additional_foul_flow_lps']:.2f} L/s; ADWF {lo['adwf_lps']:.2f} L/s. "
+                      "Set the per capita flow and diurnal factors in ICM's Waste Water / Trade Waste events.")
         for w in data["warnings"]:
             msgs.warn(w)
         msgs.info(f"Geodatabase: {gdb}")
-        msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}" + "".join(f" ; {x}" for x in (pumps_csv, hd_csv) if x))
+        msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}" + "".join(f" ; {x}" for x in (pumps_csv, hd_csv, subs_csv)
+                                                                  if x))
         msgs.info(f"Import notes (field mapping for ICM's Open Data Import Centre): {notes}")
         lap("CSV/notes")
     msgs.info("Timing: " + ", ".join(f"{k} {v:.1f} s" for k, v in tm.items())
@@ -1336,6 +1362,8 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
     msgs.info("Timing ICM_Conduits: " + ", ".join(f"{k} {conduit_tm.get(k, 0.0):.1f} s" for k in tkeys))
     if pump_tm:
         msgs.info("Timing ICM_Pumps: " + ", ".join(f"{k} {pump_tm.get(k, 0.0):.1f} s" for k in tkeys))
+    if sub_tm:
+        msgs.info("Timing ICM_Subcatchments: " + ", ".join(f"{k} {sub_tm.get(k, 0.0):.1f} s" for k in tkeys))
     return {"gdb": gdb, "nodes_csv": nodes_csv, "conduits_csv": conduits_csv, "pumps_csv": pumps_csv,
-            "head_discharge_csv": hd_csv, "notes": notes, **data}
+            "head_discharge_csv": hd_csv, "subcatchments_csv": subs_csv, "notes": notes, **data}
 

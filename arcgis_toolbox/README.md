@@ -25,7 +25,7 @@ last Check / Design / Import / Simulation, column `source`).
 | Calculate Existing Demand | Data | Existing dry weather flow from land use: DPLH-071 zones + DPLH-070 R-Codes -> DS 50 loading per node (sub-catchments `LU-<node>-<class>`) and the Land use loading review layer (see below); preview first |
 | Import Diurnal Profile | Data | Profile from CSV / TXT or text pasted from ICM (Time / Factor); mean checked, not changed |
 | Assign Profile | Data | Sets the profile of the node loads of the selected nodes, selected node loads / sub-catchments, or all |
-| Export To ICM | Data | Nodes, gravity sewers, rising mains and pumps with InfoWorks ICM field names (file gdb + CSV + mapping notes) |
+| Export To ICM | Data | Nodes, gravity sewers, rising mains, pumps and foul sub-catchments (one per loaded node) with InfoWorks ICM field names (file gdb + CSV + mapping notes) |
 | Check Model | Analysis | Topology / data checks, plus missing pump station data; results in the Issues layer |
 | Run Design | Analysis | Steady DS 50 design; Design results layer; selects failed conduits |
 | Run Simulation | Analysis | SWMM dry weather run with a run label; roughness `ks` (Colebrook, as the design) by default or Manning n; series stored for the 5 conduits nearest the outlet and the conduits selected in the map; pump station tables / flags and a temporary pump station layer |
@@ -341,8 +341,16 @@ unrecognised) and the values found in the R-Codes layer's field.
 
 The **Land use loading** layer (`wwn_land_use`, rewritten each run) shows every zone polygon read with its class,
 LPS and DS 50 codes, area, area loaded, ADWF, the nodes it loads and its flags; issues go to the Issues layer
-(source `demand`). Zones are read within the model extent + the maximum distance (or the selected polygons). Export To
-ICM does not export sub-catchments yet.
+(source `demand`). Zones are read within the model extent + the maximum distance (or the selected polygons).
+
+**Export To ICM** writes the loads as `ICM_Subcatchments` (+ `<model>_ICM_subcatchments.csv`): one foul
+sub-catchment per loaded node (id = node id, point at the node; ICM draws a circle of `total_area` for a
+sub-catchment without a boundary), `contributing_area` 0, connectivity 100. Residential -> `population` (DS 50
+persons/ha x area) on wastewater profile 1; commercial and industrial -> `trade_flow` (L/s) on trade profile 1 (one
+shared trade profile); manual ADWF and node loads -> `additional_foul_flow` (L/s). In ICM, create a Waste Water event
+(profile 1: per capita flow 180 l/hd/d dry south, diurnal multipliers) and a Trade Waste event (profile 1: flow
+scaling factor 1.0, diurnal multipliers). The total equals the ADWF Run Simulation uses (`wwn_adwf_lps` per row).
+Import it after the nodes (ODIC object type Subcatchment; flows in L/s).
 
 ## Editing GeoPackages in Pro
 - Pro reads GeoPackage tables as `file.gpkg\main.<table>`; `fid` is the ObjectID.
