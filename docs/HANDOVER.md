@@ -1,5 +1,5 @@
 Branch: **`main`** (default; the 2026-11-26 session's `ccr-f18eb556-rbdbtr` is merged into it by PR, section 15;
-the 2026-11-25 session's `ccr-153a547e-mtrc3t` before it, section 14).
+the 2026-11-25 session's `ccr-153a547e-mtrc3t` before it, section 14). It was restarted from `ccr-7bd083b1-j0qlhq`
 (38f46e2), which holds BOTH earlier lines of work: the 2026-11-23/24 ArcGIS session (`ccr-54bf38a8-b92qd9`: pressure
 side, Export To ICM, Self Test, Update WWNet; sections 2-11) and the 2026-11-23 review session (schema v3 / toolbox
 UX; **section 12**), merged on 2026-11-24. All older branches (`ccr-7bd083b1-j0qlhq`, `ccr-54bf38a8-b92qd9`,
