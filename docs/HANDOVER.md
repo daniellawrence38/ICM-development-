@@ -522,6 +522,10 @@ sub-catchments; population 100,347 at 180 L/p/d, trade flow 33.42 L/s, ADWF 242.
 SAP_ID: the register cannot match them; S2004007) and S0030035 without a rising main: their wet wells have no outlet,
 so with loads on they will fill / flood in ICM; 9 hanging rising main discharges; 7 dangling sewer ends.
 
+ICM import (user, 2026-11-26): sub-catchments imported; ICM totals population 100,347 and trade flow 33.42 L/s =
+the export. Additional foul flow 0 is expected (no node loads / manual ADWF in EdenHillv8). Next: Waste Water event
+(profile 1, 180 l/hd/d + diurnal) and Trade Waste event (profile 1) in ICM, one step at a time.
+
 ### Where we stopped (next session starts here) — end of the 2026-11-26 session
 
 1. Demand is written for EdenHillv8 (242 L/s). Next: user installs the update, runs Export To ICM on EdenHillv8,
