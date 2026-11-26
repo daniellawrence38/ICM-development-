@@ -1,12 +1,11 @@
-# WWNet: session handover (2026-11-25)
-
-Branch: **`main`** (default; the 2026-11-25 session's `ccr-153a547e-mtrc3t` is merged into it, section 14). It was restarted from `ccr-7bd083b1-j0qlhq`
+Branch: **`main`** (default; the 2026-11-26 session's `ccr-f18eb556-rbdbtr` is merged into it by PR, section 15;
+the 2026-11-25 session's `ccr-153a547e-mtrc3t` before it, section 14). It was restarted from `ccr-7bd083b1-j0qlhq`
 (38f46e2), which holds BOTH earlier lines of work: the 2026-11-23/24 ArcGIS session (`ccr-54bf38a8-b92qd9`: pressure
 side, Export To ICM, Self Test, Update WWNet; sections 2-11) and the 2026-11-23 review session (schema v3 / toolbox
 UX; **section 12**), merged on 2026-11-24. All older branches (`ccr-7bd083b1-j0qlhq`, `ccr-54bf38a8-b92qd9`,
 `ccr-472a9a6a-he69zu`, `ccr-974cdaeb-c682le`) are contained in this one: continue here.
-**Start here: section 14 (pump station register import, where we stopped), then 13 (antivirus, assistant removed),
-12 (what the merge changed) and 11.**
+**Start here: section 15 (existing demand from land use, 2026-11-26, where we stopped), then 14 (pump station register
+import), 13 (antivirus, assistant removed), 12 (what the merge changed) and 11.**
 **Session workflow (from 2026-11-25):** `main` holds the latest working code (created at 0b59caa; the user is
 setting it as the GitHub default branch, replacing `ccr-974cdaeb-c682le`). New sessions start from `main` in the
 personal cloud environment `ICM-development-`, whose setup script builds `.venv` (pytest, pyflakes, maturin,
@@ -73,6 +72,7 @@ Key ArcGIS modules: `tools_impl.py` (tool logic), `engine.py` (wwnet_native call
 | **Import Pressure Data** | Data | new, **not yet run on real data** |
 | **Set Pump Station Data** | Data | new, not yet run in Pro (manual entry: wet well dia/area, levels AHD or depth, duty/assist/standby, rate or pasted curve); 2026-11-25: optional wet well floor level (§14) |
 | **Import Pump Station Data** | Data | 2026-11-25 (§14): pump station register .xlsx → levels / floor / area / storage / design rate; not yet run in Pro |
+| **Calculate Existing Demand** | Data | 2026-11-26 (§15): DPLH-071 zones + DPLH-070 R-codes -> DS 50 loading per node (`LU-*` sub-catchments) + Land use loading layer; not yet run in Pro |
 | Import Diurnal Profile | Data | fake-tested; Self Test PASS in Pro |
 | **Export To ICM** | Data | **verified: gravity model loads into ICM 2024.5 and runs.** Terminal chambers → Outfall; dangling ends stay Break (warned); DEM fill of missing ground levels; GDA2020 or GDA94 output. **2026-11-24: rising mains + pumps now exported (§11), not yet run in Pro / ICM** |
 | Run Design | Analysis | verified |
@@ -402,3 +402,149 @@ main ends, wet well at the PS point, 1 m minimum length, chamber floor lowering,
    README / handover sections 4-5 tables partly stale (tool count now 23).
 5. Then §11 "Where we stopped" items (ICM pump run comparison) and §8.
 
+## 15. 2026-11-26: existing demand from land use (Calculate Existing Demand)
+
+User's question: how best to load existing demand without a load per connection point slowing ICM. Answer given:
+ICM / SWMM take inflow only at nodes, so per-connection loading gives the same pipe flows as summing per node
+(lossless); run time is driven by the hydraulic network (links, short conduits, timestep), not foul loads.
+Recommended ICM form (next step, not built): one ICM subcatchment per loaded node (population + wastewater profile;
+trade flow + trade profile for non-residential; base flow for infiltration), per-capita flow and diurnal shape in the
+Waste Water event (calibration in one place). Unconfirmed: whether ODIC accepts subcatchments without a boundary
+polygon (test 3 rows; else Voronoi cells per node). If ICM run time ever is a problem, the lever is network
+simplification (drop reticulation, push loads to the first retained node), optional only (infill makes DN150 the
+constraint).
+
+User's method and data (2026-11-26): **DPLH-071 Local Planning Scheme Zones and Reserves** (field *Zone*; block-sized
+polygons) gives the area and the use; residential zones take the code from **DPLH-070 Local Planning Scheme R-Codes**
+(field "R code number"; suburb-sized polygons); non-residential zones -> closest DS 50 class, **no match -> flag and
+R15**; zero flow for roads, parks, conservation reserves, farm. Flow monitoring calibration: **disregarded for now**
+(user).
+
+Built (Python only, no Rust change -> `wwnet-arcgis-update` + Update WWNet, then right-click toolbox > Refresh):
+- `qgis_plugin/wwnet/core/demand.py` (pure): `Rules` (zone text -> class, whole-word first-match rules from
+  `templates/import/dplh_land_use.toml`), `parse_rcode` (number / R20 / dual R20/40 -> base / aliases), `Rates`
+  (DS 50 Tables 4.1-4.3 from the ruleset; R15 minimum, next higher row, highest row above the table, as
+  `wwnet-rules::residential_rate`), `Rings` (even-odd polygon with banded edges: area, scanline, contains, OGC
+  polygons), `sample_points` (~50 per polygon, 2-20 m), `SewerIndex` (ring search), `calculate`.
+  Allocation: each sample -> nearest model sewer within 150 m -> that sewer's US node (same rule as connection
+  points); beyond -> not loaded (PARTLY_LOADED / NOT_LOADED). Per node + class one `wwn_subcatchments` row
+  `LU-<node>-<R-code row | COM | IND | HOT | CBA>`, net_area_ha = allocated area, no geometry, status existing, notes
+  with zones and LPS -> DS 50 codes. residential_or_commercial (centre, mixed use): residential where an R-code
+  exists, else commercial. Blank zone -> zero (ZONE_BLANK; `options.blank_zone_class`). Rural residential /
+  smallholdings -> zero (assumed unsewered; my call, tell the user). Region from the mean sewer northing
+  (26 deg S = N 7,124,316 on the CM). Perth CBA not auto-mapped (comment in the TOML).
+- `arcgis_toolbox/wwnet_arcgis/demand_import.py`: polygon rings from Pro shapes (None-separated holes), zones read
+  with a spatial filter on the sewer extent + max distance (or the selection), R-codes on the zones' extent;
+  `write_result` in one transaction: replace LU-* rows, delete `wwn_node_loads` source=connection_points (default;
+  manual loads kept), rewrite `wwn_land_use` (Python-created MULTIPOLYGON feature table "Land use loading", NOT in
+  `templates/schema.sql`, so no Rust rebuild), replace `wwn_issues` source **`demand`** rows directly (the engine's
+  `store_issues` only accepts check / design / import / simulate).
+- Tool **Calculate Existing Demand** (Data; 24 tools): zones layer + Zone field, R-Codes layer + R-code field
+  (defaults picked from the field names), use selected, preview, max distance 150 m, dry / wet, region, replace
+  connection point loads, zone rules TOML. Symbology `style_land_use` (zone_class colours).
+- Verified here: the engine's simulated inflow rises by exactly the Python ADWF total (test); design / simulate /
+  upgrade / check run on a model with the new rows and table. Benchmark: 6,750 zone polygons, 3,375 sewers, 12
+  R-code polygons of 4,000 vertices: 2.5 s (50 samples; 200 gave the same total at 9 s).
+- Tests: shared core 179 + 1 skipped (43 new in `qgis_plugin/tests/test_demand.py`), toolbox 309 (11 new in
+  `arcgis_toolbox/tests/test_demand.py`; fake arcpy now returns polygons with None-separated holes and OID@).
+
+### First real run (EdenHill, preview, 2026-11-26) and the follow-up
+
+User's preview: 1,047 zones (2,681 ha: residential 1,710, commercial 456, industrial 128, zero 376), 1,326
+R-Codes polygons (so block-sized, not suburb-sized as first described), 53 s in Pro. Loaded 1,485 ha on 7,710
+nodes (8,264 rows), ADWF 205 L/s (residential 172, commercial 32, industrial 0.8). Zone names are the DPLH
+standardised ones ('Medium and high density residential', 'Residential development', 'General commercial',
+'Light industry', 'General industry', 'Business', 'Public purposes', 'Private clubs and institutions'); unmatched
+'Special purpose' and 'Service station' -> now commercial. 428 ha residential "no R-code" and 113 ha below R15
+(counted on the read area then). No connection point loads in that model (the comparison line did not print).
+353 NOT_LOADED warnings, nearly all polygons in the rectangular read area beyond the network.
+Fixed: NOT_LOADED only when a model sewer is within 2 x the maximum distance (warning with the distance), else
+OUTSIDE_MODEL (counted, no issue); R-code notes on the loaded area only and split into outside every R-Codes
+polygon vs blank code; R-Codes field values listed; per-class zone name breakdown (area loaded); "no connection
+point loads" line. Shared core 187 + 1 skipped, toolbox 309.
+
+### Second run and split coding (2026-11-26)
+
+Second preview (EdenHillv8): commercial = 'Special use' 250.7 ha loaded (~27 L/s of 32.6), 'Public purposes' 23,
+'Education' 6.9, 'General commercial' 6.7 ...; residential 'Residential' 615, 'Residential development' 342,
+'Medium and high density residential' 225 ha; 340 ha residential outside every R-Codes polygon (~= the 'Residential
+development' area: structure plan codes not in DPLH-070 -> R15). R-Codes values: R20 219, R20/40 150, R40 143,
+R20/35 126, R20/50 115 ... (field `rcode_no`). 36 near misses (64 ha), 311 outside (643 ha). 28.7 s.
+User (2026-11-26): "Add a field for the split zoning, to select higher or lower density" -> tool parameter
+*Split-coded R-codes* (lower = as built, default; higher = as permitted; min / max of the two codes, so order does
+not matter; `Options.split_code`); "Commercial should have flow as per ds50" -> read as: keep Special use etc. as
+commercial at the DS 50 Table 4.3 rate (no change). User: "R30 for residential development zone" -> zone rules
+take an optional third value, a default R-code used only where DPLH-070 has no code (`Rules.classify` returns
+(class, rule, default)); bundled rule ["residential development", "residential", "R30"] ahead of "residential".
+Summary line "the zone's default code where the R-Codes layer has none: 'Residential development' R30 x ha".
+
+### Third run, written (EdenHillv8, 2026-11-26)
+
+R30 default applied to 339.97 ha ('Residential development'); only 0.19 ha residential left outside every R-Codes
+polygon. DS 50 rows loaded: R15 12.5, R20 551.8, R25 231.1, R30 371.5, R40 15.3 ha. ADWF 242.48 L/s (residential
+209.06, commercial 32.62, industrial 0.79), lower split code. Written: 8,260 LU-* rows on 7,710 nodes, 1,047
+polygons in the Land use loading layer.
+
+ICM subcatchments without a boundary (ICM help, checked 2026-11-26): imported subcatchments with no boundary get a
+dummy circle of `total_area` centred on the subcatchment; `contributing_area` must be entered (0 allowed) and
+governs runoff; `x` / `y` = centroid. Foul flow = population x connectivity x per capita flow of the wastewater
+profile + additional foul flow; trade flow x trade profile; base flow constant. So the ICM export can be a point
+table per loaded node (no Voronoi needed). Exact ODIC mapping for a point layer still to confirm in ICM.
+
+### Export To ICM: foul sub-catchments (2026-11-26)
+
+User: "Go ahead, same trade profiles for commercial and industrial". `icm_export.subcatchments()`: ONE ICM
+sub-catchment per loaded node, aggregating every load the engine simulates: LU-* and other wwn_subcatchments
+(residential -> population = net area x DS 50 persons/ha, scaled to the wastewater profile's per capita flow when a
+row's L/p/d differs, i.e. wet ground; commercial / industrial -> trade_flow L/s, trade profile 1 for both; manual
+adwf_lps -> additional_foul_flow), wwn_node_loads (adwf_lps or connections x adwf_per_connection_lpd ->
+additional_foul_flow). Fields (ICM names): subcatchment_id = node_id, system_type foul, total_area (ha; 0.01 for
+load-only nodes), contributing_area 0, connectivity 100, population, wastewater_profile 1, trade_flow, trade_profile
+1, additional_foul_flow, x / y (= node, output SR) + wwn_adwf_lps, wwn_residential/commercial/industrial_ha,
+wwn_rcodes, notes. Not exported (warned): outlet not a node, no net area (polygon only), extra_flow_lps (design
+only). Broadacre: gross x 0.75. ICM_Subcatchments point fc (geometry = node point) + CSV; stale table / CSV removed
+when there are no loads. Notes: ODIC order nodes > conduits > pumps > sub-catchments; Waste Water / Trade Waste event
+set-up; flows L/s. Test: after Calculate Existing Demand on the demo, the exported wwn_adwf_lps total = the engine's
+simulated inflow (rel 1e-4). Toolbox 313, shared core 189 + 1 skipped.
+
+User after the first ICM import: "Nothing in the export about the subcatchments but infoworks is saying they drain
+to nodes with different subcatchments" -> ICM engineering validation check "Node is a different system type than
+the subcatchment": sub-catchments were system_type foul, nodes / conduits had none (ICM default). Fixed:
+`icm_export.SYSTEM_TYPE = "foul"` on every node, conduit (incl. rising mains), pump and sub-catchment (new
+`system_type` field in NODE / CONDUIT / PUMP_FIELDS; the user's saved ODIC configs must map it). "Nothing in the
+export about the subcatchments": unclear (messages? notes?) — asked for the export messages.
+
+Export with run 117 (EdenHillv8, 2026-11-26 14:26): 8,701 nodes, 8,650 sewers, 19 rising mains, 12 pumps, 7,710
+sub-catchments; population 100,347 at 180 L/p/d, trade flow 33.42 L/s, ADWF 242.48 L/s (= Calculate Existing Demand).
+123 s (GP create / fields / delete 4-14 s per table). Still open from the messages: 3,973 nodes without ground level
+(no DEM given this time); 7 stations with no pump data (6 WW_<numeric id> stations from pump stations without a
+SAP_ID: the register cannot match them; S2004007) and S0030035 without a rising main: their wet wells have no outlet,
+so with loads on they will fill / flood in ICM; 9 hanging rising main discharges; 7 dangling sewer ends.
+
+ICM import (user, 2026-11-26): sub-catchments imported; ICM totals population 100,347 and trade flow 33.42 L/s =
+the export. Additional foul flow 0 is expected (no node loads / manual ADWF in EdenHillv8). Next: Waste Water event
+(profile 1, 180 l/hd/d + diurnal) and Trade Waste event (profile 1) in ICM, one step at a time.
+
+### Where we stopped (next session starts here) — end of the 2026-11-26 session
+
+State: everything from this session (`ccr-f18eb556-rbdbtr`) is merged into `main`. User's PC: runs the latest build
+(CI run 117 `wwnet-arcgis-update`, Update WWNet; Python only since 38f46e2). Calculate Existing Demand written for
+EdenHillv8 (242.48 L/s); Export To ICM with 7,710 foul sub-catchments imported into ICM 2024.5 by ODIC; ICM totals
+confirmed (population 100,347, trade flow 33.42 L/s). Tools: 24.
+
+1. **In progress: ICM Waste Water event.** Step 1 was given (Explorer: right-click the model group > New InfoWorks >
+   Waste Water; name it, open it) — menu names from memory, the Autodesk help look-up was interrupted. Ask what the
+   editor shows (columns; a tab for calibration / diurnal factors), then: profile 1, per capita flow 180 l/hd/d,
+   diurnal multipliers (the user's real ICM profile "1 Dunkley Ave Applecross PS4" or the WWNet example). Then the
+   Trade Waste event (profile 1, flow scaling factor 1.0, diurnal multipliers), then a dry weather run with both
+   events; compare the mean foul inflow with 242 L/s. One step at a time.
+2. Before reading capacity results: 8 stations have no pump in the export (6 `WW_<numeric id>` stations whose GIS
+   pump station has no SAP_ID, so the register cannot match them; S2004007 without data; S0030035 without a rising
+   main): their wet wells fill / flood with loads on. 9 rising main discharges hang (Outfalls; connect by hand). 7
+   dangling sewer ends. 3,973 nodes without ground level (use the DEM parameter of Export To ICM).
+3. Open questions: rural residential / smallholdings as zero (assumed unsewered); R-AC code equivalents
+   (`[rcode_aliases]`, empty); DS 50 rates (180 L/p/d, R-code occupancy) used as existing flow — the user chose
+   DS 50, they read high in up-coded areas; option to export all flow as additional foul flow (offered, not wanted
+   so far); QGIS plugin has no front end for Calculate Existing Demand (core is shared); export GP calls slow (123 s;
+   delete / create / AddFields 4-14 s per table — recreating the whole gdb offered earlier, not done).
+4. Section 14's open items (Self Test after install, ICM pump run comparison) and §8.

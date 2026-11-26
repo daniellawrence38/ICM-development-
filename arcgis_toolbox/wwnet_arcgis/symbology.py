@@ -101,6 +101,16 @@ def style_subcatchments(layer):
         pass
 
 
+def style_land_use(layer):
+    """Calculate Existing Demand review layer: zone class colours, part transparent."""
+    s = _style()
+    _unique(layer, "zone_class", lambda v: s.LAND_USE_CLASS.get(str(v), s.DEFAULT))
+    try:
+        layer.transparency = 40
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def style_pump_stations(layer):
     _simple(layer, _style().PUMP_STATION, size=10)
 
@@ -152,7 +162,7 @@ _STYLERS = {"wwn_nodes": style_nodes, "wwn_conduits": style_conduits, "wwn_subca
             "wwn_pump_stations": style_pump_stations, "wwn_rising_mains": style_rising_mains,
             "wwn_results_conduits": style_results, "wwn_sim_conduit_results": style_sim,
             "wwn_sim_node_results": style_sim_nodes, "wwn_sim_compare": style_compare,
-            "wwn_issues": style_issues, "sim_pumps": style_sim_pumps}
+            "wwn_issues": style_issues, "sim_pumps": style_sim_pumps, "wwn_land_use": style_land_use}
 
 
 def apply(table: str, layer, msgs):

@@ -396,6 +396,106 @@ def import_pump_station_data(arcpy, msgs: Messages, gpkg_path: str, register: st
     return res
 
 
+GROUND = {"dry": "dry", "wet": "wet"}
+REGIONS = {"auto": None, "south": "south", "north": "north"}
+
+
+def calculate_existing_demand(arcpy, msgs: Messages, gpkg_path: str, zones_layer, zone_field: str,
+                              rcodes_layer=None, rcode_field: str | None = None, use_selected: bool = True,
+                              max_distance: float | None = 150.0, ground: str = "dry", region: str = "auto",
+                              replace_cp_loads: bool = True, config: str | None = None, preview: bool = False,
+                              add_to_map: bool = True, split_code: str = "lower"):
+    """Existing dry weather demand from Local Planning Scheme zones (DPLH-071) and R-Codes (DPLH-070): DS 50
+    loading per node as wwn_subcatchments LU-* rows + the review layer wwn_land_use (see demand_import).
+    Returns the demand.Result, or None after an "ERROR:" warning (bad template / locked GeoPackage)."""
+    from . import demand_import as di
+    dm = di.core()
+    if not gpkg_path or not os.path.exists(gpkg_path):
+        raise RuntimeError(f"The model {gpkg_path!r} does not exist. Run Import Network Data first.")
+    if not pressure_import.model_has_tables(gpkg_path):
+        raise RuntimeError(f"{gpkg_path} is not a WWNet model (no wwn_nodes / wwn_conduits tables).")
+    if not zone_field:
+        raise RuntimeError("Choose the zone field of the zones layer (DPLH-071 'Zone').")
+    if rcodes_layer is not None and not rcode_field:
+        raise RuntimeError("Choose the R-code field of the R-Codes layer (DPLH-070).")
+    try:
+        rules = dm.Rules.from_template(dm.load_template(config) if config else None)
+    except (ValueError, OSError) as exc:
+        msgs.warn(f"ERROR: zone rules template: {exc}")
+        return None
+    opts = dm.Options(max_distance_m=float(max_distance if max_distance is not None else 150.0),
+                      ground=GROUND.get(str(ground or "dry").lower(), "dry"),
+                      region=REGIONS.get(str(region or "auto").lower()),
+                      split_code="higher" if str(split_code or "lower").lower() == "higher" else "lower")
+    if preview:
+        msgs.info("PREVIEW — nothing written.")
+    sewers = di.read_sewers(gpkg_path)
+    if not sewers:
+        raise RuntimeError("The model has no sewers with geometry: run Import Network Data first.")
+    before = di.existing_loads(gpkg_path)
+    with gpenv.quiet(arcpy):
+        sources = [("Zones", zones_layer)] + ([("R-Codes", rcodes_layer)] if rcodes_layer is not None else [])
+        sewer_import.prepare_projection(arcpy, msgs, sources)
+        zrows = di.read_polygons(arcpy, zones_layer, zone_field, "Zones", di.sewers_bbox(sewers, opts.max_distance_m),
+                                 use_selected, msgs)
+        if not zrows:
+            msgs.warn("ERROR: no zone polygons were read (nothing selected / none within the model area?).")
+            return None
+        rrows = []
+        if rcodes_layer is not None:
+            rrows = di.read_polygons(arcpy, rcodes_layer, rcode_field, "R-Codes", di.rows_bbox(zrows), use_selected,
+                                     msgs)
+        else:
+            msgs.warn("No R-Codes layer: every residential zone is loaded as R15 (DS 50 4.2.1(c)).")
+    res = dm.calculate([{"id": r["id"], "zone": r["value"], "rings": r["rings"]} for r in zrows],
+                       [{"id": r["id"], "rcode": r["value"], "rings": r["rings"]} for r in rrows],
+                       sewers, rules, opts)
+    for line in res.lines:
+        msgs.info(line)
+    warn = [i for i in res.issues if i["severity"] == "warning"]
+    for i in warn[:di.MAX_LINES]:
+        msgs.warn(f"{i['code']} polygon {i['object_id']}: {i['message']}")
+    if len(warn) > di.MAX_LINES:
+        msgs.warn(f"... {len(warn) - di.MAX_LINES} more warning(s): see the Issues layer (source 'demand') and the "
+                  f"flags in the {di.LAND_USE_TITLE} layer.")
+    cp_note = (f"Import Sewer Data's connection point loads: {before['cp_rows']} node load(s), "
+               f"{before['cp_connections']} connection(s) x {before['per_connection_lpd']:g} L/d = "
+               f"{before['cp_adwf_lps']:.2f} L/s (land use: {res.totals['adwf_total_lps']:.2f} L/s)")
+    if before["other_subcatchments"]:
+        msgs.warn(f"The model has {before['other_subcatchments']} other sub-catchment(s) (not LU-*): they are kept "
+                  "and ALSO load the network. Delete them if the land-use loading covers the same area.")
+    if not before["cp_rows"]:
+        msgs.info(f"The model has no connection point loads (nothing to replace or compare; land use: "
+                  f"{res.totals['adwf_total_lps']:.2f} L/s).")
+    if preview:
+        if before["cp_rows"]:
+            msgs.info(cp_note + (": would be REPLACED." if replace_cp_loads else ": would be KEPT (both load the "
+                                                                                    "network)."))
+        msgs.info("Preview only: untick 'Preview only' to write the sub-catchments and the review layer.")
+        return res
+    try:
+        stats = di.write_result(gpkg_path, res, replace_cp_loads)
+    except sqlite3.OperationalError as exc:
+        if _warn_if_locked(msgs, exc):
+            return None
+        raise
+    if before["cp_rows"]:
+        msgs.info(cp_note + (f": {stats['deleted_cp_loads']} removed (the land-use loading replaces them; re-run "
+                             "Import Network Data to get them back)." if replace_cp_loads
+                             else ": KEPT (both load the network: double counting)."))
+    msgs.info(f"Wrote {len(res.subcatchments)} sub-catchment row(s) LU-<node>-<class> (replaced "
+              f"{stats['replaced_subcatchments']} from an earlier run) and {len(res.polygons)} polygon(s) to the "
+              f"{di.LAND_USE_TITLE} layer. Run Design / Run Simulation now use them.")
+    if add_to_map:
+        try:
+            with gpenv.quiet(arcpy):
+                maplayers.ensure_layer(arcpy, gpkg_path, di.LAND_USE_TABLE, msgs)
+            _show_issues_layer(arcpy, msgs, gpkg_path)
+        except Exception as exc:  # noqa: BLE001
+            msgs.warn(f"Could not add the {di.LAND_USE_TITLE} layer to the map: {exc}")
+    return res
+
+
 def _table_lines(header: tuple, rows: list) -> list:
     widths = [max(len(str(x)) for x in col) for col in zip(header, *rows)]
     fmt = " | ".join("{:<%d}" % w for w in widths)
@@ -1171,8 +1271,8 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
             msgs.info(f"Projecting GDA2020 -> GDA94 with {name}.")
         else:
             msgs.warn("No GDA94 <-> GDA2020 transformation is listed by ArcGIS; coordinates may be ~1.5 m out.")
-    node_tm, conduit_tm, pump_tm, gdb_s = {}, {}, {}, 0.0
-    pumps_csv = hd_csv = None
+    node_tm, conduit_tm, pump_tm, sub_tm, gdb_s = {}, {}, {}, {}, 0.0
+    pumps_csv = hd_csv = subs_csv = None
     with gpenv.quiet(arcpy):
         stem = icm_export.safe_stem(gpkg_path)
         gdb = os.path.join(out_folder, f"{stem}_ICM.gdb")
@@ -1200,6 +1300,23 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
             lap("pumps")
         elif arcpy.Exists(pumps_fc):            # stale table from an earlier export of this model
             arcpy.management.Delete(pumps_fc)
+        subs_fc = os.path.join(gdb, "ICM_Subcatchments")
+        subs_path = os.path.join(out_folder, f"{stem}_ICM_subcatchments.csv")
+        if data["subcatchments"]:
+            no_xy = icm_export.set_subcatchment_xy(data["subcatchments"], xy)
+            if no_xy:
+                data["warnings"].append(f"{no_xy} sub-catchment(s) drain to a node without a location: no x / y.")
+            icm_export.write_gdb(arcpy, gdb, "ICM_Subcatchments", "POINT", icm_export.SUBCATCHMENT_FIELDS,
+                                 data["subcatchments"], "subcatchment_id", None, None, sr, timings=sub_tm,
+                                 extra_geom=icm_export.subcatchment_geometry_fn(arcpy, sr, xy))
+            icm_export.write_csv(subs_path, icm_export.SUBCATCHMENT_FIELDS, data["subcatchments"])
+            subs_csv = subs_path
+            lap("sub-catchments")
+        else:
+            if arcpy.Exists(subs_fc):
+                arcpy.management.Delete(subs_fc)
+            if os.path.isfile(subs_path):
+                os.remove(subs_path)
         nodes_csv = os.path.join(out_folder, f"{stem}_ICM_nodes.csv")
         conduits_csv = os.path.join(out_folder, f"{stem}_ICM_conduits.csv")
         icm_export.write_csv(nodes_csv, icm_export.NODE_FIELDS, data["nodes"], xy=xy)
@@ -1218,14 +1335,23 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
         notes = os.path.join(out_folder, f"{stem}_ICM_import_notes.txt")
         with open(notes, "w", encoding="utf-8") as fh:
             fh.write(icm_export.notes_text(gpkg_path, out_sr_label, gdb, nodes_csv, conduits_csv, data["warnings"],
-                                           pumps_csv=pumps_csv, hd_csv=hd_csv, head_discharge=data["head_discharge"]))
+                                           pumps_csv=pumps_csv, hd_csv=hd_csv, head_discharge=data["head_discharge"],
+                                           subcatchments_csv=subs_csv, loading=data["loading"]))
         k = data["counts"]
         msgs.info(f"Exported {k['nodes']} node(s), {k['conduits']} gravity sewer(s), {k['rising_mains']} rising "
-                  f"main(s) and {k['pumps']} pump(s) in {out_sr_label}.")
+                  f"main(s), {k['pumps']} pump(s) and {k['subcatchments']} sub-catchment(s) in {out_sr_label}.")
+        if data["subcatchments"]:
+            lo = data["loading"]
+            msgs.info(f"Sub-catchments (foul, one per loaded node): population {lo['population']:.0f} at "
+                      f"{lo['per_capita_lpd']:g} L/person/day (wastewater profile {icm_export.WASTEWATER_PROFILE}), "
+                      f"trade flow {lo['trade_flow_lps']:.2f} L/s (trade profile {icm_export.TRADE_PROFILE}), "
+                      f"additional foul flow {lo['additional_foul_flow_lps']:.2f} L/s; ADWF {lo['adwf_lps']:.2f} L/s. "
+                      "Set the per capita flow and diurnal factors in ICM's Waste Water / Trade Waste events.")
         for w in data["warnings"]:
             msgs.warn(w)
         msgs.info(f"Geodatabase: {gdb}")
-        msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}" + "".join(f" ; {x}" for x in (pumps_csv, hd_csv) if x))
+        msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}" + "".join(f" ; {x}" for x in (pumps_csv, hd_csv, subs_csv)
+                                                                  if x))
         msgs.info(f"Import notes (field mapping for ICM's Open Data Import Centre): {notes}")
         lap("CSV/notes")
     msgs.info("Timing: " + ", ".join(f"{k} {v:.1f} s" for k, v in tm.items())
@@ -1236,6 +1362,8 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
     msgs.info("Timing ICM_Conduits: " + ", ".join(f"{k} {conduit_tm.get(k, 0.0):.1f} s" for k in tkeys))
     if pump_tm:
         msgs.info("Timing ICM_Pumps: " + ", ".join(f"{k} {pump_tm.get(k, 0.0):.1f} s" for k in tkeys))
+    if sub_tm:
+        msgs.info("Timing ICM_Subcatchments: " + ", ".join(f"{k} {sub_tm.get(k, 0.0):.1f} s" for k in tkeys))
     return {"gdb": gdb, "nodes_csv": nodes_csv, "conduits_csv": conduits_csv, "pumps_csv": pumps_csv,
-            "head_discharge_csv": hd_csv, "notes": notes, **data}
+            "head_discharge_csv": hd_csv, "subcatchments_csv": subs_csv, "notes": notes, **data}
 

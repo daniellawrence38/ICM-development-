@@ -51,7 +51,8 @@ def test_zip_contents_and_no_qgis(tmp_path):
                      "wwnet_arcgis/sewer_import.py", "wwnet_shared/__init__.py", "wwnet_shared/core/schema.py",
                      "wwnet_shared/core/native.py", "wwnet_shared/core/calc.py",
                      "wwnet_shared/core/summary.py", "wwnet_shared/core/style.py", "wwnet_arcgis/tools_impl.py",
-                     "wwnet_arcgis/engine.py"):
+                     "wwnet_arcgis/engine.py", "wwnet_arcgis/demand_import.py", "wwnet_shared/core/demand.py",
+                     "templates/import/dplh_land_use.toml"):
             assert top + must in names, must
         for forbidden_file in ("dock.py", "qgis_tools.py", "qt_bridge.py", "secrets.py",
                                "settings_dialog.py", "plugin.py"):
@@ -79,6 +80,7 @@ UPDATE_MUST = (
     "wwnet_shared/__init__.py", "wwnet_shared/core/schema.py", "wwnet_shared/core/summary.py",
     "templates/schema.sql", "rulesets/ds50_v2r4.toml", "templates/demo/pump_register_demo.xlsx", "templates/demo/pump_register_demo.toml",
     "wwnet_arcgis/pump_register.py", "wwnet_arcgis/xlsx.py", "templates/import/watercorp_pump_register.toml",
+    "wwnet_arcgis/demand_import.py", "wwnet_shared/core/demand.py", "templates/import/dplh_land_use.toml",
 )
 
 

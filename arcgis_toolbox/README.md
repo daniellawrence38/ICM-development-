@@ -22,9 +22,10 @@ last Check / Design / Import / Simulation, column `source`).
 | Import Pressure Data | Data | Pump stations + pressure mains into an existing model (see below) |
 | Set Pump Station Data | Data | Wet well, levels (optional wet well floor level), pumps and pump curve from the data sheet |
 | Import Pump Station Data | Data | Wet well floor / levels / area, emergency storage and design pump rate from the pump station register workbook (see below); preview first |
+| Calculate Existing Demand | Data | Existing dry weather flow from land use: DPLH-071 zones + DPLH-070 R-Codes -> DS 50 loading per node (sub-catchments `LU-<node>-<class>`) and the Land use loading review layer (see below); preview first |
 | Import Diurnal Profile | Data | Profile from CSV / TXT or text pasted from ICM (Time / Factor); mean checked, not changed |
 | Assign Profile | Data | Sets the profile of the node loads of the selected nodes, selected node loads / sub-catchments, or all |
-| Export To ICM | Data | Nodes, gravity sewers, rising mains and pumps with InfoWorks ICM field names (file gdb + CSV + mapping notes) |
+| Export To ICM | Data | Nodes, gravity sewers, rising mains, pumps and foul sub-catchments (one per loaded node) with InfoWorks ICM field names (file gdb + CSV + mapping notes) |
 | Check Model | Analysis | Topology / data checks, plus missing pump station data; results in the Issues layer |
 | Run Design | Analysis | Steady DS 50 design; Design results layer; selects failed conduits |
 | Run Simulation | Analysis | SWMM dry weather run with a run label; roughness `ks` (Colebrook, as the design) by default or Manning n; series stored for the 5 conduits nearest the outlet and the conduits selected in the map; pump station tables / flags and a temporary pump station layer |
@@ -303,10 +304,58 @@ curve is kept (only the duty rate is updated). Messages are prose lines; errors 
 sewer invert, so real stop levels below it need the floor: when given, levels are validated against it and the node's
 invert is set to it. Blank leaves the node as it is.
 
+## Calculate Existing Demand
+
+Existing dry weather flow from land use and area, loaded per node (never per connection: ICM and SWMM only take inflow
+at nodes, so per-node loading gives the same pipe flows with no extra model objects).
+
+1. Each **Local Planning Scheme zone polygon (DPLH-071)** is classified from its *Zone* text by the rules in
+   `templates/import/dplh_land_use.toml` (first rule whose words occur in the zone wins): residential,
+   residential_or_commercial (centres, mixed use: residential where an R-code exists, else commercial), commercial,
+   hotel_motel, perth_cba, industrial, or **zero** (roads, rail, open space, conservation, waterways, rural / farm,
+   rural residential, utilities, unzoned, blank zone). A zone matching no rule is flagged `ZONE_UNMATCHED` and
+   loaded as residential **R15**; the messages list those zone names with their area.
+2. Residential polygons take the code of the **R-Codes polygon (DPLH-070)** they fall in, point by point (a block
+   across two codes is split): split codes (R20/40) use the **lower** code (as built, default) or the **higher** code
+   (as permitted; tool parameter); no code -> the zone rule's default code if it has one (bundled:
+   'Residential development' -> **R30**, structure plan areas whose codes are not in DPLH-070), else R15; below
+   R15 -> R15 (DS 50 4.2.1(c));
+   codes between table rows -> the next higher row; R-AC and other text codes -> R15 unless mapped in
+   `[rcode_aliases]`.
+3. DS 50 Tables 4.1 / 4.2 (persons per net ha x L/person/day) and 4.3 (L/net ha/day), dry or wet ground, south or
+   north of 26 deg S (from the model location unless chosen). The polygon area is treated as net area.
+4. The polygon is sampled (~50 points, 2-20 m apart); each point goes to the **nearest model sewer within the
+   maximum distance (150 m)** and loads that sewer's upstream node (the connection point rule). Points further away
+   are not loaded. A polygon with no model sewer within twice that distance is `OUTSIDE_MODEL` (normal at the edges
+   of the rectangular area read; counted, no warning); one 150-300 m away is `NOT_LOADED` and listed as a warning
+   with its distance (unsewered, or sewers missing from the model?); `PARTLY_LOADED` when > 5 % is lost.
+5. Per node and class one `wwn_subcatchments` row `LU-<node>-<class>` (e.g. `LU-N123-R20`, `LU-N123-IND`), no
+   geometry, status existing. Re-running replaces the `LU-*` rows. **Run Design** (GSDF) and **Run Simulation**
+   (daily flow / 86400 with the profile) load them; other sub-catchments are kept (warned: double counting).
+6. **Connection point loads** from Import Sewer Data (connections x 630 L/d) are replaced by default (the messages
+   compare both totals); untick *Replace the connection point loads* to keep both. Manual node loads stay.
+
+The messages list the area per class and, per class, the zone names with their area loaded (check what makes up
+"commercial"), the R-code notes on the loaded area (outside every R-Codes polygon / blank code / below R15 / dual /
+unrecognised) and the values found in the R-Codes layer's field.
+
+The **Land use loading** layer (`wwn_land_use`, rewritten each run) shows every zone polygon read with its class,
+LPS and DS 50 codes, area, area loaded, ADWF, the nodes it loads and its flags; issues go to the Issues layer
+(source `demand`). Zones are read within the model extent + the maximum distance (or the selected polygons).
+
+**Export To ICM** writes the loads as `ICM_Subcatchments` (+ `<model>_ICM_subcatchments.csv`): one foul
+sub-catchment per loaded node (id = node id, point at the node; ICM draws a circle of `total_area` for a
+sub-catchment without a boundary), `contributing_area` 0, connectivity 100. Residential -> `population` (DS 50
+persons/ha x area) on wastewater profile 1; commercial and industrial -> `trade_flow` (L/s) on trade profile 1 (one
+shared trade profile); manual ADWF and node loads -> `additional_foul_flow` (L/s). In ICM, create a Waste Water event
+(profile 1: per capita flow 180 l/hd/d dry south, diurnal multipliers) and a Trade Waste event (profile 1: flow
+scaling factor 1.0, diurnal multipliers). The total equals the ADWF Run Simulation uses (`wwn_adwf_lps` per row).
+Import it after the nodes (ODIC object type Subcatchment; flows in L/s).
+
 ## Editing GeoPackages in Pro
 - Pro reads GeoPackage tables as `file.gpkg\main.<table>`; `fid` is the ObjectID.
 - The engine opens the file itself: save edits in Pro before Check / Design / Simulate (each tool reminds you).
-- Tools that write with sqlite (Import Pressure Data, Set Pump Station Data, Import Pump Station Data, Join Dangling Sewer Ends) fail while
+- Tools that write with sqlite (Import Pressure Data, Set Pump Station Data, Import Pump Station Data, Calculate Existing Demand, Join Dangling Sewer Ends) fail while
   Pro holds a lock: close attribute tables / remove the model's layers first.
 - Result and issue layers are rewritten by the tools: treat them as read-only.
 
