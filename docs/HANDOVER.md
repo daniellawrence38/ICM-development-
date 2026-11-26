@@ -1,6 +1,5 @@
-# WWNet: session handover (2026-11-25)
-
-Branch: **`main`** (default; the 2026-11-25 session's `ccr-153a547e-mtrc3t` is merged into it, section 14). It was restarted from `ccr-7bd083b1-j0qlhq`
+Branch: **`main`** (default; the 2026-11-26 session's `ccr-f18eb556-rbdbtr` is merged into it by PR, section 15;
+the 2026-11-25 session's `ccr-153a547e-mtrc3t` before it, section 14).
 (38f46e2), which holds BOTH earlier lines of work: the 2026-11-23/24 ArcGIS session (`ccr-54bf38a8-b92qd9`: pressure
 side, Export To ICM, Self Test, Update WWNet; sections 2-11) and the 2026-11-23 review session (schema v3 / toolbox
 UX; **section 12**), merged on 2026-11-24. All older branches (`ccr-7bd083b1-j0qlhq`, `ccr-54bf38a8-b92qd9`,
@@ -528,19 +527,24 @@ the export. Additional foul flow 0 is expected (no node loads / manual ADWF in E
 
 ### Where we stopped (next session starts here) — end of the 2026-11-26 session
 
-1. Demand is written for EdenHillv8 (242 L/s). Next: user installs the update, runs Export To ICM on EdenHillv8,
-   imports ICM_Subcatchments with ODIC (object type Subcatchment) after nodes / conduits, creates the Waste Water
-   (profile 1, 180 l/hd/d) and Trade Waste (profile 1) events, and reports: ODIC field mapping problems (point layer
-   for sub-catchments? units), validation errors, and the total ADWF ICM shows vs 242.48 L/s. The 36 NOT_LOADED near
-   misses (64 ha) are for the user to check on the map. Ask for the messages: zone areas by class, the unmatched zone names (to add to the
-   TOML), R-code notes (no code / dual / unknown codes such as R-AC), area not loaded, the ADWF total and the
-   comparison with the connection point total. Check the actual DPLH-071 / DPLH-070 field names picked.
-2. Then untick Preview, check the Land use loading layer (classes, nodes, flags), Run Simulation and compare with the
-   connection point loading run (Compare Simulation Runs).
-3. Next build step (agreed approach, not built): **Export To ICM sub-catchments**, one per loaded node (population =
-   area x persons/ha and a wastewater profile for residential; trade flow for non-residential), plus the ODIC
-   field mapping; confirm boundary-less subcatchments in ICM first.
-4. Open questions for the user: rural residential / smallholdings as zero (assumed unsewered); R-AC code equivalents
-   (`[rcode_aliases]`, left empty); DS 50 rates are design rates (180 L/p/d) applied as existing flow — confirm that
-   is intended, or give existing-flow rates; QGIS plugin has no front end for this yet (core is shared).
-5. Section 14's open items (install, Self Test, Import Network Data on EdenHill, ICM pumps) are still open.
+State: everything from this session (`ccr-f18eb556-rbdbtr`) is merged into `main`. User's PC: runs the latest build
+(CI run 117 `wwnet-arcgis-update`, Update WWNet; Python only since 38f46e2). Calculate Existing Demand written for
+EdenHillv8 (242.48 L/s); Export To ICM with 7,710 foul sub-catchments imported into ICM 2024.5 by ODIC; ICM totals
+confirmed (population 100,347, trade flow 33.42 L/s). Tools: 24.
+
+1. **In progress: ICM Waste Water event.** Step 1 was given (Explorer: right-click the model group > New InfoWorks >
+   Waste Water; name it, open it) — menu names from memory, the Autodesk help look-up was interrupted. Ask what the
+   editor shows (columns; a tab for calibration / diurnal factors), then: profile 1, per capita flow 180 l/hd/d,
+   diurnal multipliers (the user's real ICM profile "1 Dunkley Ave Applecross PS4" or the WWNet example). Then the
+   Trade Waste event (profile 1, flow scaling factor 1.0, diurnal multipliers), then a dry weather run with both
+   events; compare the mean foul inflow with 242 L/s. One step at a time.
+2. Before reading capacity results: 8 stations have no pump in the export (6 `WW_<numeric id>` stations whose GIS
+   pump station has no SAP_ID, so the register cannot match them; S2004007 without data; S0030035 without a rising
+   main): their wet wells fill / flood with loads on. 9 rising main discharges hang (Outfalls; connect by hand). 7
+   dangling sewer ends. 3,973 nodes without ground level (use the DEM parameter of Export To ICM).
+3. Open questions: rural residential / smallholdings as zero (assumed unsewered); R-AC code equivalents
+   (`[rcode_aliases]`, empty); DS 50 rates (180 L/p/d, R-code occupancy) used as existing flow — the user chose
+   DS 50, they read high in up-coded areas; option to export all flow as additional foul flow (offered, not wanted
+   so far); QGIS plugin has no front end for Calculate Existing Demand (core is shared); export GP calls slow (123 s;
+   delete / create / AddFields 4-14 s per table — recreating the whole gdb offered earlier, not done).
+4. Section 14's open items (Self Test after install, ICM pump run comparison) and §8.
