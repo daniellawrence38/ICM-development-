@@ -141,3 +141,17 @@ def test_no_loads_removes_stale_subcatchment_table(fake_arcpy, demo_gpkg, tmp_pa
     assert r2["subcatchments_csv"] is None and fc not in a.memory
     assert not os.path.exists(os.path.join(str(out), "demo_ICM_subcatchments.csv"))
     assert "loads (the model has none)" in open(r2["notes"], encoding="utf-8").read()
+
+
+def test_every_object_has_the_same_system_type(fake_arcpy, demo_gpkg, tmp_path):
+    """ICM engineering validation: 'Node is a different system type than the subcatchment'."""
+    a = fake_arcpy([])
+    r = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path / "icm"))
+    rows = r["nodes"] + r["conduits"] + r["pumps"] + r["subcatchments"]
+    assert r["subcatchments"] and {x["system_type"] for x in rows} == {"foul"}
+    for fields in (icm_export.NODE_FIELDS, icm_export.CONDUIT_FIELDS, icm_export.PUMP_FIELDS,
+                   icm_export.SUBCATCHMENT_FIELDS):
+        assert ("system_type", "TEXT") in fields
+    with open(r["nodes_csv"], newline="") as fh:
+        assert {n["system_type"] for n in csv.DictReader(fh)} == {"foul"}
+    assert "system_type = foul on every node" in open(r["notes"], encoding="utf-8").read()

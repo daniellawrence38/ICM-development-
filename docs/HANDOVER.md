@@ -508,6 +508,13 @@ when there are no loads. Notes: ODIC order nodes > conduits > pumps > sub-catchm
 set-up; flows L/s. Test: after Calculate Existing Demand on the demo, the exported wwn_adwf_lps total = the engine's
 simulated inflow (rel 1e-4). Toolbox 313, shared core 189 + 1 skipped.
 
+User after the first ICM import: "Nothing in the export about the subcatchments but infoworks is saying they drain
+to nodes with different subcatchments" -> ICM engineering validation check "Node is a different system type than
+the subcatchment": sub-catchments were system_type foul, nodes / conduits had none (ICM default). Fixed:
+`icm_export.SYSTEM_TYPE = "foul"` on every node, conduit (incl. rising mains), pump and sub-catchment (new
+`system_type` field in NODE / CONDUIT / PUMP_FIELDS; the user's saved ODIC configs must map it). "Nothing in the
+export about the subcatchments": unclear (messages? notes?) — asked for the export messages.
+
 ### Where we stopped (next session starts here) — end of the 2026-11-26 session
 
 1. Demand is written for EdenHillv8 (242 L/s). Next: user installs the update, runs Export To ICM on EdenHillv8,

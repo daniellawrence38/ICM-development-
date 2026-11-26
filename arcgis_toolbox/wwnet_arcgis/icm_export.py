@@ -48,13 +48,16 @@ ICM_NODE_TYPE = {"ac": "Manhole", "drop_ac": "Manhole", "ms": "Manhole", "wet_we
 
 # (field, arcpy type) in output order. Names follow ICM's internal field names where one exists so
 # ODIC can match them; wwn_* fields are extra information (map them to user fields or ignore).
-NODE_FIELDS = [("node_id", "TEXT"), ("node_type", "TEXT"), ("ground_level", "DOUBLE"),
+# ICM system type of every exported object: a separate wastewater network. Nodes, links and sub-catchments must agree
+# (ICM engineering validation: "Node is a different system type than the subcatchment").
+SYSTEM_TYPE = "foul"
+NODE_FIELDS = [("node_id", "TEXT"), ("node_type", "TEXT"), ("system_type", "TEXT"), ("ground_level", "DOUBLE"),
                ("flood_level", "DOUBLE"), ("flood_type", "TEXT"), ("chamber_floor", "DOUBLE"),
                ("chamber_area", "DOUBLE"),
                ("shaft_area", "DOUBLE"), ("wwn_node_type", "TEXT"), ("wwn_floor_source", "TEXT"),
                ("wwn_ground_source", "TEXT"), ("wwn_outfall_reason", "TEXT"), ("asset_id", "TEXT"),
                ("status", "TEXT"), ("notes", "TEXT")]
-CONDUIT_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "TEXT"),
+CONDUIT_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "TEXT"), ("system_type", "TEXT"),
                   ("us_invert", "DOUBLE"), ("ds_invert", "DOUBLE"), ("conduit_length", "DOUBLE"),
                   ("conduit_shape", "TEXT"), ("conduit_width", "DOUBLE"), ("conduit_height", "DOUBLE"),
                   ("solution_model", "TEXT"), ("us_headloss_type", "TEXT"), ("ds_headloss_type", "TEXT"),
@@ -62,7 +65,8 @@ CONDUIT_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id"
                   ("top_roughness_CW", "DOUBLE"), ("bottom_roughness_HW", "DOUBLE"), ("top_roughness_HW", "DOUBLE"),
                   ("material", "TEXT"), ("wwn_conduit_id", "TEXT"), ("wwn_link_kind", "TEXT"),
                   ("asset_id", "TEXT"), ("status", "TEXT"), ("notes", "TEXT")]
-PUMP_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "TEXT"), ("link_type", "TEXT"),
+PUMP_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "TEXT"), ("system_type", "TEXT"),
+               ("link_type", "TEXT"),
                ("switch_on_level", "DOUBLE"), ("switch_off_level", "DOUBLE"), ("discharge", "DOUBLE"),
                ("head_discharge_id", "TEXT"), ("wwn_pump_id", "TEXT"), ("wwn_ps_id", "TEXT"), ("wwn_role", "TEXT"),
                ("notes", "TEXT")]
@@ -356,6 +360,8 @@ def build(gpkg_path: str) -> dict:
                         "tee / main outside the selection). NOT made outfalls (their flow would leave the network): ICM will "
                         "report them as not connected to an outfall until the join is fixed: " + _ids(dangling))
     sc = subcatchments(subs, loads, meta, node_ids, warnings)
+    for r in out_nodes + pres["nodes"] + out_links + pres["conduits"] + pres["pumps"]:
+        r["system_type"] = SYSTEM_TYPE
     counts = {"nodes": len(out_nodes) + len(pres["nodes"]), "conduits": len(out_links),
               "rising_mains": len(pres["conduits"]), "pumps": len(pres["pumps"]),
               "delivery_nodes": len(pres["nodes"]), "head_discharge_tables": len(pres["hd_ids"]),
@@ -464,7 +470,7 @@ def subcatchments(subs: list, loads: list, meta: dict, node_ids: set, warnings: 
         area = n["res"] + n["com"] + n["ind"]
         codes = "; ".join(f"{k} {v:.2f} ha" for k, v in sorted(
             n["codes"].items(), key=lambda kv: dm.parse_rcode(kv[0])[0] or 0))
-        rows.append({"subcatchment_id": nid, "node_id": nid, "system_type": "foul",
+        rows.append({"subcatchment_id": nid, "node_id": nid, "system_type": SYSTEM_TYPE,
                      "total_area": _r(area if area > 0 else NOMINAL_AREA_HA, 4), "contributing_area": 0.0,
                      "connectivity": 100.0, "population": _r(n["pop"], 2),
                      "wastewater_profile": WASTEWATER_PROFILE if (n["pop"] > 0 or n["aff"] > 0) else None,
@@ -783,6 +789,9 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
         "ICM: File > Import > InfoWorks > Open Data Import Centre. Import NODES FIRST, then conduits"
         + (", then pumps" if pumps_csv else "") + (", then sub-catchments." if subcatchments_csv else "."),
         "Field names already match ICM's where one exists; check each in the ODIC drop-downs.",
+        f"system_type = {SYSTEM_TYPE} on every node, conduit, pump and sub-catchment: MAP IT in each table (a saved",
+        "ODIC config made before 2026-11-26 lacks it); ICM engineering validation warns when a sub-catchment drains to",
+        "a node of a different system type.",
         "",
         "Node table",
         "  node_id -> Node ID | node_type -> Node type (Manhole / Break / Outfall)",
