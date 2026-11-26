@@ -19,6 +19,7 @@ import re
 import sqlite3
 import struct
 import time
+from collections import deque
 
 from . import gpkg
 
@@ -55,8 +56,8 @@ NODE_FIELDS = [("node_id", "TEXT"), ("node_type", "TEXT"), ("system_type", "TEXT
                ("flood_level", "DOUBLE"), ("flood_type", "TEXT"), ("chamber_floor", "DOUBLE"),
                ("chamber_area", "DOUBLE"),
                ("shaft_area", "DOUBLE"), ("wwn_node_type", "TEXT"), ("wwn_floor_source", "TEXT"),
-               ("wwn_ground_source", "TEXT"), ("wwn_outfall_reason", "TEXT"), ("asset_id", "TEXT"),
-               ("status", "TEXT"), ("notes", "TEXT")]
+               ("wwn_ground_source", "TEXT"), ("wwn_outfall_reason", "TEXT"), ("wwn_outfall", "TEXT"),
+               ("wwn_connectivity", "TEXT"), ("asset_id", "TEXT"), ("status", "TEXT"), ("notes", "TEXT")]
 CONDUIT_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "TEXT"), ("system_type", "TEXT"),
                   ("us_invert", "DOUBLE"), ("ds_invert", "DOUBLE"), ("conduit_length", "DOUBLE"),
                   ("conduit_shape", "TEXT"), ("conduit_width", "DOUBLE"), ("conduit_height", "DOUBLE"),
@@ -64,12 +65,20 @@ CONDUIT_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id"
                   ("roughness_type", "TEXT"), ("bottom_roughness_CW", "DOUBLE"),
                   ("top_roughness_CW", "DOUBLE"), ("bottom_roughness_HW", "DOUBLE"), ("top_roughness_HW", "DOUBLE"),
                   ("material", "TEXT"), ("wwn_conduit_id", "TEXT"), ("wwn_link_kind", "TEXT"),
+                  ("wwn_outfall", "TEXT"), ("wwn_connectivity", "TEXT"),
                   ("asset_id", "TEXT"), ("status", "TEXT"), ("notes", "TEXT")]
 PUMP_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "TEXT"), ("system_type", "TEXT"),
                ("link_type", "TEXT"),
                ("switch_on_level", "DOUBLE"), ("switch_off_level", "DOUBLE"), ("discharge", "DOUBLE"),
                ("head_discharge_id", "TEXT"), ("wwn_pump_id", "TEXT"), ("wwn_ps_id", "TEXT"), ("wwn_role", "TEXT"),
                ("notes", "TEXT")]
+# Connectivity report (<stem>_ICM_connectivity.csv): one row per place where sewers have no outfall downstream,
+# per isolated node and per outfall.
+CONNECTIVITY_FIELDS = [("kind", "TEXT"), ("node_id", "TEXT"), ("cause", "TEXT"), ("sewers", "LONG"),
+                       ("nearest_sewer", "TEXT"), ("nearest_m", "DOUBLE"), ("x", "DOUBLE"), ("y", "DOUBLE")]
+NEAREST_SEARCH_M = 50.0     # nearest other sewer reported within this distance of a dead end / outfall
+FALSE_OUTFALL_M = 5.0       # a terminal outfall with a sewer it is not connected to this close: possible missed join
+REPORT_LIMIT = 30           # dead ends / loops listed in the messages (all of them are in the CSV)
 HEAD_DISCHARGE_FIELDS = [("head_discharge_id", "TEXT"), ("head", "DOUBLE"), ("discharge", "DOUBLE")]
 # One foul sub-catchment per loaded node (all WWNet loads on that node: land-use LU-* rows, other sub-catchments,
 # node loads). Residential -> population (wastewater profile 1); commercial / industrial -> trade flow (trade profile 1);
@@ -106,21 +115,34 @@ check_reserved_fields()
 OUT_SR = {"GDA2020 / MGA zone 50 (EPSG:7850)": 7850, "GDA94 / MGA zone 50 (EPSG:28350)": 28350}
 
 
-def _line_length(blob):
-    """Planar length of a GeoPackage LINESTRING blob (model CRS is metric MGA), or None."""
+def _gpkg_points(blob, want: int):
+    """[(x, y)] of a GeoPackage POINT (want=1) or LINESTRING (want=2) blob, else None."""
     if not blob or blob[:2] != b"GP":
         return None
     env = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}.get((blob[3] >> 1) & 7)
     if env is None:
         return None
     wkb = blob[8 + env:]
+    if len(wkb) < 5:
+        return None
     bo = "<" if wkb[0] == 1 else ">"
-    gtype, n = struct.unpack(bo + "II", wkb[1:9])
-    if gtype % 1000 != 2:                       # ISO WKB: 2 / 1002 Z / 2002 M / 3002 ZM
+    gtype = struct.unpack(bo + "I", wkb[1:5])[0]
+    if gtype % 1000 != want:                    # ISO WKB: 1 / 2 (+1000 Z / 2000 M / 3000 ZM)
         return None
     dims = (2, 3, 3, 4)[(gtype // 1000) % 4]
     step = 8 * dims
-    pts = [struct.unpack(bo + "dd", wkb[9 + step * i:9 + step * i + 16]) for i in range(n)]
+    if want == 1:
+        x, y = struct.unpack(bo + "dd", wkb[5:21])
+        return None if math.isnan(x) or math.isnan(y) else [(x, y)]
+    n = struct.unpack(bo + "I", wkb[5:9])[0]
+    return [struct.unpack(bo + "dd", wkb[9 + step * i:9 + step * i + 16]) for i in range(n)]
+
+
+def _line_length(blob):
+    """Planar length of a GeoPackage LINESTRING blob (model CRS is metric MGA), or None."""
+    pts = _gpkg_points(blob, 2)
+    if pts is None:
+        return None
     return sum(math.hypot(a[0] - b[0], a[1] - b[1]) for a, b in zip(pts, pts[1:]))
 
 
@@ -162,15 +184,17 @@ def _pos(v):
     return f if math.isfinite(f) and f > 0 else None
 
 
-def build(gpkg_path: str) -> dict:
+def build(gpkg_path: str, gravity_only: bool = False) -> dict:
     """{'nodes', 'conduits', 'pumps', 'head_discharge': [row], 'warnings': [str], 'skipped': {table: count},
-    'counts': {...}}. Rows are dicts keyed by NODE_FIELDS / CONDUIT_FIELDS / PUMP_FIELDS names. Rows that
-    are not in wwn_nodes / wwn_conduits (pump delivery nodes, rising mains, pumps) carry `_extra` = True and
-    `_geom` = geometry hints resolved by `extra_geometry` (arcpy side)."""
+    'counts': {...}, 'connectivity': {...}}. Rows are dicts keyed by NODE_FIELDS / CONDUIT_FIELDS / PUMP_FIELDS
+    names. Rows that are not in wwn_nodes / wwn_conduits (pump delivery nodes, rising mains, pumps) carry
+    `_extra` = True and `_geom` = geometry hints resolved by `extra_geometry` (arcpy side).
+    gravity_only: gravity sewers and their nodes only; no rising mains / pumps / delivery nodes; wet wells
+    with sewers in and none out become Outfalls; nodes with no gravity sewer are left out."""
     con = sqlite3.connect(f"file:{gpkg_path}?mode=ro", uri=True)
     try:
         nodes = _rows(con, "SELECT node_id, node_type, surface_level, invert_level, chamber_diameter_mm, "
-                           "flood_level, status, asset_id, notes FROM wwn_nodes ORDER BY node_id")
+                           "flood_level, status, asset_id, notes, geom FROM wwn_nodes ORDER BY node_id")
         conduits = _rows(con, "SELECT conduit_id, us_node_id, ds_node_id, dn, internal_diameter_mm, material, "
                               "us_invert, ds_invert, length_m, ks_mm, status, asset_id, notes, geom "
                               "FROM wwn_conduits WHERE status <> 'abandoned' ORDER BY us_node_id, conduit_id")
@@ -197,6 +221,23 @@ def build(gpkg_path: str) -> dict:
 
     warnings = []
     node_ids = {n["node_id"] for n in nodes}
+    node_xy = {}
+    for n in nodes:
+        pts = _gpkg_points(n.pop("geom"), 1)
+        if pts:
+            node_xy[n["node_id"]] = pts[0]
+    lines = {}
+    for c in conduits:
+        pts = _gpkg_points(c["geom"], 2)
+        if pts and len(pts) > 1:
+            lines[c["conduit_id"]] = pts
+    if gravity_only:
+        on_sewer = {c["us_node_id"] for c in conduits} | {c["ds_node_id"] for c in conduits}
+        off = [n["node_id"] for n in nodes if n["node_id"] not in on_sewer]
+        nodes = [n for n in nodes if n["node_id"] in on_sewer]
+        if off:
+            warnings.append(f"Gravity only: {len(off)} node(s) with no gravity sewer attached not exported "
+                            "(pump station / rising main points, isolated nodes): " + _ids(off))
 
     # lowest connected invert, as a chamber-floor fallback
     low = {}
@@ -280,7 +321,8 @@ def build(gpkg_path: str) -> dict:
         warnings.append(f"{len(missing_node)} conduit end(s) reference a node that doesn't exist (ICM will reject "
                         "them): " + ", ".join(missing_node[:20]))
 
-    pres = _pressure(out_nodes, stations, mains, pumps, next_suffix, warnings, short)
+    pres = _pressure(out_nodes, [] if gravity_only else stations, [] if gravity_only else mains,
+                     [] if gravity_only else pumps, next_suffix, warnings, short)
     if short:
         warnings.append(f"{len(short)} conduit(s) shorter than {MIN_CONDUIT_LENGTH_M:g} m exported with length "
                         f"{MIN_CONDUIT_LENGTH_M:g} m (ICM minimum): " + _ids(short))
@@ -319,10 +361,15 @@ def build(gpkg_path: str) -> dict:
         n_out[c["us_node_id"]] = n_out.get(c["us_node_id"], 0) + 1
         n_in[c["ds_node_id"]] = n_in.get(c["ds_node_id"], 0) + 1
     wet_wells = {s["wet_well_node_id"] for s in stations if s["wet_well_node_id"]}
-    terminal, dangling, rm_out, rm_hang = [], [], [], []
+    terminal, dangling, rm_out, rm_hang, ww_out = [], [], [], [], []
     for n in out_nodes:
         nid = n["node_id"]
         if n_in.get(nid, 0) == 0 or n_out.get(nid, 0) > 0 or n["wwn_node_type"] == "outfall":
+            continue
+        if gravity_only and (n["wwn_node_type"] == "wet_well" or nid in wet_wells):
+            n["node_type"] = "Outfall"
+            n["wwn_outfall_reason"] = "wet well (gravity only export)"
+            ww_out.append(nid)
             continue
         if n["wwn_node_type"] == "wet_well" or nid in wet_wells:
             warnings.append(f"{nid}: wet well exported as Manhole with no pump out of it (no pump / rising main "
@@ -347,6 +394,9 @@ def build(gpkg_path: str) -> dict:
             n["node_type"] = "Outfall"
             n["wwn_outfall_reason"] = "terminal"
             terminal.append(nid)
+    if gravity_only:
+        warnings.append(f"Gravity only: rising mains, pumps and pump delivery nodes not exported; {len(ww_out)} "
+                        "wet well(s) exported as Outfall" + (": " + _ids(ww_out) if ww_out else "") + ".")
     if terminal:
         warnings.append(f"{len(terminal)} terminal node(s) exported as Outfall: " + _ids(terminal))
     if rm_out:
@@ -359,7 +409,9 @@ def build(gpkg_path: str) -> dict:
         warnings.append(f"{len(dangling)} sewer end(s) have no downstream pipe and are not chambers (possible missed "
                         "tee / main outside the selection). NOT made outfalls (their flow would leave the network): ICM will "
                         "report them as not connected to an outfall until the join is fixed: " + _ids(dangling))
-    sc = subcatchments(subs, loads, meta, node_ids, warnings)
+    sc = subcatchments(subs, loads, meta, {n["node_id"] for n in out_nodes}, warnings)
+    conn = connectivity(out_nodes + pres["nodes"], out_links + pres["conduits"] + pres["pumps"], node_xy, lines,
+                        {c["conduit_id"]: (c["us_node_id"], c["ds_node_id"]) for c in conduits})
     for r in out_nodes + pres["nodes"] + out_links + pres["conduits"] + pres["pumps"]:
         r["system_type"] = SYSTEM_TYPE
     counts = {"nodes": len(out_nodes) + len(pres["nodes"]), "conduits": len(out_links),
@@ -368,7 +420,278 @@ def build(gpkg_path: str) -> dict:
               "subcatchments": len(sc["rows"])}
     return {"nodes": out_nodes + pres["nodes"], "conduits": out_links + pres["conduits"], "pumps": pres["pumps"],
             "head_discharge": pres["head_discharge"], "warnings": warnings, "skipped": skipped, "counts": counts,
-            "subcatchments": sc["rows"], "loading": sc["summary"]}
+            "subcatchments": sc["rows"], "loading": sc["summary"], "connectivity": conn,
+            "gravity_only": gravity_only}
+
+
+class _SewerGrid:
+    """Nearest gravity sewer to a point, ignoring the sewers attached to a given node (uniform grid)."""
+
+    def __init__(self, lines: dict, ends: dict, cell: float = 25.0):
+        """lines: {conduit_id: [(x, y), ...]}; ends: {conduit_id: (us_node, ds_node)}."""
+        self.cell, self.cells, self.ends = cell, {}, ends
+        for cid, pts in lines.items():
+            for a, b in zip(pts, pts[1:]):
+                for kx in range(math.floor(min(a[0], b[0]) / cell), math.floor(max(a[0], b[0]) / cell) + 1):
+                    for ky in range(math.floor(min(a[1], b[1]) / cell), math.floor(max(a[1], b[1]) / cell) + 1):
+                        self.cells.setdefault((kx, ky), []).append((cid, a, b))
+
+    def nearest(self, p, node_id: str, max_d: float):
+        """(conduit_id, distance) of the nearest sewer within max_d not attached to node_id, else (None, None)."""
+        c = self.cell
+        kx, ky = math.floor(p[0] / c), math.floor(p[1] / c)
+        r = math.ceil(max_d / c)
+        best, bd = None, None
+        for ix in range(kx - r, kx + r + 1):
+            for iy in range(ky - r, ky + r + 1):
+                for cid, a, b in self.cells.get((ix, iy), ()):
+                    if node_id in self.ends.get(cid, ()):
+                        continue
+                    d = _seg_dist(p, a, b)
+                    if d <= max_d and (bd is None or d < bd or (d == bd and cid < best)):
+                        best, bd = cid, d
+        return best, bd
+
+
+def _seg_dist(p, a, b) -> float:
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    L2 = dx * dx + dy * dy
+    t = 0.0 if L2 <= 0 else max(0.0, min(1.0, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L2))
+    return math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy)
+
+
+def _sink_loops(nodes: list, down: dict) -> list:
+    """Closed loops among `nodes` (every downstream path of each node stays inside `nodes`): the strongly
+    connected components with no link out of them (Kosaraju, iterative). [[node_id, ...] sorted]."""
+    inside = set(nodes)
+    order, seen = [], set()
+    for s0 in nodes:
+        if s0 in seen:
+            continue
+        seen.add(s0)
+        stack = [(s0, iter(down.get(s0, ())))]
+        while stack:
+            v, it = stack[-1]
+            for w in it:
+                if w in inside and w not in seen:
+                    seen.add(w)
+                    stack.append((w, iter(down.get(w, ()))))
+                    break
+            else:
+                stack.pop()
+                order.append(v)
+    rev = {}
+    for v in nodes:
+        for w in down.get(v, ()):
+            if w in inside:
+                rev.setdefault(w, []).append(v)
+    comp, comps = {}, []
+    for s0 in reversed(order):
+        if s0 in comp:
+            continue
+        k = len(comps)
+        comp[s0] = k
+        members, stack = [s0], [s0]
+        while stack:
+            v = stack.pop()
+            for w in rev.get(v, ()):
+                if w not in comp:
+                    comp[w] = k
+                    members.append(w)
+                    stack.append(w)
+        comps.append(members)
+    sinks = []
+    for k, members in enumerate(comps):
+        if all(comp[w] == k for v in members for w in down.get(v, ()) if w in inside):
+            if len(members) > 1 or any(v in down.get(v, ()) for v in members):
+                sinks.append(sorted(members))
+    return sorted(sinks)
+
+
+def connectivity(nodes: list, links: list, node_xy: dict, lines: dict, ends: dict) -> dict:
+    """Downstream (us -> ds) path from every exported node and link to an ICM Outfall, the way ICM's
+    'not connected to an outfall' check follows the network. Sets `wwn_outfall` (the outfall reached, by
+    fewest links) and `wwn_connectivity` on every node and link row in place.
+    Where sewers have no outfall downstream, the place they end up is a dead end (links in, none out, not
+    an outfall: dangling Break, wet well without pump) or a closed loop (sewers flowing in a circle).
+    Returns {'lines': [message line], 'rows': [CONNECTIVITY_FIELDS row], 'sewers', 'sewers_ok', 'dead_ends',
+    'loops', 'isolated', 'bad_links', 'false_outfalls'}."""
+    by_id = {n["node_id"]: n for n in nodes}
+    down, up, bad = {}, {}, []
+    for lk in links:
+        u, d = lk["us_node_id"], lk["ds_node_id"]
+        if u not in by_id or d not in by_id:
+            bad.append(lk)
+            continue
+        down.setdefault(u, []).append(d)
+        up.setdefault(d, []).append(u)
+    outfalls = sorted(nid for nid, n in by_id.items() if n["node_type"] == "Outfall")
+    outlet = {o: o for o in outfalls}
+    q = deque(outfalls)
+    while q:
+        v = q.popleft()
+        for u in up.get(v, ()):
+            if u not in outlet:
+                outlet[u] = outlet[v]
+                q.append(u)
+    unc = sorted(nid for nid in by_id if nid not in outlet)
+    isolated = [nid for nid in unc if nid not in down and nid not in up]
+    dead = [nid for nid in unc if nid in up and nid not in down]
+    bad_out = {}
+    for lk in bad:
+        bad_out.setdefault(lk["us_node_id"], []).append(lk["ds_node_id"])
+
+    sink_of = {}
+
+    def claim(starts, key):
+        q2 = deque()
+        for v in starts:
+            if v not in sink_of:
+                sink_of[v] = key
+                q2.append(v)
+        while q2:
+            v = q2.popleft()
+            for u in up.get(v, ()):
+                if u not in sink_of and u not in outlet:
+                    sink_of[u] = key
+                    q2.append(u)
+
+    for d0 in dead:
+        claim([d0], d0)
+    rest = [nid for nid in unc if nid not in sink_of and (nid in down or nid in up)]
+    loops = _sink_loops(rest, down)
+    for lp in loops:
+        claim(lp, lp[0])
+    loop_of = {lp[0]: lp for lp in loops}
+
+    grid = _SewerGrid(lines, ends)
+
+    def near(nid):
+        p = node_xy.get(nid)
+        if p is None:
+            return None, None
+        return grid.nearest(p, nid, NEAREST_SEARCH_M)
+
+    def gravity(lk):
+        return lk.get("wwn_link_kind") == "gravity"
+
+    sewers = [lk for lk in links if gravity(lk)]
+    per_sink, per_outfall = {}, {}
+    for lk in sewers:
+        d = lk["ds_node_id"]
+        if d in outlet:
+            per_outfall[outlet[d]] = per_outfall.get(outlet[d], 0) + 1
+        elif d in sink_of:
+            per_sink[sink_of[d]] = per_sink.get(sink_of[d], 0) + 1
+
+    def dead_cause(nid):
+        n = by_id[nid]
+        t = n["wwn_node_type"]
+        if nid in bad_out:
+            return f"its downstream link goes to {bad_out[nid][0]}, a node not in the export"
+        if t in DANGLING_TYPES:
+            return f"dangling end ({t}, no chamber, nothing downstream)"
+        if t == "wet_well" or n["wwn_outfall_reason"].startswith("wet well"):
+            return "wet well, no pump exported out of it"
+        return f"{n['node_type']} with nothing downstream"
+
+    def near_text(cid, dist):
+        if cid is None:
+            return f"no other sewer within {NEAREST_SEARCH_M:g} m (main outside the selection?)"
+        return f"nearest other sewer {cid} at {dist:.1f} m"
+
+    places, rows = [], []
+    for key in sorted(per_sink, key=lambda k: (-per_sink[k], k)) + \
+            [k for k in dead + [lp[0] for lp in loops] if k not in per_sink]:
+        if key in loop_of:
+            lp = loop_of[key]
+            cause = (f"closed loop of {len(lp)} node(s) (sewers flow in a circle with no way out; check the flow "
+                     "direction of these sewers): " + " ".join(lp[:8]) + (" ..." if len(lp) > 8 else ""))
+            cid = dist = None
+            kind = "closed_loop"
+        else:
+            cause = dead_cause(key)
+            cid, dist = near(key)
+            kind = "dead_end"
+            cause += "; " + near_text(cid, dist)
+        places.append((key, per_sink.get(key, 0), cause))
+        p = node_xy.get(key)
+        rows.append({"kind": kind, "node_id": key, "cause": cause, "sewers": per_sink.get(key, 0),
+                     "nearest_sewer": cid, "nearest_m": _r(dist, 2), "x": _r(p[0]) if p else None,
+                     "y": _r(p[1]) if p else None})
+
+    false_out = []
+    out_rows = []
+    for o in outfalls:
+        reason = by_id[o]["wwn_outfall_reason"] or "model outfall"
+        cid, dist = near(o)
+        if by_id[o]["wwn_outfall_reason"] == "terminal" and dist is not None and dist <= FALSE_OUTFALL_M:
+            false_out.append((o, per_outfall.get(o, 0), cid, dist))
+        p = node_xy.get(o)
+        out_rows.append({"kind": "outfall", "node_id": o, "cause": reason, "sewers": per_outfall.get(o, 0),
+                         "nearest_sewer": cid, "nearest_m": _r(dist, 2), "x": _r(p[0]) if p else None,
+                         "y": _r(p[1]) if p else None})
+    for nid in isolated:
+        p = node_xy.get(nid)
+        cause = "no link attached" + (f" (its only link goes to {bad_out[nid][0]}, not in the export)"
+                                      if nid in bad_out else "")
+        rows.append({"kind": "isolated", "node_id": nid, "cause": cause, "sewers": 0, "nearest_sewer": None,
+                     "nearest_m": None, "x": _r(p[0]) if p else None, "y": _r(p[1]) if p else None})
+    rows += sorted(out_rows, key=lambda r: (-r["sewers"], r["node_id"]))
+
+    # per-row fields
+    for nid, n in by_id.items():
+        if nid in outlet:
+            n["wwn_outfall"], n["wwn_connectivity"] = outlet[nid], "ok"
+        elif nid in sink_of:
+            n["wwn_outfall"] = ""
+            n["wwn_connectivity"] = ("no outfall: closed loop at " if sink_of[nid] in loop_of
+                                     else "no outfall: dead end at ") + sink_of[nid]
+        else:
+            n["wwn_outfall"], n["wwn_connectivity"] = "", "no outfall: isolated node"
+    bad_ids = {id(lk) for lk in bad}
+    for lk in links:
+        u, d = lk["us_node_id"], lk["ds_node_id"]
+        if id(lk) in bad_ids:
+            lk["wwn_outfall"] = ""
+            lk["wwn_connectivity"] = f"not imported by ICM: node {u if u not in by_id else d} not in the export"
+        elif d in outlet:
+            lk["wwn_outfall"], lk["wwn_connectivity"] = outlet[d], "ok"
+        else:
+            lk["wwn_outfall"] = ""
+            lk["wwn_connectivity"] = ("no outfall: closed loop at " if sink_of.get(d) in loop_of
+                                      else "no outfall: dead end at ") + str(sink_of.get(d))
+
+    n_ok = sum(1 for lk in sewers if lk["ds_node_id"] in outlet)
+    msg = [f"Connectivity (downstream along each link to an Outfall, as ICM checks it): {n_ok} of {len(sewers)} "
+           f"gravity sewer(s) reach an outfall" + ("." if n_ok == len(sewers) else f"; {len(sewers) - n_ok} do not.")]
+    if places:
+        msg.append(f"No outfall downstream at {len(dead)} dead end(s) and {len(loops)} closed loop(s); sewers "
+                   "upstream of each, most first" + (f" (first {REPORT_LIMIT}; all in the connectivity CSV)"
+                                                     if len(places) > REPORT_LIMIT else "") + ":")
+        msg += [f"  {k}: {n} sewer(s); {cause}" for k, n, cause in places[:REPORT_LIMIT]]
+    if isolated:
+        msg.append(f"{len(isolated)} node(s) with no link attached (ICM may report them too): " + _ids(isolated))
+    if bad:
+        msg.append(f"{len(bad)} link(s) reference a node not in the export (ICM will not import them): "
+                   + _ids([f"{lk['us_node_id']} -> {lk['ds_node_id']}" for lk in bad]))
+    reasons = {}
+    for o in outfalls:
+        r = by_id[o]["wwn_outfall_reason"] or "model outfall"
+        reasons[r] = reasons.get(r, 0) + 1
+    top = sorted(outfalls, key=lambda o: (-per_outfall.get(o, 0), o))
+    msg.append(f"Outfalls: {len(outfalls)} (" + ", ".join(f"{v} {k}" for k, v in sorted(reasons.items())) + ")"
+               + ("; gravity sewers draining to each, most first: " + ", ".join(
+                   f"{o} {per_outfall.get(o, 0)}" for o in top[:15]) + (" ..." if len(top) > 15 else "")
+                  if outfalls else "") + ".")
+    if false_out:
+        false_out.sort(key=lambda t: (t[3], t[0]))
+        msg.append(f"Possible false outfalls ({len(false_out)}): terminal chamber with a sewer it is not connected "
+                   f"to within {FALSE_OUTFALL_M:g} m (missed join, or a sewer digitised the wrong way): "
+                   + "; ".join(f"{o} ({n} sewer(s), {cid} at {d:.1f} m)" for o, n, cid, d in false_out[:15])
+                   + (" ..." if len(false_out) > 15 else ""))
+    return {"lines": msg, "rows": rows, "sewers": len(sewers), "sewers_ok": n_ok, "dead_ends": dead,
+            "loops": loops, "isolated": isolated, "bad_links": len(bad), "false_outfalls": [t[0] for t in false_out]}
 
 
 def _demand():
@@ -800,6 +1123,10 @@ def notes_text(gpkg_path: str, out_sr_label: str, gdb: str, nodes_csv: str, cond
         "  'not connected (connect manually)'); join them to the gravity network by hand",
         "  Conduits shorter than 1 m (ICM minimum) are exported with length 1 m; inverts are unchanged",
         "  dangling sewer ends (tee / IS / IO ends with nothing downstream) stay Break: fix the join, not the outfall",
+        "  wwn_outfall = the Outfall the node drains to (blank = none); wwn_connectivity = ok / why there is no outfall",
+        "  (dead end or closed loop at <node>); the same two fields are on the conduits. Symbolise them in ArcGIS Pro",
+        "  to see the areas ICM reports as not connected to an outfall; the _ICM_connectivity.csv lists each place.",
+        "  Gravity only export: wet wells are Outfalls and no rising mains / pumps are written.",
         "  ground_level -> Ground level | flood_level -> Flood level | chamber_floor -> Chamber floor level",
         "  Chamber floor is the node invert, lowered to the lowest connected conduit invert where a pipe is lower",
         "  (tee branches, adverse steps, estimated inverts, rising main ends; ICM: 'ds invert is below attached",

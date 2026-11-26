@@ -4,8 +4,8 @@ the 2026-11-25 session's `ccr-153a547e-mtrc3t` before it, section 14). It was re
 side, Export To ICM, Self Test, Update WWNet; sections 2-11) and the 2026-11-23 review session (schema v3 / toolbox
 UX; **section 12**), merged on 2026-11-24. All older branches (`ccr-7bd083b1-j0qlhq`, `ccr-54bf38a8-b92qd9`,
 `ccr-472a9a6a-he69zu`, `ccr-974cdaeb-c682le`) are contained in this one: continue here.
-**Start here: section 15 (existing demand from land use, 2026-11-26, where we stopped), then 14 (pump station register
-import), 13 (antivirus, assistant removed), 12 (what the merge changed) and 11.**
+**Start here: section 16 (gravity connectivity to outfalls, 2026-11-26, where we stopped), then 15 (existing demand
+from land use), 14 (pump station register import), 13 (antivirus, assistant removed), 12 (what the merge changed) and 11.**
 **Session workflow (from 2026-11-25):** `main` holds the latest working code (created at 0b59caa; the user is
 setting it as the GitHub default branch, replacing `ccr-974cdaeb-c682le`). New sessions start from `main` in the
 personal cloud environment `ICM-development-`, whose setup script builds `.venv` (pytest, pyflakes, maturin,
@@ -548,3 +548,43 @@ confirmed (population 100,347, trade flow 33.42 L/s). Tools: 24.
    so far); QGIS plugin has no front end for Calculate Existing Demand (core is shared); export GP calls slow (123 s;
    delete / create / AddFields 4-14 s per table — recreating the whole gdb offered earlier, not done).
 4. Section 14's open items (Self Test after install, ICM pump run comparison) and §8.
+
+## 16. 2026-11-26 (second session): gravity conduits "not connected to outfall" in ICM
+
+Branch `claude/icm-conduit-outfall-errors-hi5c7m` (from `main` 3bcb290). User: "Import to ICM needs work, a lot of the
+conduits still show errors of not being connected to outfall. How do I give you data to inform a fix" then **"I just
+want to focus on gravity sewer conduit connectivity. Disregard the pressure side for now."**
+
+Data channel: the repository is **public**, so the user must NOT upload export files (asset ids + coordinates) to
+GitHub; the user pastes tool messages / ICM validation text into the chat. Asked (not yet answered): the exact ICM
+message text + count + ~5 ids; whether the ICM network was empty before the ODIC import (stale objects from earlier
+imports with different tee / junction ids stay unconnected).
+
+Built (Python only -> `wwnet-arcgis-update` + Update WWNet, then right-click toolbox > Refresh: new parameter):
+- `icm_export.connectivity()` (pure): reverse BFS from every Outfall over the exported links (conduits, rising mains,
+  pumps; us -> ds); unconnected nodes end at a **dead end** (links in, none out, not an Outfall: dangling Break,
+  wet well without pump, downstream link to a node not in the export) or a **closed loop** (sink strongly connected
+  component, `_sink_loops`, iterative Kosaraju). Per place: sewers upstream, cause, nearest other sewer not attached
+  (`_SewerGrid`, 50 m). Isolated nodes and links to missing nodes listed. Outfalls with sewers draining to each;
+  **possible false outfalls** = terminal outfall with an unattached sewer within 5 m (missed join / reversed sewer:
+  silently splits the network, no ICM error).
+- New fields `wwn_outfall` (outfall reached, fewest links) and `wwn_connectivity` (ok / "no outfall: dead end at X" /
+  "closed loop at X" / isolated / not imported) on ICM_Nodes and ICM_Conduits; `<stem>_ICM_connectivity.csv`
+  (kind, node_id, cause, sewers, nearest_sewer, nearest_m, x, y); message block after the warnings (first line a
+  warning when sewers are unconnected; top 30 places). Assumption: ICM follows link direction like this (unconfirmed).
+- Export To ICM option **Gravity sewers only**: no rising mains / pumps / delivery nodes (stale ICM_Pumps and pump
+  CSVs removed), wet wells with sewers in and none out -> Outfall ("wet well (gravity only export)"), nodes with no
+  gravity sewer left out (WW_ / D_ points, isolated nodes).
+- `_gpkg_points` (point + line WKB) replaces the line-only parser. Tests: toolbox 327 (13 new,
+  `tests/test_icm_connectivity.py`), shared core 189 + 1 skipped, pyflakes clean. Synthetic 9,000-node network 0.05 s.
+
+### Where we stopped (next session starts here)
+
+1. User installs this branch's `wwnet-arcgis-update` artifact (Update WWNet, Refresh toolbox), runs Export To ICM on
+   EdenHillv8 with *Gravity sewers only* ticked, and pastes the "Connectivity ..." message block (+ the false outfall
+   line). Compare the unconnected sewer count with ICM's validation count after an ODIC import into an EMPTY network.
+2. Then fix by cause: dangling ends near a main -> Join Dangling Sewer Ends / importer tee rules; closed loops ->
+   flow direction in the importer; false outfalls -> missed joins; anything ICM reports that the trace does not ->
+   ICM checks something else (get the exact message).
+3. Pressure side parked by the user (section 15 item 2 still open).
+
