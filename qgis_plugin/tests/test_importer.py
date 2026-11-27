@@ -643,7 +643,7 @@ def test_is_sewer_tee_downstream_free_upstream_is_end(tmp_path):
 
 
 def test_is_sewers_not_imported_when_option_off():
-    """import_is_sewers=False: MAINTYPE E / IS sewers are dropped before any joining, so the main is not split."""
+    """import_is_sewers=False: IS stubs (a free end) are dropped before any joining, so the main is not split."""
     acs = [ac("A", 0, 0), ac("B", 100, 0)]
     main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)
     is1 = tseg("IS1", [(60, 10), (60, 0.3)], None, None, 20.5, 19.8, MAINTYPE="E- inspection shaft")
@@ -652,9 +652,79 @@ def test_is_sewers_not_imported_when_option_off():
     assert [c["conduit_id"] for c in model["conduits"]] == ["M"]
     assert sorted(n["node_id"] for n in model["nodes"]) == ["A", "B"]
     assert rep.counts["is_sewers_skipped"] == 2 and rep.counts["conduits_read"] == 1
-    assert any("Skipped 2 IS (inspection shaft) sewer(s)" in line for line in rep.summary_lines())
+    assert "is_sewers_kept" not in rep.counts
+    lines = rep.summary_lines()
+    assert any("Skipped 2 IS (inspection shaft) stub sewer(s) with a free end: not imported "
+               "(option 'Import IS sewers' off)." in line for line in lines)
+    assert not any(line.startswith("Kept") for line in lines)
     model, rep = build_model(acs, [], [main, is1, is2])                       # default: imported (unchanged)
     assert len(model["conduits"]) == 5 and "is_sewers_skipped" not in rep.counts
+
+
+OFF = ImportOptions(import_is_sewers=False)
+
+
+def test_is_pipe_between_chambers_kept_when_option_off():
+    acs = [ac("A", 0, 0), ac("B", 50, 0), ac("C", 100, 0)]
+    retic = tseg("R1", [(0, 0), (50, 0)], "A", "B", 20.0, 19.5)
+    isp = tseg("IS1", [(50, 0), (100, 0)], "B", "C", 19.5, 19.0, MAINTYPE="E- inspection shaft")
+    model, rep = build_model(acs, [], [retic, isp], options=OFF)
+    c = by_id(model["conduits"], "conduit_id")
+    assert sorted(c) == ["IS1", "R1"]
+    assert c["IS1"]["us_node_id"] == "B" and c["IS1"]["ds_node_id"] == "C"
+    assert rep.counts["is_sewers_kept"] == 1 and "is_sewers_skipped" not in rep.counts
+    assert rep.is_kept_ids == ["IS1"]
+    assert any("Kept 1 IS-coded sewer(s) connected at both ends (they carry flow): IS1" in x
+               for x in rep.summary_lines())
+
+
+def test_is_pipe_teeing_into_main_kept_when_option_off():
+    acs = [ac("A", 0, 0), ac("B", 100, 0), ac("C", 40, 20)]
+    main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)
+    isp = tseg("IS1", [(40, 20), (40, 0.2)], "C", None, 21.0, 20.5, MAINTYPE="IS")
+    model, rep = build_model(acs, [], [main, isp], options=OFF)
+    # kept and imported as with the option on (the existing IS / IO rules decide whether the end is a free end)
+    assert sorted(c["conduit_id"] for c in model["conduits"]) == ["IS1", "M"]
+    assert by_id(model["conduits"], "conduit_id")["IS1"]["us_node_id"] == "C"
+    assert "is_sewers_skipped" not in rep.counts
+    assert rep.counts["is_sewers_kept"] == 1 and rep.is_kept_ids == ["IS1"]
+
+
+def test_is_stub_chain_dropped_from_free_end_inwards():
+    acs = [ac("A", 0, 0), ac("B", 100, 0)]
+    main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)
+    outer = tseg("OUT", [(60, 20), (60, 10)], None, None, 21.0, 20.8, MAINTYPE="IS")
+    inner = tseg("INN", [(60, 10), (60, 0.2)], None, None, 20.8, 20.5, MAINTYPE="IS")
+    model, rep = build_model(acs, [], [main, outer, inner], options=OFF)
+    assert [c["conduit_id"] for c in model["conduits"]] == ["M"]
+    assert rep.counts["is_sewers_skipped"] == 2 and "is_sewers_kept" not in rep.counts
+
+
+def test_is_stub_near_but_beyond_snap_of_another_stub_dropped():
+    acs = [ac("A", 0, 0), ac("B", 100, 0)]
+    main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)
+    s1 = tseg("S1", [(60, 20), (60, 0.2)], None, None, 21.0, 20.5, MAINTYPE="IS")
+    # free end 0.4 m from S1's free end, tolerance is 0.1 m: not connected, both dropped (S2's downstream is free too)
+    s2 = tseg("S2", [(60.4, 20), (60.4, 40)], None, None, 21.0, 20.5, MAINTYPE="IS")
+    model, rep = build_model(acs, [], [main, s1, s2], options=OFF)
+    assert [c["conduit_id"] for c in model["conduits"]] == ["M"]
+    assert rep.counts["is_sewers_skipped"] == 2
+
+
+def test_is_prune_is_fast_on_large_grid():
+    import time
+    segs, acs = [], []
+    for i in range(5600):
+        x, y = (i % 80) * 20.0, (i // 80) * 20.0
+        segs.append(tseg(f"R{i}", [(x, y), (x + 10, y)], None, None, 20.0, 19.0))
+    for i in range(1400):
+        x, y = (i % 80) * 20.0 + 5, (i // 80) * 20.0 + 6
+        segs.append(tseg(f"IS{i}", [(x, y), (x, y + 4.9)], None, None, 20.0, 19.0, MAINTYPE="IS"))
+    prepared = [dict(s, line=s[GEOM], is_coded=s["MAINTYPE"] == "IS", pid=s["ID"]) for s in segs]
+    t0 = time.perf_counter()
+    out = imp._prune_is_stubs(prepared, imp._Grid(0.1), 0.1, 0.5, imp.ImportReport())
+    dt = time.perf_counter() - t0
+    assert len(out) == 5600 and dt < 2.0
 
 
 def test_import_is_sewers_option_from_template():

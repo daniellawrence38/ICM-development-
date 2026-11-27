@@ -136,6 +136,7 @@ class ImportReport:
     assumed_notes: dict = field(default_factory=dict)     # {"MAINTYPE": {"E": "meaning unconfirmed ..."}}
     diagnostics: list = field(default_factory=list)       # [str] summary lines (direction, dangling ends, grade ratios)
     status_skipped: dict = field(default_factory=dict)    # {"N": 12, "D": 3}: sewers skipped by STATUS code
+    is_kept_ids: list = field(default_factory=list)       # IS-coded sewers kept (connected at both ends) with import_is_sewers off
 
     def warn(self, code: str, object_type: str, object_id: str, message: str, xy=None, severity: str = "warning"):
         x, y = (xy if xy else (None, None))
@@ -192,8 +193,12 @@ class ImportReport:
             lines.append(f"Skipped {c['inspection_shafts_skipped']} chamber(s) of a type mapped to skip "
                          "(inspection shafts, deleted manholes, pit access): not imported.")
         if c.get("is_sewers_skipped"):
-            lines.append(f"Skipped {c['is_sewers_skipped']} IS (inspection shaft) sewer(s): not imported "
-                         "(option 'Import IS sewers' off).")
+            lines.append(f"Skipped {c['is_sewers_skipped']} IS (inspection shaft) stub sewer(s) with a free end: "
+                         "not imported (option 'Import IS sewers' off).")
+        if c.get("is_sewers_kept"):
+            ids = self.is_kept_ids
+            lines.append(f"Kept {c['is_sewers_kept']} IS-coded sewer(s) connected at both ends (they carry flow): "
+                         + ", ".join(ids[:10]) + (f" ... (first 10 of {len(ids)})" if len(ids) > 10 else " (first 10)"))
         if c.get("status_skipped"):
             lines.append(f"Skipped {c['status_skipped']} sewer(s) by status (not imported): "
                          + ", ".join(f"{k} x{v}" for k, v in sorted(self.status_skipped.items())) + ".")
@@ -366,6 +371,58 @@ class _SegGrid:
 
     def candidates(self, p):
         return self.cells.get((math.floor(p[0] / self.cell), math.floor(p[1] / self.cell)), ())
+
+
+def _prune_is_stubs(segs, chamber_grid, tol, tee_tol, rep):
+    """Drop IS-coded sewer stubs: an IS segment with a free end (no chamber, no end of another remaining sewer
+    within `tol`, no remaining sewer's mid-line within `tee_tol`) is removed, repeating until stable so a chain of
+    stubs goes from the free end inwards. Non-IS sewers are never dropped. Returns the remaining segments."""
+    cand = [i for i, s in enumerate(segs) if s.get("is_coded")]
+    if not cand:
+        return segs
+    cell = max(tol, 1e-6)
+    egrid: dict = {}                 # endpoint cells: (kx, ky) -> [(segment index, point)]
+    for i, s in enumerate(segs):
+        for pt in (s["line"][0], s["line"][-1]):
+            egrid.setdefault((math.floor(pt[0] / cell), math.floor(pt[1] / cell)), []).append((i, pt))
+    mgrid = _SegGrid(10.0, tee_tol)
+    for i, s in enumerate(segs):
+        for a, b in zip(s["line"], s["line"][1:]):
+            mgrid.add(i, a, b)
+    alive = [True] * len(segs)
+
+    def free(i, pt):
+        if chamber_grid.nearest(pt, tol)[0] is not None:
+            return False
+        kx, ky = math.floor(pt[0] / cell), math.floor(pt[1] / cell)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j, q in egrid.get((kx + dx, ky + dy), ()):
+                    if j != i and alive[j] and _dist(pt, q) <= tol:
+                        return False
+        if tee_tol > 0:
+            for j, a, b in mgrid.candidates(pt):
+                if j != i and alive[j] and _project(pt, a, b)[0] <= tee_tol:
+                    return False
+        return True
+
+    todo = cand
+    while todo:
+        dropped = [i for i in todo
+                   if free(i, segs[i]["line"][0]) or free(i, segs[i]["line"][-1])]
+        if not dropped:
+            break
+        for i in dropped:            # drop after the pass, so the result does not depend on the order
+            alive[i] = False
+        rep.count("is_sewers_skipped", len(dropped))
+        rep.count("conduits_read", -len(dropped))
+        gone = set(dropped)
+        todo = [i for i in todo if i not in gone]
+    kept = [i for i in cand if alive[i]]
+    if kept:
+        rep.count("is_sewers_kept", len(kept))
+        rep.is_kept_ids = [str(segs[i]["pid"]) for i in kept]
+    return [s for i, s in enumerate(segs) if alive[i]]
 
 
 def _project(p, a, b):
@@ -564,11 +621,11 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             rep.count("status_skipped")
             rep.status_skipped[scode] = rep.status_skipped.get(scode, 0) + 1
             continue
+        is_coded = False
         if not opt.import_is_sewers:
             raw = get(row, "sewer_type")
-            if not blank(raw) and (type_codes.get(code_of(raw)) or type_codes.get(str(raw).strip().upper())) == "is":
-                rep.count("is_sewers_skipped")
-                continue
+            is_coded = (not blank(raw) and
+                        (type_codes.get(code_of(raw)) or type_codes.get(str(raw).strip().upper())) == "is")
         if not pid:
             rep.count("conduits_skipped")
             rep.warn("PIPE_NO_ID", "conduit", "", f"sewer without {fm.pipe_id} skipped")
@@ -584,7 +641,9 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         pipe_ids.add(pid)
         rep.count("conduits_read")
         segs.append({"pid": pid, "row": row, "line": line, "us_id": to_ref_id(get(row, "us_node")),
-                     "ds_id": to_ref_id(get(row, "ds_node")), "ends": [None, None], "status": status})
+                     "ds_id": to_ref_id(get(row, "ds_node")), "ends": [None, None], "status": status, "is_coded": is_coded})
+    if not opt.import_is_sewers:
+        segs = _prune_is_stubs(segs, grid, tol, float(opt.tee_tolerance_m), rep)
 
     # ---- connectivity by geometry ---------------------------------------------------------------
     # 1. segment end within tolerance of a chamber, else of a connection point
