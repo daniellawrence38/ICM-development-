@@ -75,8 +75,10 @@ PUMP_FIELDS = [("us_node_id", "TEXT"), ("link_suffix", "TEXT"), ("ds_node_id", "
 # Connectivity report (<stem>_ICM_connectivity.csv): one row per place where sewers have no outfall downstream,
 # per isolated node and per outfall.
 CONNECTIVITY_FIELDS = [("kind", "TEXT"), ("node_id", "TEXT"), ("cause", "TEXT"), ("sewers", "LONG"),
-                       ("nearest_sewer", "TEXT"), ("nearest_m", "DOUBLE"), ("x", "DOUBLE"), ("y", "DOUBLE")]
+                       ("nearest_sewer", "TEXT"), ("nearest_m", "DOUBLE"), ("nearest_ps", "TEXT"),
+                       ("nearest_ps_m", "DOUBLE"), ("x", "DOUBLE"), ("y", "DOUBLE")]
 NEAREST_SEARCH_M = 50.0     # nearest other sewer reported within this distance of a dead end / outfall
+PS_NEAR_M = 50.0            # a dead end this close to a pump station with no wet well match: likely its inlet sewer
 FALSE_OUTFALL_M = 5.0       # a terminal outfall with a sewer it is not connected to this close: possible missed join
 REPORT_LIMIT = 30           # dead ends / loops listed in the messages (all of them are in the CSV)
 HEAD_DISCHARGE_FIELDS = [("head_discharge_id", "TEXT"), ("head", "DOUBLE"), ("discharge", "DOUBLE")]
@@ -210,6 +212,8 @@ def build(gpkg_path: str, gravity_only: bool = False) -> dict:
         stations = _rows(con, "SELECT ps_id, wet_well_node_id, discharge_node_id, rising_main_id, pump_rate_lps, "
                               "wet_well_area_m2, start_level, stop_level, status, notes FROM wwn_pump_stations "
                               "WHERE status <> 'abandoned' ORDER BY ps_id") if "wwn_pump_stations" in tables else []
+        ps_pts = _rows(con, "SELECT ps_id, wet_well_node_id, geom FROM wwn_pump_stations "
+                            "WHERE status <> 'abandoned' ORDER BY ps_id") if "wwn_pump_stations" in tables else []
         mains = _rows(con, "SELECT rm_id, ps_id, discharge_node_id, dn, internal_diameter_mm, material, "
                            "roughness_type, roughness, length_m, profile_json, status, notes, geom "
                            "FROM wwn_rising_mains WHERE status <> 'abandoned' ORDER BY rm_id") \
@@ -231,6 +235,12 @@ def build(gpkg_path: str, gravity_only: bool = False) -> dict:
         pts = _gpkg_points(c["geom"], 2)
         if pts and len(pts) > 1:
             lines[c["conduit_id"]] = pts
+    on_grav = {c["us_node_id"] for c in conduits} | {c["ds_node_id"] for c in conduits}
+    ps_unmatched = []
+    for st in ps_pts:
+        pts = _gpkg_points(st["geom"], 1)
+        if pts and (not st["wet_well_node_id"] or st["wet_well_node_id"] not in on_grav):
+            ps_unmatched.append((st["ps_id"], pts[0]))
     if gravity_only:
         on_sewer = {c["us_node_id"] for c in conduits} | {c["ds_node_id"] for c in conduits}
         off = [n["node_id"] for n in nodes if n["node_id"] not in on_sewer]
@@ -411,7 +421,8 @@ def build(gpkg_path: str, gravity_only: bool = False) -> dict:
                         "report them as not connected to an outfall until the join is fixed: " + _ids(dangling))
     sc = subcatchments(subs, loads, meta, {n["node_id"] for n in out_nodes}, warnings)
     conn = connectivity(out_nodes + pres["nodes"], out_links + pres["conduits"] + pres["pumps"], node_xy, lines,
-                        {c["conduit_id"]: (c["us_node_id"], c["ds_node_id"]) for c in conduits})
+                        {c["conduit_id"]: (c["us_node_id"], c["ds_node_id"]) for c in conduits},
+                        ps_unmatched=ps_unmatched)
     for r in out_nodes + pres["nodes"] + out_links + pres["conduits"] + pres["pumps"]:
         r["system_type"] = SYSTEM_TYPE
     counts = {"nodes": len(out_nodes) + len(pres["nodes"]), "conduits": len(out_links),
@@ -508,14 +519,16 @@ def _sink_loops(nodes: list, down: dict) -> list:
     return sorted(sinks)
 
 
-def connectivity(nodes: list, links: list, node_xy: dict, lines: dict, ends: dict) -> dict:
+def connectivity(nodes: list, links: list, node_xy: dict, lines: dict, ends: dict, ps_unmatched=None) -> dict:
     """Downstream (us -> ds) path from every exported node and link to an ICM Outfall, the way ICM's
     'not connected to an outfall' check follows the network. Sets `wwn_outfall` (the outfall reached, by
     fewest links) and `wwn_connectivity` on every node and link row in place.
     Where sewers have no outfall downstream, the place they end up is a dead end (links in, none out, not
     an outfall: dangling Break, wet well without pump) or a closed loop (sewers flowing in a circle).
     Returns {'lines': [message line], 'rows': [CONNECTIVITY_FIELDS row], 'sewers', 'sewers_ok', 'dead_ends',
-    'loops', 'isolated', 'bad_links', 'false_outfalls'}."""
+    'loops', 'isolated', 'bad_links', 'false_outfalls'}.
+    ps_unmatched: [(ps_id, (x, y))] pump stations with no wet well on a gravity sewer; a dead end within
+    PS_NEAR_M of one is probably that station's inlet sewer and is reported as such."""
     by_id = {n["node_id"]: n for n in nodes}
     down, up, bad = {}, {}, []
     for lk in links:
@@ -600,9 +613,17 @@ def connectivity(nodes: list, links: list, node_xy: dict, lines: dict, ends: dic
             return f"no other sewer within {NEAREST_SEARCH_M:g} m (main outside the selection?)"
         return f"nearest other sewer {cid} at {dist:.1f} m"
 
-    places, rows = [], []
+    def near_ps(nid):
+        p = node_xy.get(nid)
+        if p is None or not ps_unmatched:
+            return None, None
+        best = min(((math.hypot(p[0] - q[0], p[1] - q[1]), pid) for pid, q in ps_unmatched))
+        return (best[1], best[0]) if best[0] <= PS_NEAR_M else (None, None)
+
+    places, rows, n_ps = [], [], 0
     for key in sorted(per_sink, key=lambda k: (-per_sink[k], k)) + \
             [k for k in dead + [lp[0] for lp in loops] if k not in per_sink]:
+        pid = pdist = None
         if key in loop_of:
             lp = loop_of[key]
             cause = (f"closed loop of {len(lp)} node(s) (sewers flow in a circle with no way out; check the flow "
@@ -614,11 +635,16 @@ def connectivity(nodes: list, links: list, node_xy: dict, lines: dict, ends: dic
             cid, dist = near(key)
             kind = "dead_end"
             cause += "; " + near_text(cid, dist)
+            pid, pdist = near_ps(key)
+            if pid is not None:
+                n_ps += 1
+                cause += (f"; pump station {pid} at {pdist:.1f} m (likely its inlet sewer: re-import with a wet "
+                          "well distance above this)")
         places.append((key, per_sink.get(key, 0), cause))
         p = node_xy.get(key)
         rows.append({"kind": kind, "node_id": key, "cause": cause, "sewers": per_sink.get(key, 0),
-                     "nearest_sewer": cid, "nearest_m": _r(dist, 2), "x": _r(p[0]) if p else None,
-                     "y": _r(p[1]) if p else None})
+                     "nearest_sewer": cid, "nearest_m": _r(dist, 2), "nearest_ps": pid, "nearest_ps_m": _r(pdist, 2),
+                     "x": _r(p[0]) if p else None, "y": _r(p[1]) if p else None})
 
     false_out = []
     out_rows = []
@@ -629,14 +655,15 @@ def connectivity(nodes: list, links: list, node_xy: dict, lines: dict, ends: dic
             false_out.append((o, per_outfall.get(o, 0), cid, dist))
         p = node_xy.get(o)
         out_rows.append({"kind": "outfall", "node_id": o, "cause": reason, "sewers": per_outfall.get(o, 0),
-                         "nearest_sewer": cid, "nearest_m": _r(dist, 2), "x": _r(p[0]) if p else None,
-                         "y": _r(p[1]) if p else None})
+                         "nearest_sewer": cid, "nearest_m": _r(dist, 2), "nearest_ps": None, "nearest_ps_m": None,
+                         "x": _r(p[0]) if p else None, "y": _r(p[1]) if p else None})
     for nid in isolated:
         p = node_xy.get(nid)
         cause = "no link attached" + (f" (its only link goes to {bad_out[nid][0]}, not in the export)"
                                       if nid in bad_out else "")
         rows.append({"kind": "isolated", "node_id": nid, "cause": cause, "sewers": 0, "nearest_sewer": None,
-                     "nearest_m": None, "x": _r(p[0]) if p else None, "y": _r(p[1]) if p else None})
+                     "nearest_m": None, "nearest_ps": None, "nearest_ps_m": None,
+                     "x": _r(p[0]) if p else None, "y": _r(p[1]) if p else None})
     rows += sorted(out_rows, key=lambda r: (-r["sewers"], r["node_id"]))
 
     # per-row fields
@@ -670,6 +697,10 @@ def connectivity(nodes: list, links: list, node_xy: dict, lines: dict, ends: dic
                    "upstream of each, most first" + (f" (first {REPORT_LIMIT}; all in the connectivity CSV)"
                                                      if len(places) > REPORT_LIMIT else "") + ":")
         msg += [f"  {k}: {n} sewer(s); {cause}" for k, n, cause in places[:REPORT_LIMIT]]
+        if n_ps:
+            msg.append(f"{n_ps} dead end(s) are within {PS_NEAR_M:g} m of a pump station with no wet well connected: "
+                       "raise the wet well distance in Import Network Data / Import Pressure Data to the distance "
+                       "shown, then re-import.")
     if isolated:
         msg.append(f"{len(isolated)} node(s) with no link attached (ICM may report them too): " + _ids(isolated))
     if bad:

@@ -202,3 +202,62 @@ def test_gpkg_points_reads_2d_and_z_points(gt):
     blob = b"GP" + bytes([0, 0b00000001]) + struct.pack("<i", 7850) + wkb
     assert icm_export._gpkg_points(blob, 1) == [(1.5, 2.5)]
     assert icm_export._gpkg_points(blob, 2) is None and icm_export._gpkg_points(None, 1) is None
+
+
+def _station(ps_id, wet_well, like):
+    return ("INSERT INTO wwn_pump_stations (geom, ps_id, wet_well_node_id) "
+            f"SELECT geom, '{ps_id}', '{wet_well}' FROM wwn_nodes WHERE node_id='{like}'")
+
+
+def _dangling_j1():
+    return [_node_copy("J1", "N08", "junction"), _node_copy("U1", "B1"), _conduit("P98", "B1", "J1"),
+            _conduit("P97", "U1", "J1")]
+
+
+def test_dead_end_near_unmatched_pump_station(demo_gpkg):
+    _edit(demo_gpkg, *_dangling_j1(), _node_copy("WW_PS7", "B3", "wet_well"), _station("PS7", "WW_PS7", "N08"))
+    cn = icm_export.build(demo_gpkg)["connectivity"]
+    line = next(x for x in cn["lines"] if x.startswith("  J1:"))
+    assert "pump station PS7 at 0.0 m (likely its inlet sewer: re-import with a wet well distance above this)" in line
+    row = next(r for r in cn["rows"] if r["node_id"] == "J1")
+    assert row["nearest_ps"] == "PS7" and row["nearest_ps_m"] == 0.0
+    assert any(x.startswith("1 dead end(s) are within 50 m of a pump station with no wet well connected: raise")
+               for x in cn["lines"])
+    assert all(r["nearest_ps"] is None for r in cn["rows"] if r["kind"] != "dead_end")
+
+
+def test_station_with_matched_wet_well_not_reported(demo_gpkg):
+    _edit(demo_gpkg, *_dangling_j1(), _node_copy("WWM", "B3", "wet_well"), _conduit("PW", "WWM", "N07"),
+          _station("PS8", "WWM", "N08"))
+    cn = icm_export.build(demo_gpkg)["connectivity"]
+    row = next(r for r in cn["rows"] if r["node_id"] == "J1")
+    assert row["nearest_ps"] is None and row["nearest_ps_m"] is None
+    assert "pump station" not in next(x for x in cn["lines"] if x.startswith("  J1:"))
+    assert not any("pump station with no wet well" in x for x in cn["lines"])
+
+
+def test_station_beyond_50_m_not_reported(demo_gpkg):
+    _edit(demo_gpkg, *_dangling_j1(), _node_copy("WW_PS7", "B3", "wet_well"), _station("PS7", "WW_PS7", "B1"))
+    cn = icm_export.build(demo_gpkg)["connectivity"]
+    row = next(r for r in cn["rows"] if r["node_id"] == "J1")
+    assert row["nearest_ps"] is None
+    assert not any("pump station" in x for x in cn["lines"])
+
+
+def test_gravity_only_still_reports_station(demo_gpkg):
+    _edit(demo_gpkg, *_dangling_j1(), _node_copy("WW_PS7", "B3", "wet_well"), _station("PS7", "WW_PS7", "N08"))
+    d = icm_export.build(demo_gpkg, gravity_only=True)
+    assert "WW_PS7" not in {n["node_id"] for n in d["nodes"]}
+    row = next(r for r in d["connectivity"]["rows"] if r["node_id"] == "J1")
+    assert row["nearest_ps"] == "PS7"
+    assert any("pump station PS7 at" in x for x in d["connectivity"]["lines"])
+
+
+def test_no_stations_leaves_output_unchanged(demo_gpkg):
+    _edit(demo_gpkg, *_dangling_j1())
+    cn = icm_export.build(demo_gpkg)["connectivity"]
+    assert not any("pump station" in x for x in cn["lines"])
+    assert all(r["nearest_ps"] is None and r["nearest_ps_m"] is None for r in cn["rows"])
+    _edit(demo_gpkg, "DROP TABLE wwn_pump_stations")
+    cn = icm_export.build(demo_gpkg)["connectivity"]
+    assert not any("pump station" in x for x in cn["lines"])
