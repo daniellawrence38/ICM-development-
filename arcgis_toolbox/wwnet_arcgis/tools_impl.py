@@ -1228,12 +1228,22 @@ def verify_setup(msgs: Messages) -> bool:
 
 # ------------------------------------------------------------- ICM export
 
+def _export_warnings_and_connectivity(msgs: Messages, data: dict) -> None:
+    """Warnings, then the connectivity lines (shared by the full export and the report-only export)."""
+    for w in data["warnings"]:
+        msgs.warn(w)
+    cn = data["connectivity"]
+    for i, line in enumerate(cn["lines"]):
+        (msgs.warn if i == 0 and cn["sewers_ok"] < cn["sewers"] else msgs.info)(line)
+
+
 def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
                out_sr_label: str = "GDA2020 / MGA zone 50 (EPSG:7850)", dem: str | None = None,
-               gravity_only: bool = False) -> dict:
+               gravity_only: bool = False, report_only: bool = False) -> dict:
     """Write <stem>_ICM.gdb (ICM_Nodes, ICM_Conduits incl. rising mains, ICM_Pumps when there are pumps),
     the same tables as CSV (+ pump head-discharge tables), a connectivity report CSV and an import-notes
-    file to out_folder. gravity_only: see icm_export.build."""
+    file to out_folder. gravity_only: see icm_export.build. report_only: write only the connectivity CSV
+    (no geodatabase, no ICM CSV or notes, no DEM fill); existing ICM files are left untouched."""
     import time
     from . import icm_export, sewer_import
     t0 = t = time.perf_counter()
@@ -1252,6 +1262,15 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
     if not data["nodes"] or not data["conduits"]:
         raise RuntimeError("The model has no nodes or no conduits to export.")
     lap("read model")
+    if report_only:
+        stem = icm_export.safe_stem(gpkg_path)
+        conn_csv = os.path.join(out_folder, f"{stem}_ICM_connectivity.csv")
+        icm_export.write_csv(conn_csv, icm_export.CONNECTIVITY_FIELDS, data["connectivity"]["rows"])
+        _export_warnings_and_connectivity(msgs, data)
+        msgs.info(f"Connectivity report (every dead end, closed loop, isolated node and outfall): {conn_csv}")
+        msgs.info("Report only: no ICM files were written (no geodatabase, ICM CSV or import notes).")
+        return {"gdb": None, "nodes_csv": None, "conduits_csv": None, "connectivity_csv": conn_csv,
+                "pumps_csv": None, "head_discharge_csv": None, "subcatchments_csv": None, "notes": None, **data}
     if dem:
         filled, nodata = icm_export.fill_ground_from_dem(arcpy, msgs, data["nodes"],
                                                          gpkg.table_path(gpkg_path, "wwn_nodes"), dem)
@@ -1353,11 +1372,7 @@ def export_icm(arcpy, msgs: Messages, gpkg_path: str, out_folder: str,
                       f"trade flow {lo['trade_flow_lps']:.2f} L/s (trade profile {icm_export.TRADE_PROFILE}), "
                       f"additional foul flow {lo['additional_foul_flow_lps']:.2f} L/s; ADWF {lo['adwf_lps']:.2f} L/s. "
                       "Set the per capita flow and diurnal factors in ICM's Waste Water / Trade Waste events.")
-        for w in data["warnings"]:
-            msgs.warn(w)
-        cn = data["connectivity"]
-        for i, line in enumerate(cn["lines"]):
-            (msgs.warn if i == 0 and cn["sewers_ok"] < cn["sewers"] else msgs.info)(line)
+        _export_warnings_and_connectivity(msgs, data)
         msgs.info(f"Connectivity report (every dead end, closed loop, isolated node and outfall): {conn_csv}")
         msgs.info(f"Geodatabase: {gdb}")
         msgs.info(f"CSV: {nodes_csv} ; {conduits_csv}" + "".join(f" ; {x}" for x in (pumps_csv, hd_csv, subs_csv)

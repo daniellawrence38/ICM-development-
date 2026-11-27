@@ -647,3 +647,62 @@ def test_floor_lowered_at_rising_main_discharge_and_wet_well(demo_gpkg):
     assert _node(d, "D")["wwn_floor_source"] == "lowered to lowest connected invert (was 25)"
     assert any("2 node(s): chamber floor lowered" in w for w in d["warnings"])
     assert _no_invert_below_floor(d) == []
+
+
+def _load_pyt():
+    import importlib.machinery
+    import importlib.util
+    from pathlib import Path
+    pyt = Path(__file__).resolve().parents[1] / "WWNet.pyt"
+    loader = importlib.machinery.SourceFileLoader("wwnet_pyt_report_only", str(pyt))
+    spec = importlib.util.spec_from_loader("wwnet_pyt_report_only", loader)
+    mod = importlib.util.module_from_spec(spec)
+    loader.exec_module(mod)
+    return mod
+
+
+def test_report_only_writes_just_the_connectivity_csv(fake_arcpy, demo_gpkg, tmp_path):
+    import csv
+    a = fake_arcpy([])
+    r = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path), report_only=True)
+    with open(r["connectivity_csv"], newline="", encoding="utf-8") as fh:
+        assert next(csv.reader(fh)) == [f for f, _ in icm_export.CONNECTIVITY_FIELDS]
+    assert not a.gdbs and not any("ICM_" in str(k) for k in a.memory)
+    assert sorted(f for f in os.listdir(tmp_path) if f != "demo.gpkg") == ["demo_ICM_connectivity.csv"]
+    assert r["gdb"] is None and r["nodes_csv"] is None and r["notes"] is None
+    assert r["connectivity_csv"] == os.path.join(str(tmp_path), "demo_ICM_connectivity.csv")
+    lines = [t for _, t in a.log]
+    assert any(t.startswith("Connectivity (downstream along each link to an Outfall") for t in lines)
+    assert any("no ICM files" in t for t in lines)
+
+
+def test_report_only_leaves_an_earlier_export_untouched(fake_arcpy, demo_gpkg, tmp_path):
+    a = fake_arcpy([])
+    full = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path))
+    gdb = full["gdb"]
+    rows_before = {k: list(v["rows"]) for k, v in a.memory.items() if isinstance(v, dict) and "rows" in v}
+    # the connectivity CSV is the one file report-only writes, so it is the only one allowed to change
+    mtimes = {f: os.stat(os.path.join(tmp_path, f)).st_mtime_ns for f in os.listdir(tmp_path)
+              if f != "demo_ICM_connectivity.csv"}
+    assert gdb in a.gdbs and "demo_ICM_nodes.csv" in mtimes
+    tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path), report_only=True)
+    assert gdb in a.gdbs
+    assert {k: list(v["rows"]) for k, v in a.memory.items() if isinstance(v, dict) and "rows" in v} == rows_before
+    for f, mtime in mtimes.items():
+        assert os.stat(os.path.join(tmp_path, f)).st_mtime_ns == mtime, f
+
+
+def test_report_only_passes_gravity_only_through(fake_arcpy, demo_gpkg, tmp_path):
+    a = fake_arcpy([])
+    r = tools_impl.export_icm(a, Messages(a), demo_gpkg, str(tmp_path), gravity_only=True, report_only=True)
+    assert r["gravity_only"] is True and r["gdb"] is None
+
+
+def test_report_only_pyt_parameter_follows_gravity_only(fake_arcpy):
+    fake_arcpy([])                              # WWNet.pyt imports arcpy at load time
+    mod = _load_pyt()
+    params = mod.ExportToICM().getParameterInfo()
+    names = [p.name for p in params]
+    i = names.index("gravity_only")
+    assert names[i + 1] == "report_only"
+    assert params[i + 1].datatype == "GPBoolean" and params[i + 1].value is False

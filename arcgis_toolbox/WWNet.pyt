@@ -903,13 +903,15 @@ class ExportToICM(_Tool):
                 _p("dem", "DEM to fill missing ground levels (optional)", ["GPRasterLayer", "DERasterDataset"],
                    required=False),
                 _p("gravity_only", "Gravity sewers only (wet wells exported as outfalls; no rising mains or pumps)",
+                   "GPBoolean", required=False, default=False),
+                _p("report_only", "Connectivity report only (no ICM files written; seconds instead of minutes)",
                    "GPBoolean", required=False, default=False), _model_out()]
 
     def run(self, p, msgs):
         path = p.text("gpkg")
         impl.export_icm(arcpy, msgs, path, p.text("out_folder"),
                         p.text("out_sr") or "GDA2020 / MGA zone 50 (EPSG:7850)", dem=p.text("dem"),
-                        gravity_only=p.flag("gravity_only"))
+                        gravity_only=p.flag("gravity_only"), report_only=p.flag("report_only"))
         return path
 
 
