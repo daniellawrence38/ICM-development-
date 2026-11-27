@@ -1315,3 +1315,112 @@ def test_grade_mismatch_listed_only_above_fall_threshold():
     assert rep.counts["grade_rounding"] == 1
     assert "1 sewer(s) have a levels / FLOW_GRADE grade difference > 10 % but < 50 mm of fall (rounding); not listed" \
         in rep.diagnostics
+
+
+# ---------------------------------------------------------------- self-loops are never emitted
+
+def _no_self_loops(model):
+    return [c["conduit_id"] for c in model["conduits"] if c["us_node_id"] == c["ds_node_id"]]
+
+
+def test_short_segment_between_free_ends_is_dropped_junction_keeps_others():
+    # P1 and P2 meet a 0.3 m stub S whose two ends both cluster to the same junction (J114 shape)
+    acs = [ac("A", 0, 0), ac("B", 200, 0), ac("C", 100, 50)]
+    sew = [tseg("P1", [(0, 0), (100, 0)], "A", None, 10.0, 9.0),
+           tseg("S", [(100, 0), (100.3, 0)], None, None, 9.0, 8.99),
+           tseg("P2", [(100.3, 0), (200, 0)], None, "B", 9.0, 8.0),
+           tseg("P3", [(100, 50), (100.2, 0.1)], "C", None, 10.0, 9.1)]
+    model, rep = build_model(acs, [], sew)
+    assert _no_self_loops(model) == []
+    assert sorted(c["conduit_id"] for c in model["conduits"]) == ["P1", "P2", "P3"]
+    assert rep.counts["self_loops_dropped"] == 1
+    w = [w for w in rep.warnings if w.code == "SELF_LOOP"]
+    assert len(w) == 1 and w[0].object_id == "S" and "both ends at node J1" in w[0].message \
+        and "not imported" in w[0].message
+    n = by_id(model["nodes"], "node_id")
+    c = by_id(model["conduits"], "conduit_id")
+    assert c["P1"]["ds_node_id"] == c["P2"]["us_node_id"] == c["P3"]["ds_node_id"] == "J1" and "J1" in n
+    assert any("self-loop" in x for x in rep.summary_lines(0))
+
+
+def test_orphan_junction_of_dropped_segment_is_removed():
+    acs = [ac("A", 0, 0), ac("B", 50, 0)]
+    sew = [tseg("P1", [(0, 0), (50, 0)], "A", "B", 10.0, 9.0),
+           tseg("S", [(300, 300), (300.2, 300)], None, None, 9.0, 8.99)]
+    model, rep = build_model(acs, [], sew)
+    assert [c["conduit_id"] for c in model["conduits"]] == ["P1"]
+    assert sorted(n["node_id"] for n in model["nodes"]) == ["A", "B"]
+    assert rep.counts["self_loops_dropped"] == 1 and rep.counts.get("junction_nodes", 0) == 0
+
+
+def test_both_ends_snapped_to_same_chamber_is_dropped():
+    acs = [ac("A", 0, 0), ac("B", 100, 0)]
+    sew = [tseg("P1", [(0, 0), (100, 0)], "A", "B", 10.0, 9.0),
+           tseg("LOOP", [(0, 0), (0, 5), (3, 5), (0.2, 0.1)], "A", "A", 10.0, 9.9),
+           tseg("TINY", [(100, 0), (100.2, 0)], "B", "B", 9.0, 8.99)]
+    model, rep = build_model(acs, [], sew)
+    assert _no_self_loops(model) == [] and [c["conduit_id"] for c in model["conduits"]] == ["P1"]
+    assert rep.counts["self_loops_dropped"] == 2
+    assert sorted(w.object_id for w in rep.warnings if w.code == "SELF_LOOP") == ["LOOP", "TINY"]
+
+
+def test_short_branch_with_both_ends_teed_at_one_point_is_dropped():
+    acs = [ac("A", 0, 0), ac("B", 100, 0)]
+    sew = [tseg("M", [(0, 0), (100, 0)], "A", "B", 10.0, 9.0),
+           tseg("BR", [(50, 0.1), (50.2, 0.1)], None, None, 9.6, 9.59)]
+    model, rep = build_model(acs, [], sew)
+    assert _no_self_loops(model) == []
+    assert "BR" not in {c["conduit_id"] for c in model["conduits"]}
+    assert rep.counts["self_loops_dropped"] == 1
+    c = by_id(model["conduits"], "conduit_id")
+    assert c["M"]["us_node_id"] == "A" and c["M~2"]["ds_node_id"] == "B" and c["M"]["ds_node_id"] == c["M~2"]["us_node_id"]
+
+
+def test_no_self_loop_for_ordinary_model():
+    acs, sew = sample_rows()
+    model, rep = build_model(acs, [], sew)
+    assert rep.counts.get("self_loops_dropped", 0) == 0 and "SELF_LOOP" not in codes_of(rep)
+    assert not any("self-loop" in x for x in rep.summary_lines(0))
+
+
+# ---------------------------------------------------------------- orientation around segment junctions / tees
+
+def _orient_world(branch_ids, s2_reversed=True, s3_reversed=False, tee_x=250.0):
+    """Main A -> B in three GIS segments (S2, optionally S3, digitised against the flow). Branches BJ1 / BJ2
+    end exactly at the segment joints (3-end clusters), BT mid-segment on S3 (a tee); all are digitised towards
+    the main. branch_ids: (us, ds) carried by the branches ("blank" or "same" as the main)."""
+    bus, bds = (None, None) if branch_ids == "blank" else ("A", "B")
+    acs = [ac("A", 0, 0), ac("B", 300, 0)]
+    s2 = [(200, 0), (100, 0)] if s2_reversed else [(100, 0), (200, 0)]
+    s3 = [(300, 0), (200, 0)] if s3_reversed else [(200, 0), (300, 0)]
+    sew = [seg("S1", [(0, 0), (100, 0)], "A", "B", 10.0, 9.7),
+           seg("S2", s2, "A", "B", 9.7, 9.4),
+           seg("S3", s3, "A", "B", 9.4, 9.1),
+           seg("BJ1", [(100, 50), (100, 0)], bus, bds, 9.9, 9.75),
+           seg("BJ2", [(200, -50), (200, 0)], bus, bds, 9.7, 9.5),
+           seg("BT", [(tee_x, 40), (tee_x, 0)], bus, bds, 9.5, 9.3)]
+    return acs, sew
+
+
+@pytest.mark.parametrize("branch_ids", ["blank", "same"])
+@pytest.mark.parametrize("s2_rev,s3_rev", [(False, False), (True, False), (True, True), (False, True)])
+def test_orientation_main_flows_a_to_b_and_branches_flow_into_main(branch_ids, s2_rev, s3_rev):
+    acs, sew = _orient_world(branch_ids, s2_rev, s3_rev)
+    model, rep = build_model(acs, [], sew)
+    assert _no_self_loops(model) == []
+    cs = model["conduits"]
+    main = [c for c in cs if c["asset_id"] in ("S1", "S2", "S3")]
+    assert len(main) == 4          # S3 is split at the tee
+    # every main piece flows towards B: walk from A, each piece's ds is the next piece's us
+    here, seen = "A", []
+    for _ in range(len(main)):
+        nxt = [c for c in main if c["us_node_id"] == here and c["conduit_id"] not in seen]
+        assert len(nxt) == 1, (here, [(c["conduit_id"], c["us_node_id"], c["ds_node_id"]) for c in main])
+        seen.append(nxt[0]["conduit_id"])
+        here = nxt[0]["ds_node_id"]
+    assert here == "B"
+    mnodes = {c["us_node_id"] for c in main} | {c["ds_node_id"] for c in main}
+    for c in cs:
+        if c["asset_id"].startswith("B"):
+            assert c["ds_node_id"] in mnodes and c["us_node_id"] not in mnodes, (c["conduit_id"], c)
+    assert "DIRECTION_UNKNOWN" not in codes_of(rep)

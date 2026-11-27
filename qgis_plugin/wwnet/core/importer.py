@@ -197,6 +197,9 @@ class ImportReport:
         if c.get("status_skipped"):
             lines.append(f"Skipped {c['status_skipped']} sewer(s) by status (not imported): "
                          + ", ".join(f"{k} x{v}" for k, v in sorted(self.status_skipped.items())) + ".")
+        if c.get("self_loops_dropped"):
+            lines.append(f"Dropped {c['self_loops_dropped']} self-loop sewer(s) (both ends at the same node; "
+                         "not imported).")
         if c.get("context_chambers_unused"):
             lines.append(f"Ignored {c['context_chambers_unused']} context chamber(s) not touching any sewer end.")
         if c.get("reversed"):
@@ -842,26 +845,60 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             singles.append((e_id, rest[0][0], rest[0][1], c))
         rep.count("tee_mains", len(by_t))
         rep.diagnostics.append(f"Tees: {len(tees)} branch end(s) joined mid-line to {len(by_t)} sewer(s).")
+    # 3c. Self-loops: an unsplit sewer whose two ends landed on one node (shorter than the snap tolerance, or
+    # a loop back to the same chamber, or both ends teed at one point) cannot be a conduit. It is dropped here,
+    # before the topology is built; the node keeps its other sewers.
+    parent_n: dict = {}
+    for s in segs:
+        parent_n[s["parent"]] = parent_n.get(s["parent"], 0) + 1
+    dropped: set = set()
+    for si, s in enumerate(segs):
+        if s["ends"][0] is not None and s["ends"][0] == s["ends"][1] and parent_n[s["parent"]] == 1:
+            dropped.add(si)
+            s["drop"] = True
+    for si in sorted(dropped):
+        s = segs[si]
+        nid = s["ends"][0]
+        rep.count("self_loops_dropped")
+        rep.warn("SELF_LOOP", "conduit", s["pid"], f"both ends at node {nid}; length {_fmt(_length(s['line']), 2)} m: "
+                 "not imported", xy=node_pos.get(nid))
+    for nid in {segs[si]["ends"][0] for si in dropped}:
+        if node_ref.get(nid) is not None or nid not in nodes or nid in tee_nodes:
+            continue                     # chambers / connection points / tee joints stay
+        n_left = sum(1 for si, s in enumerate(segs) if si not in dropped for n in s["ends"] if n == nid)
+        if n_left == 0:                  # a junction / dangling node only the dropped sewer touched
+            rep.count("dangling_ends" if nodes[nid].get("notes") == "dangling end" else "junction_nodes", -1)
+            del nodes[nid], node_pos[nid], node_ref[nid]
+        elif n_left == 1 and nodes[nid].get("notes") == "segment junction":
+            nodes[nid]["notes"] = "dangling end"      # one sewer end left: no longer a junction
+            rep.count("junction_nodes", -1)
+            rep.count("dangling_ends")
+            multis = [m for m in multis if m[0] != nid]
     parents: dict = {}
     for si, s in enumerate(segs):
-        parents.setdefault(s["parent"], []).append(si)
+        if si not in dropped:
+            parents.setdefault(s["parent"], []).append(si)
     tee_by_seg: dict = {}
     for si, e in tee_ends:
-        tee_by_seg.setdefault(si, set()).add(e)
+        if si not in dropped:
+            tee_by_seg.setdefault(si, set()).add(e)
     node_segs: dict = {}
     for si, s in enumerate(segs):
+        if si in dropped:
+            continue
         for e in (0, 1):
             node_segs.setdefault(s["ends"][e], []).append((si, e))
 
     # ---- direction ----------------------------------------------------------------------------
-    up_end: dict = {}                # segment index -> index (0/1) of its upstream end
+    up_end: dict = {si: 0 for si in dropped}      # segment index -> index (0/1) of its upstream end
 
     def ref_of(si, e):
         return node_ref.get(segs[si]["ends"][e])
 
     groups: dict = {}
     for si, s in enumerate(segs):
-        groups.setdefault((s["us_id"], s["ds_id"]), []).append(si)
+        if si not in dropped:
+            groups.setdefault((s["us_id"], s["ds_id"]), []).append(si)
     for (us_id, ds_id), members in groups.items():
         mset = set(members)
         queue: list = []
@@ -885,10 +922,18 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 node = segs[si]["ends"][e_here]
                 if node_ref.get(node) in idset and node_ref.get(node):
                     continue
-                for sj, e in node_segs.get(node, ()):
-                    if sj in mset and sj not in up_end:
-                        up_end[sj] = e if as_up else 1 - e
-                        queue.append(sj)
+                # Only an unambiguous continuation is followed. At a node where several unoriented sewers of the
+                # group meet (a branch carrying the same manhole ids as the main, at a segment joint or tee) the
+                # sewer split from the same GIS feature is the continuation; otherwise none is guessed and the
+                # neighbour / dead-end / tee rules decide.
+                at_node = [(sj, e) for sj, e in node_segs.get(node, ()) if sj in mset and sj != si]
+                cands = [(sj, e) for sj, e in at_node if sj not in up_end]
+                if len(at_node) > 1:
+                    cands = [(sj, e) for sj, e in cands if segs[sj]["parent"] == segs[si]["parent"]]
+                if len(cands) == 1:
+                    sj, e = cands[0]
+                    up_end[sj] = e if as_up else 1 - e
+                    queue.append(sj)
     for si in up_end:
         segs[si]["why"] = "ids"
 
@@ -1081,9 +1126,6 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         if mismatch:
             rep.warn("ID_MISMATCH", "conduit", pid, f"{'; '.join(mismatch)}, but the sewer's manhole ids are "
                      f"{s['us_id'] or '(blank)'} -> {s['ds_id'] or '(blank)'}")
-        if us == ds:
-            rep.warn("SELF_LOOP", "conduit", pid, f"US and DS node are both {us}")
-
         # levels, length, grade (read and filled in the pre-pass above)
         rc = recs[idxs[0]]
         ui, di, glen, length, fgrade = rc["ui"], rc["di"], rc["glen"], rc["length"], rc["fgrade"]
@@ -1234,6 +1276,8 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     if still:
         ngrid = _SegGrid(10.0, NEAR_MISS_M)
         for si, s in enumerate(segs):
+            if si in dropped:
+                continue
             for k, (a, b) in enumerate(zip(s["line"], s["line"][1:])):
                 ngrid.add((si, k), a, b)
         for nid, msegs, pt, si, e in still:
@@ -1520,6 +1564,8 @@ def _report_tee_cycles(segs: list, up_end: dict, tee_nodes: set, tee_by_seg: dic
         return
     succ: dict = {}
     for si, s in enumerate(segs):
+        if s.get("drop"):
+            continue
         up = up_end[si]
         succ.setdefault(s["ends"][up], []).append(s["ends"][1 - up])
     branches: dict = {}
