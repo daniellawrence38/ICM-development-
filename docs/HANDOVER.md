@@ -634,3 +634,19 @@ from `main`, NOT the session branch: the brief must start with `git merge --ff-o
 User still to do: install the update from the branch tip, re-run Import Network Data (new GeoPackage, IS unticked),
 Export To ICM with Gravity sewers only + Connectivity report only, paste the Connectivity block.
 
+### EdenHillv9 (IS sewers off) and the join loop fix (2026-11-27)
+
+Import Network Data -> EdenHillv9: 5,977 sewers, 6,021 nodes, 1,345 IS sewers skipped, 46 tees; join step 7 joined,
+5 not (J5, E2061, J28, E1484, E1474). Gravity-only connectivity: **238 sewers with no outfall (was 857)**: J5 220
+(inlet of PS S0030166 at 4.3 m: re-import with wet well distance 5 m), J28 7 (nearest sewer 32 m), closed loops
+J104 (4) and N0373 / T_E211 (4), E1474 / E1484 / E2061 1 each (E2061 = inlet of PS 574477119 at 18 m).
+- Both loops were MADE by Join Dangling Sewer Ends (joined an end to a point upstream of itself: J105 -> J104
+  self-loop; E211 teed onto 51763795, which drains into the branch's upstream node N0373). Fixed (0f8afe5 + the
+  indexed upstream walk): `repair._plan` sorts candidates by distance and takes the nearest one that does not drain
+  into the dangling end (tee: main's ds node upstream of D; end node: that node upstream of D), else skips with
+  "... drains into this end (joining would make a loop)"; `_check_no_self_loops` before writing. qgis 217 + 1 skipped.
+- **Open, asked the user:** chamber 3051 is now a TERMINAL outfall with 1,559 sewers, plus 9 new terminal chambers
+  with 1-2 sewers each (v8 with IS sewers had 2 terminals). Suspect some MAINTYPE E / IS sewers carry flow OUT of
+  chambers, so skipping all IS sewers cut the network. If confirmed: change the rule to prune only IS stubs nothing
+  drains into (leaf IS sewers), instead of all IS sewers. Waiting for the pipe leaving 3051 (id, MAINTYPE, STATUS).
+

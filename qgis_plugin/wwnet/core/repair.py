@@ -213,12 +213,14 @@ def _grade_invert(c, f):
 # ---------------------------------------------------------------- planning
 
 def _upstream_nodes(st: _State, nid: str) -> set:
-    """Nodes upstream of nid (including nid): reverse walk over live conduits."""
+    """Nodes upstream of nid (including nid): reverse walk over live conduits (one pass to index them)."""
+    ups: dict = {}
+    for c in st.conduits.values():
+        if st.live(c):
+            ups.setdefault(c["ds_node_id"], []).append(c["us_node_id"])
     seen, todo = {nid}, [nid]
     while todo:
-        n = todo.pop()
-        for c in st.incoming(n):
-            u = c["us_node_id"]
+        for u in ups.get(todo.pop(), ()):
             if u not in seen:
                 seen.add(u)
                 todo.append(u)
