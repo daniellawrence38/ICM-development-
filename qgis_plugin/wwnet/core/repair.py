@@ -212,6 +212,42 @@ def _grade_invert(c, f):
 
 # ---------------------------------------------------------------- planning
 
+def _upstream_nodes(st: _State, nid: str) -> set:
+    """Nodes upstream of nid (including nid): reverse walk over live conduits."""
+    seen, todo = {nid}, [nid]
+    while todo:
+        n = todo.pop()
+        for c in st.incoming(n):
+            u = c["us_node_id"]
+            if u not in seen:
+                seen.add(u)
+                todo.append(u)
+    return seen
+
+
+def _end_candidates(st: _State, main, q, o) -> list:
+    """End nodes of the main that the projection q is next to (distance, node), for the no-split join."""
+    us, ds = st.nodes.get(main["us_node_id"]), st.nodes.get(main["ds_node_id"])
+    cand = []
+    for nd, vtx in ((us, o[0]), (ds, o[-1])):
+        if nd is None:
+            continue
+        dn = min(_dist(q, nd["xy"]) if nd["xy"] else math.inf, _dist(q, vtx))
+        if dn <= JOIN_NODE_TOL_M:
+            cand.append((dn, nd))
+    return cand
+
+
+def _makes_loop(st: _State, cd, upstream: set) -> bool:
+    """True when joining the dangling end to this candidate main would close a loop through it."""
+    _d, mid, _s, q, _k, o = cd
+    main = st.conduits[mid]
+    cand = _end_candidates(st, main, q, o)
+    if cand:
+        return min(cand, key=lambda x: x[0])[1]["node_id"] in upstream
+    return main["ds_node_id"] in upstream
+
+
 def _plan(st: _State, nid: str, max_distance_m: float, force_main=None) -> dict:
     """Plan the join of one dangling node against the current state. Returns a join dict or a skip dict."""
     node = st.nodes[nid]
@@ -223,7 +259,8 @@ def _plan(st: _State, nid: str, max_distance_m: float, force_main=None) -> dict:
     if p is None:
         skip["reason"] = "node has no point geometry"
         return skip
-    best = None
+    upstream = _upstream_nodes(st, nid)
+    cands = []
     for cid, c in st.conduits.items():
         if nid in (c["us_node_id"], c["ds_node_id"]) or not st.live(c) or not c["pts"]:
             continue
@@ -231,17 +268,36 @@ def _plan(st: _State, nid: str, max_distance_m: float, force_main=None) -> dict:
             continue
         o, _rev = _oriented(st, c)
         d, s, q, k = _nearest_on_line(p, o)
-        if best is None or d < best[0] - 1e-12 or (abs(d - best[0]) <= 1e-12 and cid < best[1]):
-            best = (d, cid, s, q, k, o)
-    if best is None:
+        cands.append((d, cid, s, q, k, o))
+    if not cands:
         skip["reason"] = "no other sewer in the model"
         return skip
-    d, mid, s, q, k, o = best
-    skip["nearest_conduit"], skip["nearest_distance_m"] = mid, round(d, 3)
-    if force_main is None and d > max_distance_m:
-        skip["reason"] = (f"no sewer within {max_distance_m:g} m: nearest is {mid} at {d:.2f} m "
-                          "(increase the maximum distance or fix the geometry)")
+    cands.sort(key=lambda x: (x[0], x[1]))
+    skip["nearest_conduit"], skip["nearest_distance_m"] = cands[0][1], round(cands[0][0], 3)
+    best, first_loop = None, None
+    for cd in cands:
+        if force_main is None and cd[0] > max_distance_m:
+            break
+        if _makes_loop(st, cd, upstream):
+            if first_loop is None:
+                first_loop = cd
+            continue
+        best = cd
+        break
+    if best is None:
+        if first_loop is not None:
+            ld, lid = first_loop[0], first_loop[1]
+            if force_main is not None:
+                skip["reason"] = (f"main {lid} drains into this end (joining would make a loop)")
+            else:
+                skip["reason"] = (f"nearest sewer {lid} at {ld:.2f} m drains into this end "
+                                  f"(joining would make a loop); no other sewer within {max_distance_m:g} m")
+        else:
+            d0, m0 = cands[0][0], cands[0][1]
+            skip["reason"] = (f"no sewer within {max_distance_m:g} m: nearest is {m0} at {d0:.2f} m "
+                              "(increase the maximum distance or fix the geometry)")
         return skip
+    d, mid, s, q, k, o = best
 
     main = st.conduits[mid]
     us, ds = st.nodes.get(main["us_node_id"]), st.nodes.get(main["ds_node_id"])
@@ -252,14 +308,7 @@ def _plan(st: _State, nid: str, max_distance_m: float, force_main=None) -> dict:
             "new_conduit": None, "invert_at_tee": None, "surface_at_tee": None, "warnings": warnings,
             "point": q, "note": ""}
 
-    # end-node case: the projection is next to an end of the main -> use that node, no split
-    cand = []
-    for nd, vtx in ((us, o[0]), (ds, o[-1])):
-        if nd is None:
-            continue
-        dn = min(_dist(q, nd["xy"]) if nd["xy"] else math.inf, _dist(q, vtx))
-        if dn <= JOIN_NODE_TOL_M:
-            cand.append((dn, nd))
+    cand = _end_candidates(st, main, q, o)
     if cand:
         nd = min(cand, key=lambda x: x[0])[1]
         inv = nd.get("invert_level")
@@ -447,6 +496,7 @@ def apply_joins(gpkg, joins) -> dict:
                     continue
                 _commit(st, pj)
                 joined.append(_strip(pj))
+            _check_no_self_loops(st)
             _write(con, st)
             _update_extents(con, st)
             con.execute("COMMIT")
@@ -461,6 +511,13 @@ def apply_joins(gpkg, joins) -> dict:
                 "conduits_modified": len(st.dirty_conduits - set(st.new_conduits))}
     finally:
         con.close()
+
+
+def _check_no_self_loops(st: _State):
+    bad = sorted(cid for cid, c in st.conduits.items() if c["us_node_id"] == c["ds_node_id"])
+    if bad:
+        raise RuntimeError("Join Dangling Sewer Ends would leave conduits with the same us and ds node: "
+                           + ", ".join(bad))
 
 
 def _write(con, st: _State):

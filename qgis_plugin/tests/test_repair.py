@@ -165,7 +165,7 @@ def test_join_existing_end_node_when_near(model):
 def test_beyond_distance_skipped_and_terminal_types_untouched(model):
     g, mid = model
     res = repair.join_dangling_ends(g, max_distance_m=1.0)
-    assert res["joins"] == [] and len(res["skipped"]) == 1
+    assert [x for x in res["joins"] if x["dangling_node"] == "D1"] == []
     s = res["skipped"][0]
     assert s["dangling_node"] == "D1" and s["nearest_conduit"] == "P04" and s["nearest_distance_m"] == pytest.approx(1.5)
     assert "nearest is P04 at 1.50 m" in s["reason"]
@@ -243,3 +243,79 @@ def test_stale_join_skipped(model):
     repair.apply_joins(g, plan)
     res = repair.apply_joins(g, plan)
     assert res["joined"] == [] and "no longer dangling" in res["skipped"][0]["reason"]
+
+
+# ------------------------------------------------------------ loop-avoidance (join must not close a loop)
+
+def _has_cycle_from(gpkg, start):
+    edges = rows(gpkg, "select us_node_id, ds_node_id from wwn_conduits where coalesce(status,'')!='abandoned'")
+    seen, todo = set(), [start]
+    while todo:
+        n = todo.pop()
+        for u, d in edges:
+            if u == n:
+                if d == start:
+                    return True
+                if d not in seen:
+                    seen.add(d)
+                    todo.append(d)
+    return False
+
+
+def test_join_node_would_self_loop_is_skipped(model):
+    g, mid = model
+    con = sqlite3.connect(g)
+    bf = xy(con, "BF")
+    # D1 sits 0.3 m from BF; the only sewer in range (YM, ending at BF) would turn BR1 into BF -> BF
+    con.execute("update wwn_nodes set geom=? where node_id='D1'", (repair.point_blob((bf[0] + 0.3, bf[1])),))
+    con.execute("update wwn_conduits set geom=? where conduit_id='BR1'",
+                (repair.line_blob([bf, (bf[0] + 0.3, bf[1])]),))
+    add_node(con, "Y1", (bf[0] + 30, bf[1] + 0.5), "junction", 30.0, 26.0)
+    add_conduit(con, "YM", "BF", "Y1", [bf, (bf[0] + 30, bf[1] + 0.5)], 26.0, 25.0)
+    con.commit()
+    con.close()
+    j = repair.find_dangling_joins(g)[0]
+    assert j["action"] == "skip" and "would make a loop" in j["reason"]
+    assert "YM" in j["reason"]
+    res = repair.join_dangling_ends(g)
+    assert [x for x in res["joins"] if x["dangling_node"] == "D1"] == []
+    assert rows(g, "select count(*) from wwn_conduits where us_node_id=ds_node_id")[0][0] == 0
+    assert rows(g, "select ds_node_id from wwn_conduits where conduit_id='BR1'")[0][0] == "D1"
+
+
+def test_valid_second_nearest_is_used(model):
+    g, mid = model
+    con = sqlite3.connect(g)
+    bf = xy(con, "BF")
+    # YM runs (mid-30, +2.0) -> (mid, +2.0) -> BF, passing 0.5 m from D1 and draining into BF
+    add_node(con, "Y1", (mid[0] - 30, mid[1] + 2.0), "junction", 30.0, 26.0)
+    add_conduit(con, "YM", "Y1", "BF", [(mid[0] - 30, mid[1] + 2.0), (mid[0], mid[1] + 2.0), bf], 26.0, 25.0)
+    con.commit()
+    con.close()
+    # within 5 m the nearest (YM, 0.5 m) is invalid; P04 (1.5 m) is valid and is tee'd
+    j = repair.find_dangling_joins(g)[0]
+    assert j["action"] == "split" and j["main_conduit"] == "P04"
+    repair.join_dangling_ends(g)
+    assert not _has_cycle_from(g, "BF")
+    assert rows(g, "select count(*) from wwn_conduits where us_node_id=ds_node_id")[0][0] == 0
+
+
+def test_tee_loop_no_cycle_when_only_invalid_in_range(model):
+    g, mid = model
+    con = sqlite3.connect(g)
+    bf = xy(con, "BF")
+    add_node(con, "Y1", (mid[0] - 30, mid[1] + 2.0), "junction", 30.0, 26.0)
+    add_conduit(con, "YM", "Y1", "BF", [(mid[0] - 30, mid[1] + 2.0), (mid[0], mid[1] + 2.0), bf], 26.0, 25.0)
+    con.commit()
+    con.close()
+    res = repair.join_dangling_ends(g, 1.0)
+    assert res["joins"] == [] and "would make a loop" in res["skipped"][0]["reason"]
+    assert not _has_cycle_from(g, "BF")
+    # forcing the looping main is refused too
+    con = sqlite3.connect(g)
+    st = repair._State(con)
+    try:
+        pj = repair._plan(st, "D1", float("inf"), force_main="YM")
+    finally:
+        con.close()
+    assert pj["action"] == "skip" and "loop" in pj["reason"]
