@@ -642,6 +642,27 @@ def test_is_sewer_tee_downstream_free_upstream_is_end(tmp_path):
         assert c["M"]["length_m"] == pytest.approx(60) and c["M~2"]["length_m"] == pytest.approx(40)
 
 
+def test_is_sewers_not_imported_when_option_off():
+    """import_is_sewers=False: MAINTYPE E / IS sewers are dropped before any joining, so the main is not split."""
+    acs = [ac("A", 0, 0), ac("B", 100, 0)]
+    main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)
+    is1 = tseg("IS1", [(60, 10), (60, 0.3)], None, None, 20.5, 19.8, MAINTYPE="E- inspection shaft")
+    is2 = tseg("IS2", [(30, 10), (30, 0.2)], None, None, 20.5, 19.8, MAINTYPE="IS")
+    model, rep = build_model(acs, [], [main, is1, is2], options=ImportOptions(import_is_sewers=False))
+    assert [c["conduit_id"] for c in model["conduits"]] == ["M"]
+    assert sorted(n["node_id"] for n in model["nodes"]) == ["A", "B"]
+    assert rep.counts["is_sewers_skipped"] == 2 and rep.counts["conduits_read"] == 1
+    assert any("Skipped 2 IS (inspection shaft) sewer(s)" in line for line in rep.summary_lines())
+    model, rep = build_model(acs, [], [main, is1, is2])                       # default: imported (unchanged)
+    assert len(model["conduits"]) == 5 and "is_sewers_skipped" not in rep.counts
+
+
+def test_import_is_sewers_option_from_template():
+    assert ImportOptions.from_config({"options": {"import_is_sewers": False}}).import_is_sewers is False
+    assert ImportOptions.from_config({"options": {}}).import_is_sewers is True
+    assert ImportOptions.from_config().import_is_sewers is True                # bundled template
+
+
 # ---------------------------------------------------------------- surface interpolation
 
 def test_surface_interpolated_at_segment_junction():

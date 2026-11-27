@@ -95,6 +95,7 @@ class ImportOptions:
     tee_tolerance_m: float = 0.5            # a lone sewer end this close to another sewer's mid-line is a T-junction
     load_connection_points: bool = True     # assign every connection point read to the nearest sewer's upstream node
     cp_load_search_m: float = 10.0          # max point-to-sewer distance for that assignment
+    import_is_sewers: bool = True           # False: sewers whose type maps to "is" (MAINTYPE E / IS) are not imported
 
     @classmethod
     def from_config(cls, cfg: dict | None = None, **overrides) -> "ImportOptions":
@@ -102,7 +103,7 @@ class ImportOptions:
         out = cls(float(o.get("snap_tolerance_m", 0.5)), str(o.get("grade_source", "levels")),
                   float(o.get("grade_tolerance_pct", 10.0)), int(o.get("default_dn", 150)),
                   float(o.get("tee_tolerance_m", 0.5)), bool(o.get("load_connection_points", True)),
-                  float(o.get("cp_load_search_m", 10.0)))
+                  float(o.get("cp_load_search_m", 10.0)), bool(o.get("import_is_sewers", True)))
         for k, v in overrides.items():
             if v is not None:
                 setattr(out, k, v)
@@ -190,6 +191,9 @@ class ImportReport:
         if c.get("inspection_shafts_skipped"):
             lines.append(f"Skipped {c['inspection_shafts_skipped']} chamber(s) of a type mapped to skip "
                          "(inspection shafts, deleted manholes, pit access): not imported.")
+        if c.get("is_sewers_skipped"):
+            lines.append(f"Skipped {c['is_sewers_skipped']} IS (inspection shaft) sewer(s): not imported "
+                         "(option 'Import IS sewers' off).")
         if c.get("status_skipped"):
             lines.append(f"Skipped {c['status_skipped']} sewer(s) by status (not imported): "
                          + ", ".join(f"{k} x{v}" for k, v in sorted(self.status_skipped.items())) + ".")
@@ -547,6 +551,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     # ---- sewer segments: parse ----------------------------------------------------------------
     segs: list = []
     pipe_ids: set = set()
+    type_codes = codes.get("sewer_type", {})
     for row in sewers:
         pid = to_id(get(row, "pipe_id"))
         line = _line(row)
@@ -556,6 +561,11 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             rep.count("status_skipped")
             rep.status_skipped[scode] = rep.status_skipped.get(scode, 0) + 1
             continue
+        if not opt.import_is_sewers:
+            raw = get(row, "sewer_type")
+            if not blank(raw) and (type_codes.get(code_of(raw)) or type_codes.get(str(raw).strip().upper())) == "is":
+                rep.count("is_sewers_skipped")
+                continue
         if not pid:
             rep.count("conduits_skipped")
             rep.warn("PIPE_NO_ID", "conduit", "", f"sewer without {fm.pipe_id} skipped")

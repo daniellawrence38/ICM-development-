@@ -16,6 +16,8 @@ grade_tolerance_pct = 10.0      # report when the grade from levels differs from
 # IDS: a chamber PACID, or a sewer US_MANHOLE_ID / DS_MANHOLE_ID, that is blank or all zeros ("0", "0.0", "0000") means "no id".
 load_connection_points = true   # assign each connection point read to the nearest sewer's upstream node as a load (630 L/d/connection)
 cp_load_search_m = 10.0         # max distance (m) from a connection point to its sewer; further ones are reported as unassigned
+import_is_sewers = true         # false: IS (inspection shaft) sewers, [codes.sewer_type] "is" (MAINTYPE E / IS), are not imported.
+                                # The ArcGIS import tools set it from their "Import IS (inspection shaft) sewers" box (default off).
 default_dn = 150                # assumed DN when no (valid) diameter is available
 
 # Standard DN list (mm). Other source diameters map to the nearest, raw value kept as internal diameter.

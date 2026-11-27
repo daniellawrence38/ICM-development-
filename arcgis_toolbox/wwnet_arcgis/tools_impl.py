@@ -98,7 +98,8 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
                       fields: dict | None = None, snap_tolerance: float | None = None,
                       grade_source: str | None = None, use_selected: bool = False,
                       add_to_map: bool = True, native=None, tee_tolerance: float | None = None,
-                      load_connection_points: bool = True, cp_load_search_m: float | None = None) -> dict:
+                      load_connection_points: bool = True, cp_load_search_m: float | None = None,
+                      import_is_sewers: bool = True) -> dict:
     """Water Corporation gravity sewer layers -> new WWNet GeoPackage (see arcgis_toolbox/README.md).
 
     `*_layer` are map layers / paths / names; `fields` maps role -> source field name (missing roles
@@ -116,12 +117,12 @@ def import_sewer_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, ou
     with gpenv.quiet(arcpy):
         return _import_sewer_body(arcpy, msgs, imp, native, out_path, exists, overwrite, ac_layer, cp_layer,
                                   sewer_layer, fields, snap_tolerance, grade_source, use_selected, add_to_map,
-                                  tee_tolerance, load_connection_points, cp_load_search_m)
+                                  tee_tolerance, load_connection_points, cp_load_search_m, import_is_sewers)
 
 
 def _import_sewer_body(arcpy, msgs, imp, native, out_path, exists, overwrite, ac_layer, cp_layer, sewer_layer,
                        fields, snap_tolerance, grade_source, use_selected, add_to_map, tee_tolerance,
-                       load_connection_points, cp_load_search_m) -> dict:
+                       load_connection_points, cp_load_search_m, import_is_sewers=True) -> dict:
     si = sewer_import
     cfg = imp.load_template()
     fmap = imp.FieldMap.from_config(cfg).with_overrides(**{k: (v or "") for k, v in (fields or {}).items()
@@ -130,7 +131,8 @@ def _import_sewer_body(arcpy, msgs, imp, native, out_path, exists, overwrite, ac
                                          tee_tolerance_m=tee_tolerance,
                                          load_connection_points=bool(load_connection_points),
                                          cp_load_search_m=(float(cp_load_search_m) if cp_load_search_m is not None
-                                                           else None))
+                                                           else None),
+                                         import_is_sewers=bool(import_is_sewers))
     if cp_layer is not None and not fmap.cp_id:
         raise RuntimeError("Choose the connection point ID field.")
     if not fmap.ac_id or not fmap.pipe_id:
@@ -612,7 +614,7 @@ def import_network_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, 
                         wet_well_distance: float | None = None, include_not_in_use: bool = False,
                         register: str | None = None, register_config: str | None = None,
                         join_dangling: bool = True, join_distance: float | None = 5.0,
-                        add_to_map: bool = True, native=None) -> dict:
+                        add_to_map: bool = True, native=None, import_is_sewers: bool = True) -> dict:
     """Import Sewer Data, Import Pressure Data (optional), Join Dangling Sewer Ends (optional) and Import Pump
     Station Data (optional) in one run. Order matters: pressure before join (the inlet sewer's dead end at a pump
     station becomes the wet well; wet_well nodes are never dangling-join candidates and rising mains are not in
@@ -634,7 +636,7 @@ def import_network_data(arcpy, msgs: Messages, ac_layer, cp_layer, sewer_layer, 
     try:
         sew = import_sewer_data(arcpy, msgs, ac_layer, cp_layer, sewer_layer, out_path, fields, snap_tolerance,
                                 grade_source, use_selected, False, native, tee_tolerance,
-                                load_connection_points, cp_load_search_m)
+                                load_connection_points, cp_load_search_m, import_is_sewers)
     except Exception as exc:  # noqa: BLE001
         msgs.warn(f"ERROR: Sewer import failed: {exc}")
         msgs.warn("ERROR: Import Network Data stopped: the pressure, join and register steps were not run.")

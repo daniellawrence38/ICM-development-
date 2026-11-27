@@ -588,3 +588,25 @@ Built (Python only -> `wwnet-arcgis-update` + Update WWNet, then right-click too
    ICM checks something else (get the exact message).
 3. Pressure side parked by the user (section 15 item 2 still open).
 
+### First gravity-only export (EdenHillv8, 2026-11-27) and IS sewers removed
+
+Export (gravity only): 8,661 nodes, 8,650 sewers; **7,793 reach an outfall, 857 do not**: E3026 812 (dangling IS end,
+nearest sewer 13.3 m), E1128 25, J30 7, E212 5, E534 2, E3749 1, E4713 1 (dangling ends), J114 4 (self-loop: a conduit
+from J114 to J114; J114 has no invert). Outfalls 15: 13 wet wells + AG0110 (2 sewers), aa0133 (1). No false
+outfalls. 7 `WW_` stations unmatched (no sewer end within the 1 m wet well distance of the PS point). Export took
+360 s, nearly all ArcGIS GP (CreateFeatureclass 163 s for ICM_Nodes); the trace itself ~1 s.
+User's screenshot of E3026: the free end of a DN150 IS stub off the DN300 main in Arthur Street ("seems to just be
+a connection node"). So the IS stub there is oriented main -> E3026 AND the main past that point does not carry the
+flow away (812 sewers can only leave through the stub): cause not confirmed (likely the orientation of the main's
+segments around the IS junctions).
+User: **"Can we just remove all IS sewers from the import. Causing more problems and not sure what value they add."**
+Done: `ImportOptions.import_is_sewers` (library / template default true, unchanged for tests and the QGIS plugin);
+the importer drops sewers whose MAINTYPE maps to "is" (E / IS) before any joining (count `is_sewers_skipped`,
+summary line). ArcGIS Import Sewer Data and Import Network Data: parameter **Import IS (inspection shaft) sewers**
+(`import_is`, Options / Sewer options), **default off**. Tests: shared core 191 + 1 skipped, toolbox 328.
+
+Next (one step at a time): user installs the update, re-runs Import Network Data for EdenHill to a NEW GeoPackage
+(IS box unticked, same pressure / register / join settings), re-runs Calculate Existing Demand (loads were on the old
+nodes), Export To ICM gravity only, pastes the Connectivity block. If the Arthur Street main is still stuck, ask for
+the three conduits' us / ds node and inverts there. Then J114 (self-loop) if it survives without IS sewers.
+

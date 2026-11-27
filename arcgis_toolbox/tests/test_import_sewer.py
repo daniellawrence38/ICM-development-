@@ -225,16 +225,17 @@ def test_pyt_tool_parameters_and_execute(world, tmp_path):
     assert t.label == "Import Sewer Data" and t.category == "Data"
     params = t.getParameterInfo()
     names = [p.name for p in params]
-    assert names[:11] == ["ac_layer", "cp_layer", "sewer_layer", "out_gpkg", "use_selected", "add_to_map",
-                          "load_cps", "cp_radius", "snap", "grade_source", "tee_join"]
-    assert names[11:] == ["f_" + r for r, *_ in sewer_import.FIELD_ROLES]
+    assert names[:12] == ["ac_layer", "cp_layer", "sewer_layer", "out_gpkg", "use_selected", "add_to_map",
+                          "load_cps", "cp_radius", "snap", "grade_source", "tee_join", "import_is"]
+    assert names[12:] == ["f_" + r for r, *_ in sewer_import.FIELD_ROLES]
     byn = {p.name: p for p in params}
     assert byn["snap"].value == 0.5 and byn["grade_source"].value == "levels"
     assert byn["use_selected"].value is False and byn["add_to_map"].value is True
+    assert byn["import_is"].value is False and byn["import_is"].category == "Options"
     assert byn["cp_layer"].parameterType == "Optional" and byn["f_pipe_id"].parameterType == "Required"
     assert byn["f_diameter"].parameterDependencies == ["sewer_layer"]
     assert byn["f_ac_id"].parameterDependencies == ["ac_layer"]
-    assert byn["f_chamber_type"].parameterDependencies == ["ac_layer"] and names.index("f_chamber_type") == 13
+    assert byn["f_chamber_type"].parameterDependencies == ["ac_layer"] and names.index("f_chamber_type") == 14
     assert byn["f_chamber_type"].parameterType == "Optional"
     # picking layers fills the field parameters with defaults present in the layer
     byn["ac_layer"].value, byn["sewer_layer"].value = lyr["ac"], lyr["sew"]
@@ -594,3 +595,23 @@ def test_pyt_import_params_pass_cp_options(world, tmp_path):
     byn["out_gpkg"].value = str(tmp_path / "o.gpkg")
     t.execute(params, None)
     assert not any(t_.startswith("Loads:") for _, t_ in a.log)
+
+
+def test_import_is_sewers_flag_reaches_the_importer(world, tmp_path, monkeypatch):
+    a, lyr, _ = world
+    seen = []
+    imp = sewer_import.importer()
+    orig = imp.ImportOptions.from_config
+
+    def spy(cfg=None, **kw):
+        out = orig(cfg, **kw)
+        seen.append(out.import_is_sewers)
+        return out
+    monkeypatch.setattr(imp.ImportOptions, "from_config", staticmethod(spy))
+    for flag in (False, True):
+        tools_impl.import_sewer_data(a, Messages(a), lyr["ac"], None, lyr["sew"], str(tmp_path / f"is{flag}.gpkg"),
+                                     {"diameter": "HEIGHT"}, add_to_map=False, import_is_sewers=flag)
+    assert seen == [False, True]
+    src = open(os.path.join(os.path.dirname(__file__), "..", "WWNet.pyt"), encoding="utf-8").read()
+    assert src.count('import_is_sewers=p.flag("import_is")') == 2       # Import Sewer Data + Import Network Data
+

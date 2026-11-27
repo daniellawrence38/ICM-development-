@@ -260,6 +260,8 @@ class ImportSewerData(_Tool):
                   _p("grade_source", "Grade source", "GPString", required=False, default="levels",
                      values=["levels", "field"], category="Options"),
                   _p("tee_join", "Tee join distance (m)", "GPDouble", required=False, default=0.5,
+                     category="Options"),
+                  _p("import_is", "Import IS (inspection shaft) sewers", "GPBoolean", required=False, default=False,
                      category="Options")]
         for role, layer_key, label, required in si.FIELD_ROLES:
             f = _p("f_" + role, label, "Field", required=required, category="Source fields")
@@ -287,7 +289,7 @@ class ImportSewerData(_Tool):
                                _source(p["sewer_layer"]), p.text("out_gpkg"), fields, p.num("snap", 0.5),
                                p.text("grade_source", "levels"), p.flag("use_selected"), p.flag("add_to_map", True),
                                load_connection_points=p.flag("load_cps", True), cp_load_search_m=p.num("cp_radius"),
-                               tee_tolerance=p.num("tee_join"))
+                               tee_tolerance=p.num("tee_join"), import_is_sewers=p.flag("import_is"))
 
 
 class ImportNetworkData(_Tool):
@@ -326,7 +328,7 @@ class ImportNetworkData(_Tool):
                 p.category = "Sewer source fields"
         for n in ("ps_search", "ps_snap", "ps_discharge", "ps_wet_well", "ps_include_n"):
             pres[n].category = "Pressure options"
-        for n in ("snap", "grade_source", "tee_join"):
+        for n in ("snap", "grade_source", "tee_join", "import_is"):
             sew[n].category = "Sewer options"
         reg = _p("register", "Pump station register (.xlsx, optional)", "DEFile", required=False,
                  filetype=["xlsx", "xlsm"])
@@ -381,7 +383,7 @@ class ImportNetworkData(_Tool):
             wet_well_distance=p.val("ps_wet_well"), include_not_in_use=p.flag("ps_include_n"),
             register=p.text("register"), register_config=p.text("register_config"),
             join_dangling=p.flag("join_dangling", True), join_distance=p.num("join_distance", 5.0),
-            add_to_map=p.flag("add_to_map", True))
+            add_to_map=p.flag("add_to_map", True), import_is_sewers=p.flag("import_is"))
         return res["path"]
 
 
