@@ -657,4 +657,15 @@ J104 (4) and N0373 / T_E211 (4), E1474 / E1484 / E2061 1 each (E2061 = inlet of 
   `free_by_design` no longer applies to them, so a kept IS pipe ending mid-line on a main is teed in.
   Still asked: the pipe 3051 -> tank and tank -> PS (id, full MAINTYPE text, STATUS), to confirm the cause
   (status N / D skipped, or no pipe leaving the tank, would need something else).
+- User: "No flow goes through 3051 unless pumps fail"; "overflow from [the PS whose inlet was E3191 in v8], pipe is
+  OS- overflow storage". Cause: the OS pipe leaves the PS inlet, so the inlet was not terminal -> no wet well match
+  -> gravity-only export routed the catchment down the overflow to 3051 (v8 matched E3191 only because the OS pipe
+  happened to be oriented into it). Fixed (agent, cherry-picked): importer marks MAINTYPE O / OS conduits with the
+  note "overflow pipe (MAINTYPE X)" (`importer.OVERFLOW_NOTE`, template `[overflow] maintype_codes`, summary line);
+  `pressure_import.build_pressure` ignores outgoing overflow pipes when finding terminal nodes (wet well match);
+  `icm_export.build(gravity_only=True)` drops overflow pipes before the node filter (warning lists them); the full
+  export keeps them. Caveat to check in ICM: an overflow pipe whose GIS us_invert is at the inlet invert (not the
+  overflow level) would carry dry weather flow in the full export / engine. qgis 224 + 1 skipped, toolbox 342.
+  Next for the user: install, Import Network Data -> EdenHillv10 (wet well distance 5 m, IS unticked), Export To ICM
+  gravity only + report only; expect 3051 (1,559) and J5 (220) cleared.
 
