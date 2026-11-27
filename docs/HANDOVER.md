@@ -649,4 +649,12 @@ J104 (4) and N0373 / T_E211 (4), E1474 / E1484 / E2061 1 each (E2061 = inlet of 
   with 1-2 sewers each (v8 with IS sewers had 2 terminals). Suspect some MAINTYPE E / IS sewers carry flow OUT of
   chambers, so skipping all IS sewers cut the network. If confirmed: change the rule to prune only IS stubs nothing
   drains into (leaf IS sewers), instead of all IS sewers. Waiting for the pipe leaving 3051 (id, MAINTYPE, STATUS).
+- User: "3051 is a chamber that goes to an overflow storage tank". Done (3579f2d + tee follow-up):
+  `import_is_sewers=False` now drops only IS **stubs** (`_prune_is_stubs`, before snapping: an IS-coded segment
+  with a free end = no chamber within snap tol, no other remaining segment end within snap tol, no remaining
+  mid-line within the tee tol; iterated, order-independent, 0.07 s for 7,000 sewers). IS-coded pipes connected at
+  both ends are kept and listed ("Kept M IS-coded sewer(s) connected at both ends (they carry flow): ...");
+  `free_by_design` no longer applies to them, so a kept IS pipe ending mid-line on a main is teed in.
+  Still asked: the pipe 3051 -> tank and tank -> PS (id, full MAINTYPE text, STATUS), to confirm the cause
+  (status N / D skipped, or no pipe leaving the tank, would need something else).
 

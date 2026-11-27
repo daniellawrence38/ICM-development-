@@ -747,6 +747,10 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
             cums[si] = cum
 
         def free_by_design(si, e):
+            # an IS / IO end away from its chamber is a free upstream end, except for an IS-coded pipe that the stub
+            # prune kept (import_is_sewers off) because BOTH its ends connect: that end joins what it touches
+            if segs[si].get("is_coded"):
+                return False
             return stype_of(segs[si]["row"]) in ("is", "io") and segs[si]["ends"][1 - e] in ac_ids
 
         def find_tee(pt, skip):

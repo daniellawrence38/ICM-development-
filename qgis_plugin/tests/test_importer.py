@@ -683,9 +683,10 @@ def test_is_pipe_teeing_into_main_kept_when_option_off():
     main = tseg("M", [(0, 0), (100, 0)], "A", "B", 20.0, 19.0, LENGTH=100.0)
     isp = tseg("IS1", [(40, 20), (40, 0.2)], "C", None, 21.0, 20.5, MAINTYPE="IS")
     model, rep = build_model(acs, [], [main, isp], options=OFF)
-    # kept and imported as with the option on (the existing IS / IO rules decide whether the end is a free end)
-    assert sorted(c["conduit_id"] for c in model["conduits"]) == ["IS1", "M"]
-    assert by_id(model["conduits"], "conduit_id")["IS1"]["us_node_id"] == "C"
+    # kept because both ends connect, and its downstream end is teed into the main (not left as a free end)
+    assert sorted(c["conduit_id"] for c in model["conduits"]) == ["IS1", "M", "M~2"]
+    c = by_id(model["conduits"], "conduit_id")
+    assert c["IS1"]["us_node_id"] == "C" and c["IS1"]["ds_node_id"] == c["M"]["ds_node_id"] == c["M~2"]["us_node_id"]
     assert "is_sewers_skipped" not in rep.counts
     assert rep.counts["is_sewers_kept"] == 1 and rep.is_kept_ids == ["IS1"]
 
