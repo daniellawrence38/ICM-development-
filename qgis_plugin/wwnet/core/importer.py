@@ -929,7 +929,11 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 at_node = [(sj, e) for sj, e in node_segs.get(node, ()) if sj in mset and sj != si]
                 cands = [(sj, e) for sj, e in at_node if sj not in up_end]
                 if len(at_node) > 1:
-                    cands = [(sj, e) for sj, e in cands if segs[sj]["parent"] == segs[si]["parent"]]
+                    same = [(sj, e) for sj, e in cands if segs[sj]["parent"] == segs[si]["parent"]]
+                    # else the one whose far end is attached (a stub's far end is a free dangling end)
+                    cands = same or [(sj, e) for sj, e in cands
+                                     if node_ref.get(segs[sj]["ends"][1 - e]) is not None
+                                     or len(node_segs.get(segs[sj]["ends"][1 - e], ())) >= 2]
                 if len(cands) == 1:
                     sj, e = cands[0]
                     up_end[sj] = e if as_up else 1 - e
@@ -952,15 +956,23 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
                 votes = set()
                 for e in (0, 1):
                     has_in = has_out = False
+                    sole = True              # no other unoriented sewer at this node
                     for sj, ej in node_segs.get(s["ends"][e], ()):
-                        if sj == si or sj not in up_end:
+                        if sj == si:
+                            continue
+                        if sj not in up_end:
+                            sole = False
                             continue
                         if up_end[sj] == ej:
                             has_out = True
                         else:
                             has_in = True
-                    if has_in != has_out:
-                        votes.add(e if has_in else 1 - e)      # flows out of an inflow-only node / into an outflow-only one
+                    # flows INTO an outflow-only node; flows OUT of an inflow-only node only when this is the only
+                    # unoriented sewer there (else it may be one of several branches: ambiguous, order-dependent)
+                    if has_out and not has_in:
+                        votes.add(1 - e)
+                    elif has_in and not has_out and sole:
+                        votes.add(e)
                 if len(votes) == 1:
                     up_end[si] = votes.pop()
                     s["why"] = "neighbours"

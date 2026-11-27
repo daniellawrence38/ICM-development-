@@ -1424,3 +1424,56 @@ def test_orientation_main_flows_a_to_b_and_branches_flow_into_main(branch_ids, s
         if c["asset_id"].startswith("B"):
             assert c["ds_node_id"] in mnodes and c["us_node_id"] not in mnodes, (c["conduit_id"], c)
     assert "DIRECTION_UNKNOWN" not in codes_of(rep)
+
+
+def _check_main_and_branches(model, main_ids=("S1", "S2", "S3"), branch_prefix=("BJ", "BT"), n_main=4):
+    cs = model["conduits"]
+    main = [c for c in cs if c["asset_id"] in main_ids]
+    assert len(main) == n_main
+    here, seen = "A", []
+    for _ in range(len(main)):
+        nxt = [c for c in main if c["us_node_id"] == here and c["conduit_id"] not in seen]
+        assert len(nxt) == 1, (here, [(c["conduit_id"], c["us_node_id"], c["ds_node_id"]) for c in main])
+        seen.append(nxt[0]["conduit_id"])
+        here = nxt[0]["ds_node_id"]
+    assert here == "B"
+    mnodes = {c["us_node_id"] for c in main} | {c["ds_node_id"] for c in main}
+    for c in cs:
+        if c["asset_id"].startswith(branch_prefix):
+            assert c["ds_node_id"] in mnodes and c["us_node_id"] not in mnodes, (c["conduit_id"], c)
+
+
+def _orders(n):
+    import random
+    yield list(range(n))
+    yield list(range(n))[::-1]
+    for k in range(20):
+        idx = list(range(n))
+        random.Random(k).shuffle(idx)
+        yield idx
+
+
+@pytest.mark.parametrize("branch_ids", ["blank", "same"])
+@pytest.mark.parametrize("s2_rev,s3_rev", [(False, False), (True, False), (True, True), (False, True)])
+def test_orientation_is_independent_of_read_order(branch_ids, s2_rev, s3_rev):
+    acs, sew = _orient_world(branch_ids, s2_rev, s3_rev)
+    for order in _orders(len(sew)):
+        model, rep = build_model(acs, [], [sew[i] for i in order])
+        _check_main_and_branches(model)
+        assert "DIRECTION_UNKNOWN" not in codes_of(rep), order
+
+
+@pytest.mark.parametrize("branch_ids", ["blank", "same"])
+def test_orientation_two_segment_branch_into_segment_joint_any_order(branch_ids):
+    # the branch is itself digitised in two pieces (one against the flow), so its far end at the joint is
+    # attached to another branch segment rather than free
+    acs, sew = _orient_world(branch_ids)
+    bus, bds = (None, None) if branch_ids == "blank" else ("A", "B")
+    sew = [x for x in sew if x["ID"] != "BJ1"] + [
+        seg("BL1", [(100, 50), (100, 100)], bus, bds, 9.95, 9.9),
+        seg("BL2", [(100, 50), (100, 0)], bus, bds, 9.9, 9.75)]
+    for order in _orders(len(sew)):
+        model, rep = build_model(acs, [], [sew[i] for i in order])
+        _check_main_and_branches(model)
+        c = by_id(model["conduits"], "conduit_id")
+        assert c["BL2"]["us_node_id"] == c["BL1"]["ds_node_id"] and c["BL2"]["ds_node_id"] == c["S1"]["ds_node_id"], order
