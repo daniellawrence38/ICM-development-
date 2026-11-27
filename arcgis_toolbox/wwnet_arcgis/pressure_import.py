@@ -374,10 +374,14 @@ def stale_node_ids(ps_ids, nodes) -> set:
     return out
 
 
+# Must equal importer.OVERFLOW_NOTE (conduit notes marker of emergency overflow pipes).
+OVERFLOW_NOTE = "overflow pipe"
+
+
 def build_pressure(ps_rows: list, main_rows: list, nodes: list, conduit_ends, opts: Options,
                    cmap: dict | None = None) -> PressureResult:
     """Pure core. `ps_rows` / `main_rows`: role-keyed rows with GEOM (EPSG:7850). `nodes`: [{node_id,
-    node_type, xy, notes}] of the model; `conduit_ends`: [(us_node_id, ds_node_id)]."""
+    node_type, xy, notes}] of the model; `conduit_ends`: [(us_node_id, ds_node_id[, conduit notes])]."""
     imp = importer()
     if cmap is None:
         cmap = {k.upper(): v for k, v in template_config().get("codes", {}).get("material", {}).items()}
@@ -416,8 +420,10 @@ def build_pressure(ps_rows: list, main_rows: list, nodes: list, conduit_ends, op
     stale = stale_node_ids(ps_ids, nodes)
     live = [n for n in nodes if n["node_id"] not in stale]
     node_by_id = {n["node_id"]: n for n in live}
-    outgoing = {u for u, _d in conduit_ends}
-    incoming = {d for _u, d in conduit_ends}
+    # conduit_ends rows are (us, ds) or (us, ds, notes); a node whose only outgoing conduits are overflow
+    # pipes (flow only when pumps fail) still counts as a dead end, so a pump station inlet is matched.
+    outgoing = {c[0] for c in conduit_ends if OVERFLOW_NOTE not in ((c[2] if len(c) > 2 else None) or "")}
+    incoming = {c[1] for c in conduit_ends}
     terminal = {nid for nid in incoming if nid not in outgoing and nid in node_by_id}
     cell = max(opts.search_m, opts.discharge_m, opts.wet_well_m, 1.0)
     grid = _PointGrid(cell)
@@ -551,7 +557,7 @@ def blob_xy(blob):
 
 
 def read_model(path: str) -> dict:
-    """{'nodes': [{node_id, node_type, xy, notes}], 'conduits': [(us, ds)], 'extent': (x0, y0, x1, y1) | None}."""
+    """{'nodes': [{node_id, node_type, xy, notes}], 'conduits': [(us, ds, notes)], 'extent': (x0, y0, x1, y1) | None}."""
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         nodes = []
@@ -559,7 +565,7 @@ def read_model(path: str) -> dict:
             xy = blob_xy(g)
             if xy is not None:
                 nodes.append({"node_id": nid, "node_type": nt, "xy": xy, "notes": notes})
-        conduits = [(u, d) for u, d in con.execute("SELECT us_node_id, ds_node_id FROM wwn_conduits")]
+        conduits = [(u, d, n) for u, d, n in con.execute("SELECT us_node_id, ds_node_id, notes FROM wwn_conduits")]
     finally:
         con.close()
     ext = None

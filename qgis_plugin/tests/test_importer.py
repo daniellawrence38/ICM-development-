@@ -1548,3 +1548,29 @@ def test_orientation_two_segment_branch_into_segment_joint_any_order(branch_ids)
         _check_main_and_branches(model)
         c = by_id(model["conduits"], "conduit_id")
         assert c["BL2"]["us_node_id"] == c["BL1"]["ds_node_id"] and c["BL2"]["ds_node_id"] == c["S1"]["ds_node_id"], order
+
+
+def test_overflow_pipes_marked_in_notes_and_summary():
+    assert imp.OVERFLOW_NOTE == "overflow pipe"
+    acs = [ac("A", 0, 0), ac("B", 10, 0), ac("C", 20, 0), ac("D", 30, 0)]
+    rows = [pipe("R1", [(0, 0), (10, 0)], "A", "B"),
+            pipe("OS1", [(10, 0), (20, 0)], "B", "C", MAINTYPE="OS- overflow storage"),
+            pipe("O1", [(20, 0), (30, 0)], "C", "D", MAINTYPE="O- overflow")]
+    model, rep = build_model(acs, [], rows)
+    c = by_id(model["conduits"], "conduit_id")
+    assert "overflow pipe" not in (c["R1"]["notes"] or "")
+    assert "overflow pipe (MAINTYPE OS)" in c["OS1"]["notes"] and "overflow pipe (MAINTYPE O)" in c["O1"]["notes"]
+    assert c["OS1"]["sewer_type"] == "reticulation"
+    assert rep.counts["overflow_pipes"] == 2
+    assert any(l.startswith("2 overflow pipe(s) (MAINTYPE O / OS) marked: they carry flow only when pumps fail")
+               for l in rep.summary_lines())
+
+
+def test_split_overflow_pipe_pieces_all_carry_the_note():
+    acs, sew = tee_world(lambda x, off: [(x, 20), (x, off)])
+    sew[0]["MAINTYPE"] = "OS- overflow storage"
+    model, _rep = build_model(acs, [], sew)
+    c = by_id(model["conduits"], "conduit_id")
+    assert sorted(c) == ["BR", "M", "M~2"]
+    assert all("overflow pipe (MAINTYPE OS)" in c[k]["notes"] for k in ("M", "M~2"))
+    assert "overflow pipe" not in (c["BR"]["notes"] or "")

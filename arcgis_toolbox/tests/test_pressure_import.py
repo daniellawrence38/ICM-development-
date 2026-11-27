@@ -365,3 +365,29 @@ def test_wet_well_stale_ww_removed_on_reimport(world):
     run(a, lyr, gp)                                          # default 1 m: the stale WW_ node is cleaned up
     assert q(gp, "select count(*) from wwn_nodes where node_id='WW_S0037310'") == [(0,)]
     assert q(gp, "select wet_well_node_id from wwn_pump_stations where ps_id='S0037310'") == [("OUT1",)]
+
+
+def test_overflow_marker_matches_importer():
+    assert pi.OVERFLOW_NOTE == pi.importer().OVERFLOW_NOTE
+
+
+def _ovf_build(notes):
+    """Station at (0, 0); inlet IN (0.3, 0) fed by UP, with one pipe leaving it towards tank chamber TK."""
+    nodes = [{"node_id": k, "node_type": "ac", "xy": xy, "notes": None}
+             for k, xy in (("IN", (0.3, 0.0)), ("UP", (0.0, 50.0)), ("TK", (30.0, 0.0)))]
+    ends = [("UP", "IN", None), ("IN", "TK", notes)]
+    return pi.build_pressure([{"ps_id": "P", "ps_status": "A", GEOM: (0.0, 0.0)}], [], nodes, ends,
+                             pi.Options(wet_well_m=1.0), {})
+
+
+def test_inlet_with_only_overflow_pipe_leaving_is_the_wet_well():
+    res = _ovf_build("overflow pipe (MAINTYPE OS)")
+    assert res.pump_stations[0]["wet_well_node_id"] == "IN" and res.retype_nodes == {"IN": "wet_well"}
+    assert not any(n["node_id"] == "WW_P" for n in res.new_nodes)
+    assert not any("wet well" in w for w in res.warnings)
+
+
+def test_inlet_with_ordinary_sewer_leaving_is_not_terminal():
+    res = _ovf_build("PURPOSE=L")
+    assert res.pump_stations[0]["wet_well_node_id"] == "WW_P"
+    assert any(n["node_id"] == "WW_P" for n in res.new_nodes) and res.retype_nodes == {}

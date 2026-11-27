@@ -242,6 +242,13 @@ def build(gpkg_path: str, gravity_only: bool = False) -> dict:
         if pts and (not st["wet_well_node_id"] or st["wet_well_node_id"] not in on_grav):
             ps_unmatched.append((st["ps_id"], pts[0]))
     if gravity_only:
+        ovf = [c["conduit_id"] for c in conduits if "overflow pipe" in (c["notes"] or "")]
+        if ovf:
+            conduits = [c for c in conduits if "overflow pipe" not in (c["notes"] or "")]
+            for cid in ovf:
+                lines.pop(cid, None)
+            warnings.append(f"Gravity only: {len(ovf)} overflow pipe(s) not exported (they carry flow only when "
+                            "pumps fail): " + _ids(ovf))
         on_sewer = {c["us_node_id"] for c in conduits} | {c["ds_node_id"] for c in conduits}
         off = [n["node_id"] for n in nodes if n["node_id"] not in on_sewer]
         nodes = [n for n in nodes if n["node_id"] in on_sewer]

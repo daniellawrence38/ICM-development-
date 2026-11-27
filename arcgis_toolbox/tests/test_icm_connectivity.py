@@ -261,3 +261,30 @@ def test_no_stations_leaves_output_unchanged(demo_gpkg):
     _edit(demo_gpkg, "DROP TABLE wwn_pump_stations")
     cn = icm_export.build(demo_gpkg)["connectivity"]
     assert not any("pump station" in x for x in cn["lines"])
+
+
+def _overflow_tank(gp):
+    """_pumped model plus an overflow pipe POV leaving the wet well WW towards a tank chamber TK."""
+    _pumped(gp)
+    _edit(gp, _node_copy("TK", "OUT1"), _conduit("POV", "WW", "TK"),
+          "UPDATE wwn_conduits SET notes='overflow pipe (MAINTYPE OS)' WHERE conduit_id='POV'")
+
+
+def test_gravity_only_leaves_out_overflow_pipes_and_tank_side_node(demo_gpkg):
+    _overflow_tank(demo_gpkg)
+    d = icm_export.build(demo_gpkg, gravity_only=True)
+    nodes, links = _by(d["nodes"], "node_id"), _by(d["conduits"], "wwn_conduit_id")
+    assert "POV" not in links and "TK" not in nodes and len(d["conduits"]) == 12
+    assert nodes["WW"]["node_type"] == "Outfall" and nodes["WW"]["wwn_outfall_reason"] == \
+        "wet well (gravity only export)"
+    cn = d["connectivity"]
+    assert cn["sewers_ok"] == cn["sewers"] == 12 and cn["dead_ends"] == [] and cn["isolated"] == []
+    w = " | ".join(d["warnings"])
+    assert "Gravity only: 1 overflow pipe(s) not exported (they carry flow only when pumps fail): POV" in w
+
+
+def test_full_export_keeps_overflow_pipes(demo_gpkg):
+    _overflow_tank(demo_gpkg)
+    d = icm_export.build(demo_gpkg)
+    assert "POV" in _by(d["conduits"], "wwn_conduit_id") and "TK" in _by(d["nodes"], "node_id")
+    assert not any("overflow pipe(s) not exported" in w for w in d["warnings"])

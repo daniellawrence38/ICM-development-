@@ -213,6 +213,10 @@ class ImportReport:
             conv = (" - the source is drawn downstream -> upstream; this is a convention, not an error"
                     if tot and n / tot >= 0.8 else "; each reversed sewer is noted in its notes field")
             lines.append(f"Reversed digitising direction of {n}{share} sewer(s){conv}.")
+        if c.get("overflow_pipes"):
+            lines.append(f"{c['overflow_pipes']} overflow pipe(s) (MAINTYPE O / OS) marked: they carry flow only when "
+                         "pumps fail; a pump station inlet with only overflow pipes leaving it is still matched as "
+                         "its wet well, and Export To ICM 'Gravity sewers only' leaves them out.")
         lines.extend(self.diagnostics)
         if c.get("surface_interpolated"):
             lines.append(f"Interpolated surface level at {c['surface_interpolated']} junction/tee node(s) between "
@@ -288,6 +292,9 @@ def to_ref_id(v) -> str:
     """Identifier as :func:`to_id`, but blank and all-zero values ('0', '0.0', '0000') mean "no id"."""
     s = to_id(v)
     return "" if s and re.fullmatch(r"0+(\.0*)?", s) else s
+
+
+OVERFLOW_NOTE = "overflow pipe"     # conduit notes marker; Import Pressure Data and Export To ICM look for it
 
 
 def code_of(v) -> str:
@@ -488,6 +495,7 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
     std = sorted(int(x) for x in cfg.get("standard_dn", {}).get("list", [150]))
     codes = cfg.get("codes", {})
     assumed = cfg.get("assumed", {})
+    overflow_codes = {str(x).strip().upper() for x in cfg.get("overflow", {}).get("maintype_codes", ["O", "OS"])}
     rep = ImportReport()
     tol = float(opt.snap_tolerance_m)
 
@@ -1265,6 +1273,10 @@ def build_model(access_chambers: Iterable[dict], connection_points: Iterable[dic
         if not blank(plan):
             extra.append(f"PLANSET={str(plan).strip()}")
         notes = extra + notes
+        ov = code_of(get(row, "sewer_type"))
+        if ov and ov in overflow_codes:
+            notes.append(f"{OVERFLOW_NOTE} (MAINTYPE {ov})")
+            rep.count("overflow_pipes")
 
         if sewer_type == "io":
             cp_has_io.update(cp_by_node[n] for n in (us, ds) if n in cp_by_node)

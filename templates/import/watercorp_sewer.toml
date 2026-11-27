@@ -83,6 +83,9 @@ E = "is"                        # E- inspection shaft sewer: no upstream access 
 IO = "io"
 IS = "is"
 
+[overflow]
+maintype_codes = ["O", "OS"]    # MAINTYPE codes of emergency overflow pipes (flow only when pumps fail)
+
 # Codes whose mapping is an assumption: no per-feature warning, one "assumed" line in the summary.
 [assumed.sewer_type]
 
