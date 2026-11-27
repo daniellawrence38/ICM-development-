@@ -610,3 +610,27 @@ Next (one step at a time): user installs the update, re-runs Import Network Data
 nodes), Export To ICM gravity only, pastes the Connectivity block. If the Arthur Street main is still stuck, ask for
 the three conduits' us / ds node and inverts there. Then J114 (self-loop) if it survives without IS sewers.
 
+### Agent work merged (2026-11-27; user: "Project manager and hand off tasks to agents where possible")
+
+Opus orchestrates; Sonnet / Haiku agents in git worktrees (`.claude/worktrees/`, excluded locally via
+`.git/info/exclude`), one file set each; Opus reviews, re-runs the gate and cherry-picks. Agent worktrees start
+from `main`, NOT the session branch: the brief must start with `git merge --ff-only <session branch>`.
+- **Pump station hint** (9d29f3e): dead ends within 50 m (`PS_NEAR_M`) of a pump station whose wet well is not on a
+  gravity sewer get "pump station X at d m (likely its inlet sewer: re-import with a wet well distance above this)";
+  CSV columns `nearest_ps`, `nearest_ps_m`; summary line.
+- **Connectivity report only** (a7f2c4e): Export To ICM option `report_only`: build + connectivity CSV + messages
+  only, no arcpy / gdb / ICM CSV / notes (seconds instead of ~6 min); shared message helper
+  `_export_warnings_and_connectivity`.
+- **Importer self-loops** (3bff5c7): an unsplit sewer whose two ends land on one node (shorter than the snap
+  tolerance between free ends -> J114 case; both ends at one chamber; short branch with both ends teed at one point)
+  is dropped before topology (`SELF_LOOP` warning, `self_loops_dropped`, summary line); an orphaned generated junction
+  is removed, a junction left with one end becomes a dangling end.
+- **Importer direction bug** (3bff5c7 + 84462f1; the E3026 pattern): a branch carrying the SAME US/DS manhole ids as
+  the main was followed by the id BFS as the main's continuation (branch oriented away from the main). Now at a node
+  where several same-group sewers meet the BFS follows the piece of the same GIS feature, else the single candidate
+  whose far end is attached, else none; `neighbour_hints` casts "flows out of an inflow-only node" only when the sewer
+  is the only unoriented one there. Verified independent of read order: all 720 orderings x 8 variants correct
+  (before: every same-id ordering wrong). Tests: shared core 214 + 1 skipped, toolbox 337.
+User still to do: install the update from the branch tip, re-run Import Network Data (new GeoPackage, IS unticked),
+Export To ICM with Gravity sewers only + Connectivity report only, paste the Connectivity block.
+
